@@ -1,0 +1,453 @@
+{
+  "entities": {
+    "user": {
+      "title": "User",
+      "description": "System users with hierarchical roles",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "displayName": { "type": "string" },
+        "role": { "type": "string", "description": "Role ID or system role name" },
+        "commission": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "email", "role"]
+    },
+    "role": {
+      "title": "Role",
+      "description": "Custom system roles",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "permissions": { "type": "array", "items": { "type": "string" } },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "permissions"]
+    },
+    "permission": {
+      "title": "Permission",
+      "description": "System permissions",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "description": { "type": "string" }
+      },
+      "required": ["name"]
+    },
+    "policy": {
+      "title": "Policy",
+      "description": "Insurance policy definitions",
+      "type": "object",
+      "properties": {
+        "plan": { "type": "string", "enum": ["U6", "Student", "Traveler", "O70", "Xtreme"] },
+        "name": { "type": "string" },
+        "deductible": { "type": "boolean" },
+        "region": { "type": "integer", "enum": [1, 2] },
+        "costPerDay": { "type": "number" },
+        "pricePerDay": { "type": "number" },
+        "NombrePoliza": { "type": "string" },
+        "CodigoPoliza": { "type": "string" },
+        "CantidadDeducible": { "type": "number" },
+        "Insurance_Type": { "type": "string" },
+        "E_Mail_Address": { "type": "string", "format": "email" },
+        "CodigoExportacion": { "type": "string" },
+        "SponsorCode": { "type": "string" }
+      },
+      "required": ["plan", "name", "region", "costPerDay", "pricePerDay"]
+    },
+    "insurance": {
+      "title": "Insurance",
+      "description": "Insurance sales/requests",
+      "type": "object",
+      "properties": {
+        "clientType": { "type": "string", "enum": ["Agent", "University", "Individual"] },
+        "agentId": { "type": "string", "description": "UID of the agent if B2B2C" },
+        "firstName": { "type": "string" },
+        "lastName": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "birthDate": { "type": "string", "format": "date" },
+        "age": { "type": "integer" },
+        "originCountry": { "type": "string" },
+        "destinationCountry": { "type": "string" },
+        "city": { "type": "string" },
+        "policyId": { "type": "string" },
+        "plan": { "type": "string" },
+        "isExtremeSports": { "type": "boolean" },
+        "actionType": { "type": "string", "description": "Action code from actionTypes catalog" },
+        "startDate": { "type": "string", "format": "date" },
+        "endDate": { "type": "string", "format": "date" },
+        "days": { "type": "integer" },
+        "totalPrice": { "type": "number" },
+        "totalCost": { "type": "number" },
+        "status": { "type": "string", "enum": ["pending", "paid", "cancelled"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["clientType", "firstName", "lastName", "email", "startDate", "endDate", "totalPrice"]
+    },
+    "payment": {
+      "title": "Payment",
+      "description": "Payments tracking",
+      "type": "object",
+      "properties": {
+        "insuranceId": { "type": "string" },
+        "amount": { "type": "number" },
+        "type": { "type": "string", "enum": ["client_payment", "provider_payment", "agent_commission"] },
+        "status": { "type": "string", "enum": ["pending", "completed"] },
+        "date": { "type": "string", "format": "date-time" },
+        "receiptNumber": { "type": "string" }
+      },
+      "required": ["insuranceId", "amount", "type", "status"]
+    },
+    "country": {
+      "title": "Country",
+      "description": "Countries and regions",
+      "type": "object",
+      "properties": {
+        "code": { "type": "string" },
+        "name": { "type": "string" },
+        "region": { "type": "integer", "enum": [1, 2] },
+        "language": { "type": "string" }
+      },
+      "required": ["code", "name", "region"]
+    },
+    "client": {
+      "title": "Client",
+      "description": "Insurance clients (Agents, Corporate, Individual)",
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["Agent", "Corporate", "Individual"] },
+        "email": { "type": "string", "format": "email" },
+        "phone": { "type": "string" },
+        "address": { "type": "string" },
+        "city": { "type": "string" },
+        "state": { "type": "string" },
+        "zip": { "type": "string" },
+        "country": { "type": "string" },
+        "rfc": { "type": "string" },
+        "legalName": { "type": "string" },
+        "commercialName": { "type": "string" },
+        "mainContact": { "type": "string" },
+        "firstName": { "type": "string" },
+        "lastName": { "type": "string" },
+        "notes": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["type", "email", "phone", "rfc"]
+    },
+    "exchangeRate": {
+      "title": "Exchange Rate",
+      "description": "Daily USD to MXP exchange rates",
+      "type": "object",
+      "properties": {
+        "rate": { "type": "number" },
+        "date": { "type": "string", "format": "date" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["rate", "date", "createdAt"]
+    },
+    "actionType": {
+      "title": "Action Type",
+      "description": "Catalog of action types (NEW, COR, CAN, etc.)",
+      "type": "object",
+      "properties": {
+        "action": { "type": "string" },
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "status": { "type": "string", "enum": ["active", "inactive"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["action", "name", "status"]
+    },
+    "category": {
+      "title": "Category",
+      "description": "General categories for catalogs",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "description": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name"]
+    },
+    "subcategory": {
+      "title": "Subcategory",
+      "description": "Subcategories linked to a category",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "categoryId": { "type": "string" },
+        "description": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "categoryId"]
+    },
+    "statementUpload": {
+      "title": "Statement Upload",
+      "description": "History of uploaded bank statements",
+      "type": "object",
+      "properties": {
+        "fileName": { "type": "string" },
+        "uploadDate": { "type": "string", "format": "date-time" },
+        "totalIncomes": { "type": "number" },
+        "totalExpenses": { "type": "number" },
+        "status": { "type": "string", "enum": ["pending", "processed", "reconciled"] },
+        "userId": { "type": "string" }
+      },
+      "required": ["fileName", "uploadDate", "status", "userId"]
+    },
+    "statementRecord": {
+      "title": "Statement Record",
+      "description": "Parsed transaction from a bank statement",
+      "type": "object",
+      "properties": {
+        "uploadId": { "type": "string" },
+        "date": { "type": "string", "format": "date" },
+        "description": { "type": "string" },
+        "amount": { "type": "number" },
+        "type": { "type": "string", "enum": ["income", "expense"] },
+        "categoryId": { "type": "string" },
+        "subcategoryId": { "type": "string" },
+        "isClientIncome": { "type": "boolean" },
+        "isProviderExpense": { "type": "boolean" },
+        "reconciled": { "type": "boolean" },
+        "reconciledAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uploadId", "date", "description", "amount", "type", "reconciled"]
+    },
+    "provider": {
+      "title": "Provider",
+      "description": "Service providers and insurance carriers",
+      "type": "object",
+      "properties": {
+        "legalName": { "type": "string" },
+        "commercialName": { "type": "string" },
+        "address": { "type": "string" },
+        "city": { "type": "string" },
+        "state": { "type": "string" },
+        "zip": { "type": "string" },
+        "country": { "type": "string" },
+        "rfc": { "type": "string" },
+        "mainContact": { "type": "string" },
+        "phone": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "documentUrl": { "type": "string", "format": "uri" },
+        "categoryId": { "type": "string" },
+        "subcategoryId": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["legalName", "commercialName", "rfc", "email", "categoryId"]
+    },
+    "task": {
+      "title": "Task",
+      "description": "System tasks and agenda items",
+      "type": "object",
+      "properties": {
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "dueDate": { "type": "string", "format": "date-time" },
+        "status": { "type": "string", "enum": ["pending", "completed"] },
+        "priority": { "type": "string", "enum": ["low", "medium", "high"] },
+        "assignedTo": { "type": "string" },
+        "createdBy": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["title", "status", "assignedTo", "createdBy"]
+    },
+    "claim": {
+      "title": "Claim",
+      "description": "Insurance claim records",
+      "type": "object",
+      "properties": {
+        "date": { "type": "string", "format": "date" },
+        "insuranceId": { "type": "string" },
+        "description": { "type": "string" },
+        "documents": { 
+          "type": "array", 
+          "items": { 
+            "type": "object",
+            "properties": {
+              "id": { "type": "string" },
+              "name": { "type": "string" },
+              "url": { "type": "string" },
+              "description": { "type": "string" },
+              "date": { "type": "string" }
+            }
+          } 
+        },
+        "sentToInsurerDate": { "type": "string", "format": "date" },
+        "insurerResponse": { "type": "string" },
+        "isClosed": { "type": "boolean" },
+        "closedAt": { "type": "string", "format": "date-time" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" },
+        "createdBy": { "type": "string" }
+      },
+      "required": ["date", "insuranceId", "description", "isClosed"]
+    },
+    "claimActivity": {
+      "title": "Claim Activity",
+      "description": "Logs of interactions for a claim",
+      "type": "object",
+      "properties": {
+        "claimId": { "type": "string" },
+        "type": { "type": "string", "enum": ["automatic", "call", "zoom", "email", "comment", "other"] },
+        "description": { "type": "string" },
+        "date": { "type": "string", "format": "date-time" },
+        "createdBy": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["claimId", "type", "description", "date"]
+    },
+    "paymentMethod": {
+      "title": "Payment Method",
+      "description": "Catalog of available payment methods.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "status": { "type": "string", "enum": ["active", "inactive"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["name", "status"]
+    },
+    "notificationLog": {
+      "title": "Notification Log",
+      "description": "Log of monthly reports and email sends for auditing",
+      "type": "object",
+      "properties": {
+        "recipient": { "type": "string", "description": "Email address of the recipient" },
+        "subject": { "type": "string", "description": "Subject of the email" },
+        "status": { "type": "string", "enum": ["success", "failed"], "description": "Status of the send operation" },
+        "errorMessage": { "type": "string", "description": "Failure error message if any" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Time of the send log" },
+        "triggerType": { "type": "string", "enum": ["monthly_report", "test_report", "birthday"], "description": "Type of notification triggered" },
+        "sentBy": { "type": "string", "description": "User email or automated system name that sent the mail" }
+      },
+      "required": ["recipient", "subject", "status", "createdAt", "triggerType"]
+    },
+    "historicalRecord": {
+      "title": "Historical Record",
+      "description": "Historical insurance records imported directly by admin/agents",
+      "type": "object",
+      "properties": {
+        "tipoCliente": { "type": "string" },
+        "cliente": { "type": "string" },
+        "agente": { "type": "string" },
+        "fechaAlta": { "type": "string" },
+        "transactionType": { "type": "string" },
+        "firstName": { "type": "string" },
+        "lastName": { "type": "string" },
+        "birthDate": { "type": "string" },
+        "edad": { "type": "integer" },
+        "gender": { "type": "string" },
+        "email": { "type": "string" },
+        "tipoPoliza": { "type": "string" },
+        "tipoCobertura": { "type": "string" },
+        "origen": { "type": "string" },
+        "destino": { "type": "string" },
+        "ciudad": { "type": "string" },
+        "startDate": { "type": "string" },
+        "endDate": { "type": "string" },
+        "comentarios": { "type": "string" },
+        "cantidadAPagar": { "type": "number" },
+        "cargoAdministrativo": { "type": "number" },
+        "precioPublicoFinalMN": { "type": "number" },
+        "precioPublicoFinalUSD": { "type": "number" },
+        "fechaPagoSetmex": { "type": "string" },
+        "formadePago": { "type": "string" },
+        "noRecibo": { "type": "string" },
+        "costoFinalUSD": { "type": "number" },
+        "fechaInvoice": { "type": "string" },
+        "invoice": { "type": "string" },
+        "comisionUSD": { "type": "number" },
+        "comisionFinalMXP": { "type": "number" },
+        "comisionFinalAPagar": { "type": "number" },
+        "comisionPagada": { "type": "string" },
+        "comisionFechaPago": { "type": "string" },
+        "comisionFormaPago": { "type": "string" },
+        "comisionComentario": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["firstName", "lastName", "email"]
+    },
+    "caremedInvoice": {
+      "title": "CareMed Invoice",
+      "description": "Invoice documents or metadata uploaded and linked to a CareMed export batch",
+      "type": "object",
+      "properties": {
+        "exportDate": { "type": "string" },
+        "invoiceNumber": { "type": "string" },
+        "amount": { "type": "number" },
+        "fileName": { "type": "string" },
+        "fileSize": { "type": "integer" },
+        "fileType": { "type": "string" },
+        "fileData": { "type": "string" },
+        "uploadedAt": { "type": "string", "format": "date-time" },
+        "notes": { "type": "string" }
+      },
+      "required": ["exportDate", "invoiceNumber", "amount"]
+    },
+    "quote": {
+      "title": "Quote",
+      "description": "Generated and sent insurance quote records for potential clients",
+      "type": "object",
+      "properties": {
+        "firstName": { "type": "string" },
+        "lastName": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "phone": { "type": "string" },
+        "birthDate": { "type": "string", "format": "date" },
+        "age": { "type": "integer" },
+        "originCountry": { "type": "string" },
+        "destinationCountry": { "type": "string" },
+        "startDate": { "type": "string", "format": "date" },
+        "endDate": { "type": "string", "format": "date" },
+        "days": { "type": "integer" },
+        "notes": { "type": "string" },
+        "discountType": { "type": "string", "enum": ["percent", "flat"] },
+        "discountValue": { "type": "number" },
+        "discountAmount": { "type": "number" },
+        "subtotal": { "type": "number" },
+        "grandTotal": { "type": "number" },
+        "agentId": { "type": "string" },
+        "agentName": { "type": "string" },
+        "selectedPolicies": { "type": "array" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "status": { "type": "string", "enum": ["created", "downloaded", "sent"] }
+      },
+      "required": ["firstName", "email", "startDate", "endDate", "grandTotal", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{uid}": { "schema": "user", "description": "User profiles" },
+    "/policies/{policyId}": { "schema": "policy", "description": "Policy definitions" },
+    "/insurances/{insuranceId}": { "schema": "insurance", "description": "Insurance records" },
+    "/payments/{paymentId}": { "schema": "payment", "description": "Payment records" },
+    "/countries/{countryId}": { "schema": "country", "description": "Countries and regions" },
+    "/clients/{clientId}": { "schema": "client", "description": "Client records" },
+    "/roles/{roleId}": { "schema": "role", "description": "Custom roles" },
+    "/permissions/{permissionId}": { "schema": "permission", "description": "System permissions" },
+    "/exchangeRates/{rateId}": { "schema": "exchangeRate", "description": "Daily exchange rates" },
+    "/settings/company": { "schema": "object", "description": "Global company information" },
+    "/settings/woocommerce": { "schema": "object", "description": "WooCommerce REST API settings and key mappings" },
+    "/settings/whatsapp": { "schema": "object", "description": "WhatsApp Business Cloud API settings and message templates" },
+    "/documents/{docId}": { "schema": "object", "description": "System documents and templates" },
+    "/actionTypes/{typeId}": { "schema": "actionType", "description": "Action types catalog" },
+    "/categories/{categoryId}": { "schema": "category", "description": "Categories catalog" },
+    "/subcategories/{subcategoryId}": { "schema": "subcategory", "description": "Subcategories catalog" },
+    "/statementUploads/{uploadId}": { "schema": "statementUpload", "description": "Bank statement uploads history" },
+    "/statementRecords/{recordId}": { "schema": "statementRecord", "description": "Individual transactions from bank statements" },
+    "/providers/{providerId}": { "schema": "provider", "description": "Provider records" },
+    "/tasks/{taskId}": { "schema": "task", "description": "Tasks and agenda items" },
+    "/claims/{claimId}": { "schema": "claim", "description": "Insurance claim records" },
+    "/claimActivities/{activityId}": { "schema": "claimActivity", "description": "Claim activity logs" },
+    "/paymentMethods/{methodId}": { "schema": "paymentMethod", "description": "Payment methods catalog" },
+    "/notificationLogs/{logId}": { "schema": "notificationLog", "description": "Audit trail of sent notification messages and reports" },
+    "/historicalRecords/{recordId}": { "schema": "historicalRecord", "description": "Historical records database" },
+    "/caremedInvoices/{invoiceId}": { "schema": "caremedInvoice", "description": "Invoices attached to CareMed export sessions" },
+    "/quotes/{quoteId}": { "schema": "quote", "description": "Stored and sent insurance quotes history" }
+  }
+}

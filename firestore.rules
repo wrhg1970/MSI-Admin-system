@@ -1,0 +1,175 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default catch-all
+    match /{document=**} { allow read, write: if false; }
+
+    // ===============================================================
+    // Global Helpers
+    // ===============================================================
+    function isAuthenticated() { return request.auth != null; }
+    function isOwner(userId) { return isAuthenticated() && request.auth.uid == userId; }
+    function authEmail() {
+      return (request.auth != null && 'email' in request.auth.token && request.auth.token.email != null) ? request.auth.token.email : '';
+    }
+    function isVerified() {
+      return (request.auth != null && 'email_verified' in request.auth.token) && request.auth.token.email_verified == true;
+    }
+    
+    function isAdmin() {
+      return isAuthenticated() && (
+        (authEmail().lower() == "ventas@misegurointernacional.com") ||
+        (authEmail().lower() == "wrhg1970@gmail.com") ||
+        request.auth.uid == "VTuoortBNjVYkwVviYkbSlyUzNS2" ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+         'role' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data &&
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['super_admin', 'director', 'seguros', 'administracion', 'admin', 'agente_ventas', 'agent', 'agente'])
+      );
+    }
+    function isSuperAdmin() {
+      return isAuthenticated() && (
+        (authEmail().lower() == "ventas@misegurointernacional.com") ||
+        (authEmail().lower() == "wrhg1970@gmail.com") ||
+        request.auth.uid == "VTuoortBNjVYkwVviYkbSlyUzNS2" ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+         'role' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data &&
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'super_admin')
+      );
+    }
+    function isValidId(id) { return id is string && id.size() > 0 && id.size() <= 128; }
+    function incoming() { return request.resource.data; }
+    function existing() { return resource.data; }
+
+    // ===============================================================
+    // Claims System
+    // ===============================================================
+
+    match /claims/{claimId} {
+      allow read, create, update: if isAdmin();
+      allow delete: if isSuperAdmin();
+    }
+
+    match /claimActivities/{activityId} {
+      allow read, create, update: if isAdmin();
+      allow delete: if isSuperAdmin();
+    }
+
+    match /insuranceActivities/{activityId} {
+      allow read, create, update: if isAuthenticated();
+      allow delete: if isSuperAdmin();
+    }
+
+    // ===============================================================
+    // User Profiles
+    // ===============================================================
+    
+    match /users/{userId} {
+      allow get: if isAuthenticated() && (isOwner(userId) || isAdmin());
+      allow list: if isAuthenticated(); 
+      allow create: if isAuthenticated() && (isOwner(userId) || isAdmin());
+      allow update: if isAuthenticated() && (isOwner(userId) || isAdmin());
+      allow delete: if isSuperAdmin();
+    }
+
+    match /tasks/{taskId} {
+      allow read: if isAuthenticated() && (
+        isAdmin() || 
+        resource.data.assignedTo == request.auth.uid || 
+        resource.data.assignedTo == authEmail() ||
+        resource.data.createdBy == request.auth.uid
+      );
+      allow create: if isAuthenticated();
+      allow update: if isAuthenticated() && (
+        isAdmin() || 
+        resource.data.assignedTo == request.auth.uid || 
+        resource.data.assignedTo == authEmail() ||
+        resource.data.createdBy == request.auth.uid ||
+        incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt'])
+      );
+      allow delete: if isAuthenticated() && (isAdmin() || resource.data.createdBy == request.auth.uid);
+    }
+
+    match /policies/{policyId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+
+    match /insurances/{insuranceId} {
+      allow read: if true;
+      allow create: if isAuthenticated();
+      allow update: if isAdmin() && (isSuperAdmin() || resource.data.get('closed', false) != true);
+      allow delete: if isSuperAdmin();
+    }
+
+    match /payments/{paymentId} {
+      allow read: if isAdmin();
+      allow create: if isAdmin() && (
+        isSuperAdmin() || 
+        !exists(/databases/$(database)/documents/insurances/$(request.resource.data.insuranceId)) ||
+        get(/databases/$(database)/documents/insurances/$(request.resource.data.insuranceId)).data.get('closed', false) != true
+      );
+      allow update: if isAdmin() && (
+        isSuperAdmin() || 
+        !exists(/databases/$(database)/documents/insurances/$(resource.data.insuranceId)) ||
+        get(/databases/$(database)/documents/insurances/$(resource.data.insuranceId)).data.get('closed', false) != true
+      );
+      allow delete: if isAdmin() && (
+        isSuperAdmin() || 
+        !exists(/databases/$(database)/documents/insurances/$(resource.data.insuranceId)) ||
+        get(/databases/$(database)/documents/insurances/$(resource.data.insuranceId)).data.get('closed', false) != true
+      );
+    }
+
+    match /countries/{countryId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+
+    match /clients/{clientId} {
+      allow read: if isAuthenticated() && (isAdmin() || (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'agent'));
+      allow write: if isAdmin() || (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'agent');
+    }
+
+    match /roles/{roleId} { allow read: if isAuthenticated(); allow write: if isSuperAdmin(); }
+    match /permissions/{permissionId} { allow read: if isAuthenticated(); allow write: if isSuperAdmin(); }
+    match /exchangeRates/{rateId} { allow read: if isAuthenticated(); allow write: if isAdmin(); }
+    match /documents/{docId} { allow read: if isAuthenticated(); allow write: if isAdmin(); }
+    match /settings/backup_schedule { allow read, write: if isAuthenticated(); }
+    match /settings/{settingId} { allow read: if isAuthenticated(); allow write: if isAdmin(); }
+    match /backups/{backupId} { allow read, write: if isAuthenticated(); }
+    match /insuranceTypes/{typeId} { allow read: if isAuthenticated(); allow write: if isAdmin(); }
+    match /actionTypes/{typeId} { allow read: if isAuthenticated(); allow write: if isAdmin(); }
+    match /categories/{categoryId} { allow read: if isAuthenticated(); allow write: if isAdmin(); }
+    match /subcategories/{subcategoryId} { allow read: if isAuthenticated(); allow write: if isAdmin(); }
+    match /paymentMethods/{methodId} { allow read: if isAuthenticated(); allow write: if isAdmin(); }
+    match /insuranceLetters/{letterId} { allow read: if isAuthenticated(); allow write: if isAdmin(); }
+    match /policyLetters/{letterId} { allow read: if isAuthenticated(); allow write: if isAdmin(); }
+    match /statementUploads/{uploadId} { allow read, write: if isAdmin(); }
+    match /statementRecords/{recordId} { allow read, write: if isAdmin(); }
+    match /providers/{providerId} { allow read: if isAuthenticated(); allow write: if isAdmin(); }
+
+    match /bulkImportLogs/{logId} {
+      allow read: if isAuthenticated() && (isAdmin() || resource.data.userId == request.auth.uid);
+      allow create: if isAuthenticated();
+      allow delete: if isAdmin();
+    }
+    match /historicalRecords/{recordId} {
+      allow read, create: if isAuthenticated();
+      allow update: if isAdmin();
+      allow delete: if isSuperAdmin();
+    }
+    match /notificationLogs/{logId} {
+      allow read, write: if isAdmin();
+    }
+    match /caremedInvoices/{invoiceId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+    match /quotes/{quoteId} {
+      allow read, write: if isAuthenticated();
+    }
+    match /test/connection {
+      allow read: if true;
+    }
+  }
+}
