@@ -7,6 +7,7 @@ import {
   Search, 
   ChevronDown, 
   FileText, 
+  FileSpreadsheet,
   ArrowUpRight,
   TrendingUp,
   AlertCircle,
@@ -19,15 +20,102 @@ import {
   ChevronLeft,
   ChevronRight
 } from 'lucide-react';
-import { collection, query, getDocs, where, orderBy, updateDoc, doc } from 'firebase/firestore';
+import { collection, query, getDocs, where, orderBy, updateDoc, doc, getDocsFromServer, getDocsFromCache } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../firebase';
-import { InsuranceRequest, Client, ClientType, UserProfile, CustomRole, Policy, Payment, Category, Subcategory } from '../types';
+import { InsuranceRequest, Client, ClientType, UserProfile, CustomRole, Policy, Payment, Category, Subcategory, ExchangeRate } from '../types';
 import { usePermissions } from '../hooks/usePermissions';
 import { format, parseISO } from 'date-fns';
+import { getNormalizedYYYYMMDD, getPolicyEffectiveCost } from '../lib/policyUtils';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
+import { drawVectorLogo } from '../lib/pdfGenerator';
+import { useCompany } from '../App';
+
+const formatMonthsDays = (days: number): string => {
+  if (!days || days <= 0) return '0 días';
+  if (days < 40) {
+    return `${days} Días`;
+  }
+  const calculatedMonths = Math.floor(days / 30.4);
+  const additionalDays = Math.max(0, days - Math.round(calculatedMonths * 30.4));
+  let billedMonths = calculatedMonths;
+  let billedDays = additionalDays;
+  if (additionalDays > 15) {
+    billedMonths = calculatedMonths + 1;
+    billedDays = 0;
+  }
+  
+  if (billedMonths > 0 && billedDays > 0) {
+    return `${billedMonths} m / ${billedDays} d`;
+  } else if (billedMonths > 0) {
+    return `${billedMonths} m`;
+  } else {
+    return `${days} d`;
+  }
+};
+
+const getRequestDateString = (ins: InsuranceRequest): string => {
+  if (ins.requestDate) return ins.requestDate;
+  if (ins.createdAt) {
+    if (typeof ins.createdAt.toDate === 'function') {
+      return format(ins.createdAt.toDate(), 'yyyy-MM-dd');
+    } else {
+      try {
+        return format(new Date(ins.createdAt), 'yyyy-MM-dd');
+      } catch (_) {
+        return '';
+      }
+    }
+  }
+  return '';
+};
+
+const getExchangeRateForRequestDate = (ins: InsuranceRequest, rates: ExchangeRate[]): number => {
+  const reqDate = getRequestDateString(ins);
+  if (!reqDate) {
+    return ins.exchangeRate || 17.55;
+  }
+  
+  // Find exchange rate for exact date
+  const found = rates.find(r => r.date === reqDate);
+  if (found) {
+    return found.rate;
+  }
+  
+  // Find the closest rate on or before the requestDate
+  const sorted = [...rates].sort((a, b) => b.date.localeCompare(a.date));
+  const beforeOrOn = sorted.find(r => r.date <= reqDate);
+  if (beforeOrOn) {
+    return beforeOrOn.rate;
+  }
+  
+  if (sorted.length > 0) {
+    return sorted[0].rate;
+  }
+  
+  return ins.exchangeRate || 17.55;
+};
+
+const sortInsurances = (list: InsuranceRequest[], sortBy: 'requestDate' | 'name' | 'startDate'): InsuranceRequest[] => {
+  return [...list].sort((a, b) => {
+    if (sortBy === 'requestDate') {
+      const dateA = getRequestDateString(a);
+      const dateB = getRequestDateString(b);
+      return dateA.localeCompare(dateB);
+    } else if (sortBy === 'startDate') {
+      const dateA = a.startDate || '';
+      const dateB = b.startDate || '';
+      return dateA.localeCompare(dateB);
+    } else { // 'name'
+      const nameA = `${a.firstName || ''} ${a.lastName || ''}`.trim().toLowerCase();
+      const nameB = `${b.firstName || ''} ${b.lastName || ''}`.trim().toLowerCase();
+      return nameA.localeCompare(nameB, 'es', { sensitivity: 'base' });
+    }
+  });
+};
 
 export default function ReportsManager({ profile, rolePermissions }: { profile: UserProfile | null, rolePermissions: CustomRole | null }) {
+  const { settings: companySettings } = useCompany();
   const { hasPermission } = usePermissions(profile, rolePermissions);
   const [insurances, setInsurances] = useState<InsuranceRequest[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
@@ -35,17 +123,20 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
   const [payments, setPayments] = useState<Payment[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [subcategories, setSubcategories] = useState<Subcategory[]>([]);
+  const [exchangeRates, setExchangeRates] = useState<ExchangeRate[]>([]);
   const [loading, setLoading] = useState(true);
   
   // Quick Reports Modal
   const [showReportModal, setShowReportModal] = useState(false);
   const [reportType, setReportType] = useState<'altas' | 'to_collect' | 'to_pay' | 'commissions' | 'income_statement'>('altas');
   const [reportFormat, setReportFormat] = useState<'detailed' | 'consolidated'>('detailed');
+  const [reportGrouping, setReportGrouping] = useState<'all' | 'Agent' | 'Corporate' | 'Individual' | 'policy'>('all');
   const [reportDates, setReportDates] = useState({
     start: format(new Date(), 'yyyy-MM-01'),
     end: format(new Date(), 'yyyy-MM-dd')
   });
   const [reportClientId, setReportClientId] = useState<string>('All');
+  const [reportSortBy, setReportSortBy] = useState<'requestDate' | 'name' | 'startDate'>('requestDate');
   
   // Filters
   const [clientTypeFilter, setClientTypeFilter] = useState<ClientType | 'All'>('All');
@@ -67,25 +158,76 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
     receipt: ''
   });
   const [processing, setProcessing] = useState(false);
+  const [limitToCurrentMonth, setLimitToCurrentMonth] = useState(true);
 
   useEffect(() => {
-    const fetchData = async () => {
+    const startOfCurrentMonth = new Date();
+    startOfCurrentMonth.setDate(1);
+    startOfCurrentMonth.setHours(0, 0, 0, 0);
+
+    if (startDateFilter) {
+      const filterDate = new Date(startDateFilter + 'T00:00:00');
+      if (filterDate < startOfCurrentMonth) {
+        setLimitToCurrentMonth(false);
+      }
+    }
+
+    if (reportDates.start) {
+      const filterDate = new Date(reportDates.start + 'T00:00:00');
+      if (filterDate < startOfCurrentMonth) {
+        setLimitToCurrentMonth(false);
+      }
+    }
+  }, [startDateFilter, reportDates.start]);
+
+  useEffect(() => {
+    const getDocsFromServerOrCache = async (q: any) => {
       try {
-        const [insurancesSnap, clientsSnap, policiesSnap, paymentsSnap, categoriesSnap, subcategoriesSnap] = await Promise.all([
-          getDocs(query(collection(db, 'insurances'), orderBy('createdAt', 'desc'))),
-          getDocs(collection(db, 'clients')),
-          getDocs(collection(db, 'policies')),
-          getDocs(collection(db, 'payments')),
-          getDocs(collection(db, 'categories')),
-          getDocs(collection(db, 'subcategories'))
+        return await getDocsFromServer(q);
+      } catch (error: any) {
+        console.warn('Failed to fetch from server, trying local cache...', error);
+        try {
+          return await getDocsFromCache(q);
+        } catch (cacheError) {
+          throw error; // Rethrow original server error if cache is also empty or fails
+        }
+      }
+    };
+
+    const fetchData = async () => {
+      setLoading(true);
+      try {
+        const startOfCurrentMonth = new Date();
+        startOfCurrentMonth.setDate(1);
+        startOfCurrentMonth.setHours(0, 0, 0, 0);
+
+        const qInsurances = limitToCurrentMonth
+          ? query(collection(db, 'insurances'), where('createdAt', '>=', startOfCurrentMonth), orderBy('createdAt', 'desc'))
+          : query(collection(db, 'insurances'), orderBy('createdAt', 'desc'));
+
+        const qPayments = limitToCurrentMonth
+          ? query(collection(db, 'payments'), where('createdAt', '>=', startOfCurrentMonth))
+          : collection(db, 'payments');
+
+        const qExchangeRates = query(collection(db, 'exchangeRates'), orderBy('date', 'desc'));
+
+        const [insurancesSnap, clientsSnap, policiesSnap, paymentsSnap, categoriesSnap, subcategoriesSnap, exchangeRatesSnap] = await Promise.all([
+          getDocsFromServerOrCache(qInsurances),
+          getDocsFromServerOrCache(collection(db, 'clients')),
+          getDocsFromServerOrCache(collection(db, 'policies')),
+          getDocsFromServerOrCache(qPayments),
+          getDocsFromServerOrCache(collection(db, 'categories')),
+          getDocsFromServerOrCache(collection(db, 'subcategories')),
+          getDocsFromServerOrCache(qExchangeRates)
         ]);
 
-        setInsurances(insurancesSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as InsuranceRequest)));
-        setClients(clientsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Client)));
-        setPolicies(policiesSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Policy)));
-        setPayments(paymentsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Payment)));
-        setCategories(categoriesSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Category)));
-        setSubcategories(subcategoriesSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Subcategory)));
+        setInsurances(insurancesSnap.docs.map(doc => ({ id: doc.id, ...(doc.data() as any) } as InsuranceRequest)));
+        setClients(clientsSnap.docs.map(doc => ({ id: doc.id, ...(doc.data() as any) } as Client)));
+        setPolicies(policiesSnap.docs.map(doc => ({ id: doc.id, ...(doc.data() as any) } as Policy)));
+        setPayments(paymentsSnap.docs.map(doc => ({ id: doc.id, ...(doc.data() as any) } as Payment)));
+        setCategories(categoriesSnap.docs.map(doc => ({ id: doc.id, ...(doc.data() as any) } as Category)));
+        setSubcategories(subcategoriesSnap.docs.map(doc => ({ id: doc.id, ...(doc.data() as any) } as Subcategory)));
+        setExchangeRates(exchangeRatesSnap.docs.map(doc => ({ id: doc.id, ...(doc.data() as any) } as ExchangeRate)));
       } catch (error) {
         handleFirestoreError(error, OperationType.GET, 'reports data');
       } finally {
@@ -94,7 +236,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
     };
 
     fetchData();
-  }, []);
+  }, [limitToCurrentMonth]);
 
   const filteredInsurances = useMemo(() => {
     return insurances.filter(ins => {
@@ -107,7 +249,19 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
       const matchesProviderPayment = providerPaymentStatusFilter === 'All' || 
         (providerPaymentStatusFilter === 'pending' ? !ins.providerPaymentStatus || ins.providerPaymentStatus === 'pending' : ins.providerPaymentStatus === 'paid');
       
-      const insDate = ins.createdAt?.toDate ? ins.createdAt.toDate().toISOString().split('T')[0] : '';
+      const getSafeDateStr = (val: any) => {
+        if (!val) return '';
+        if (typeof val.toDate === 'function') {
+          return val.toDate().toISOString().split('T')[0];
+        }
+        try {
+          const d = new Date(val);
+          return isNaN(d.getTime()) ? '' : d.toISOString().split('T')[0];
+        } catch (_) {
+          return '';
+        }
+      };
+      const insDate = getSafeDateStr(ins.createdAt);
       const matchesStartDate = !startDateFilter || insDate >= startDateFilter;
       const matchesEndDate = !endDateFilter || insDate <= endDateFilter;
 
@@ -128,7 +282,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
         .filter(ins => ins.commissionStatus === 'confirmed')
         .reduce((acc, curr) => acc + (curr.agentCommission || 0), 0),
       pendingPayments: filtered
-        .filter(ins => ins.status === 'pending' || ins.status === 'partially_paid')
+        .filter(ins => ins.status === 'pending')
         .reduce((acc, curr) => acc + ((curr.totalFinal || 0) - (curr.totalPaid || 0)), 0),
       pendingToProvider: filtered
         .filter(ins => ins.status !== 'cancelled')
@@ -189,32 +343,330 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
     document.body.removeChild(link);
   };
 
+  const generateCSVForAltas = () => {
+    const rawFiltered = insurances.filter(ins => {
+      const insDate = getNormalizedYYYYMMDD(ins.requestDate) || getNormalizedYYYYMMDD(ins.createdAt);
+      const matchesDate = insDate >= reportDates.start && insDate <= reportDates.end;
+      const matchesClient = reportClientId === 'All' || ins.clientId === reportClientId;
+      return matchesDate && matchesClient;
+    });
+    const filtered = sortInsurances(rawFiltered, reportSortBy);
+
+    const headers = [
+      'Fecha de solicitud',
+      'Tipo Acción',
+      'Nombre',
+      'Apellido',
+      'Fecha Nac.',
+      'Cód Origen',
+      'Fecha Salida',
+      'Cód Dest.',
+      'Fecha Regreso',
+      'Meses/Días',
+      'Precio USD',
+      'Descuento USD',
+      'Comisión USD',
+      'Precio Total USD'
+    ];
+
+    const rows = filtered.map(ins => [
+      getRequestDateString(ins),
+      ins.actionType || '',
+      ins.firstName || '',
+      ins.lastName || '',
+      ins.birthDate || '',
+      ins.originCountry || '',
+      ins.startDate || '',
+      ins.destinationCountry || '',
+      ins.endDate || '',
+      formatMonthsDays(ins.days || 0),
+      (ins.totalPrice || 0).toFixed(2),
+      (ins.discount || 0).toFixed(2),
+      (ins.agentCommission || 0).toFixed(2),
+      (ins.totalFinal || 0).toFixed(2)
+    ]);
+
+    const csvContent = [headers, ...rows].map(e => e.map(val => `"${String(val).replace(/"/g, '""')}"`).join(",")).join("\n");
+    const blob = new Blob(["\uFEFF" + csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement("a");
+    const url = URL.createObjectURL(blob);
+    link.setAttribute("href", url);
+    link.setAttribute("download", `reporte_altas_${reportDates.start}_a_${reportDates.end}.csv`);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const generateCSVForToCollect = () => {
+    const rawFiltered = insurances.filter(ins => {
+      const insDate = getNormalizedYYYYMMDD(ins.requestDate) || getNormalizedYYYYMMDD(ins.createdAt);
+      const matchesDate = insDate >= reportDates.start && insDate <= reportDates.end;
+      const matchesClient = reportClientId === 'All' || ins.clientId === reportClientId;
+      return matchesDate && matchesClient;
+    });
+    const sorted = sortInsurances(rawFiltered, reportSortBy);
+    const toCollect = sorted.filter(ins => ins.status === 'pending');
+
+    const headers = [
+      'Tipo Acción',
+      'Nombre',
+      'Apellido',
+      'Fecha Nac.',
+      'Cód Origen',
+      'Fecha Salida',
+      'Cód Dest.',
+      'Fecha Regreso',
+      'Meses/Días',
+      'Precio USD',
+      'Descuento USD',
+      'Precio Total USD',
+      'Comisión USD'
+    ];
+
+    const rows = toCollect.map(ins => [
+      ins.actionType || '',
+      ins.firstName || '',
+      ins.lastName || '',
+      ins.birthDate || '',
+      ins.originCountry || '',
+      ins.startDate || '',
+      ins.destinationCountry || '',
+      ins.endDate || '',
+      formatMonthsDays(ins.days || 0),
+      (ins.totalPrice || 0).toFixed(2),
+      (ins.discount || 0).toFixed(2),
+      (ins.totalFinal || 0).toFixed(2),
+      (ins.agentCommission || 0).toFixed(2)
+    ]);
+
+    const csvContent = [headers, ...rows].map(e => e.map(val => `"${String(val).replace(/"/g, '""')}"`).join(",")).join("\n");
+    const blob = new Blob(["\uFEFF" + csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement("a");
+    const url = URL.createObjectURL(blob);
+    link.setAttribute("href", url);
+    link.setAttribute("download", `reporte_seguros_por_cobrar_${reportDates.start}_a_${reportDates.end}.csv`);
+    link.style.visibility = 'hidden';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
   const getFilteredReportData = () => {
-    const filtered = insurances.filter(ins => {
-      const insDate = ins.requestDate || (ins.createdAt?.toDate ? ins.createdAt.toDate().toISOString().split('T')[0] : '');
+    const rawFiltered = insurances.filter(ins => {
+      const getSafeDateStr = (val: any) => {
+        if (!val) return '';
+        if (typeof val.toDate === 'function') {
+          return val.toDate().toISOString().split('T')[0];
+        }
+        try {
+          const d = new Date(val);
+          return isNaN(d.getTime()) ? '' : d.toISOString().split('T')[0];
+        } catch (_) {
+          return '';
+        }
+      };
+      const insDate = getNormalizedYYYYMMDD(ins.requestDate) || getNormalizedYYYYMMDD(ins.createdAt);
       const matchesDate = insDate >= reportDates.start && insDate <= reportDates.end;
       const matchesClient = reportClientId === 'All' || ins.clientId === reportClientId;
       return matchesDate && matchesClient;
     });
 
+    const filtered = sortInsurances(rawFiltered, reportSortBy);
+
     if (reportType === 'altas') {
       const totalSales = filtered.reduce((acc, curr) => acc + (curr.totalFinal || 0), 0);
+      
+      const getClientName = (clientId?: string) => {
+        if (!clientId) return 'Individual/Otros';
+        const c = clients.find(cl => cl.id === clientId);
+        return c ? (c.commercialName || c.legalName || `${c.firstName} ${c.lastName}`) : 'Individual/Otros';
+      };
+
+      let groupedData: {
+        title: string;
+        items: {
+          groupKey: string;
+          groupName: string;
+          count: number;
+          total: number;
+          insurances: InsuranceRequest[];
+        }[];
+      } = { title: '', items: [] };
+
+      if (reportGrouping === 'all') {
+        groupedData.title = 'Por Tipo de Cliente';
+        const types: ClientType[] = ['Agent', 'Corporate', 'Individual'];
+        const labelMap: Record<ClientType, string> = {
+          Agent: 'Agentes',
+          Corporate: 'Corporativos',
+          Individual: 'Individuales'
+        };
+        groupedData.items = types.map(t => {
+          const list = filtered.filter(ins => ins.clientType === t);
+          return {
+            groupKey: t,
+            groupName: labelMap[t] || t,
+            count: list.length,
+            total: list.reduce((sum, i) => sum + (i.totalFinal || 0), 0),
+            insurances: list
+          };
+        });
+      } else if (reportGrouping === 'policy') {
+        groupedData.title = 'Por Tipo de Seguro';
+        const groups: Record<string, InsuranceRequest[]> = {};
+        filtered.forEach(ins => {
+          const key = ins.policyName || ins.policyId || 'Sin Póliza';
+          if (!groups[key]) groups[key] = [];
+          groups[key].push(ins);
+        });
+
+        groupedData.items = Object.entries(groups).map(([policyName, list]) => {
+          return {
+            groupKey: policyName,
+            groupName: policyName,
+            count: list.length,
+            total: list.reduce((sum, i) => sum + (i.totalFinal || 0), 0),
+            insurances: list
+          };
+        }).sort((a, b) => b.total - a.total);
+      } else {
+        const filteredByGroup = filtered.filter(ins => ins.clientType === reportGrouping);
+        groupedData.title = reportGrouping === 'Agent' ? 'Por Agente' : reportGrouping === 'Corporate' ? 'Por Corporativo' : 'Por Individual';
+        
+        const groups: Record<string, InsuranceRequest[]> = {};
+        filteredByGroup.forEach(ins => {
+          const key = ins.clientId || 'Individual/Otros';
+          if (!groups[key]) groups[key] = [];
+          groups[key].push(ins);
+        });
+
+        groupedData.items = Object.entries(groups).map(([clientId, list]) => {
+          const name = clientId === 'Individual/Otros' ? 'Individual/Otros' : getClientName(clientId);
+          return {
+            groupKey: clientId,
+            groupName: name,
+            count: list.length,
+            total: list.reduce((sum, i) => sum + (i.totalFinal || 0), 0),
+            insurances: list
+          };
+        }).sort((a, b) => b.total - a.total);
+      }
+
       return {
         filtered,
         totalSales,
-        count: filtered.length
+        count: filtered.length,
+        groupedData
       };
     } else if (reportType === 'to_collect') {
-      const toCollect = filtered.filter(ins => ins.status === 'pending' || ins.status === 'partially_paid');
+      const toCollect = filtered.filter(ins => ins.status === 'pending');
       const totalSales = toCollect.reduce((acc, curr) => acc + (curr.totalFinal || 0), 0);
       const totalPaid = toCollect.reduce((acc, curr) => acc + (curr.totalPaid || 0), 0);
       const totalPending = totalSales - totalPaid;
+
+      const getClientName = (clientId?: string) => {
+        if (!clientId) return 'Individual/Otros';
+        const c = clients.find(cl => cl.id === clientId);
+        return c ? (c.commercialName || c.legalName || `${c.firstName} ${c.lastName}`) : 'Individual/Otros';
+      };
+
+      let groupedData: {
+        title: string;
+        items: {
+          groupKey: string;
+          groupName: string;
+          count: number;
+          total: number;
+          totalPaid: number;
+          totalPending: number;
+          insurances: InsuranceRequest[];
+        }[];
+      } = { title: '', items: [] };
+
+      if (reportGrouping === 'all') {
+        groupedData.title = 'Por Tipo de Cliente';
+        const types: ClientType[] = ['Agent', 'Corporate', 'Individual'];
+        const labelMap: Record<ClientType, string> = {
+          Agent: 'Agentes',
+          Corporate: 'Corporativos',
+          Individual: 'Individuales'
+        };
+        groupedData.items = types.map(t => {
+          const list = toCollect.filter(ins => ins.clientType === t);
+          const tTotal = list.reduce((sum, i) => sum + (i.totalFinal || 0), 0);
+          const tPaid = list.reduce((sum, i) => sum + (i.totalPaid || 0), 0);
+          return {
+            groupKey: t,
+            groupName: labelMap[t] || t,
+            count: list.length,
+            total: tTotal,
+            totalPaid: tPaid,
+            totalPending: tTotal - tPaid,
+            insurances: list
+          };
+        });
+      } else if (reportGrouping === 'policy') {
+        groupedData.title = 'Por Tipo de Seguro';
+        const groups: Record<string, InsuranceRequest[]> = {};
+        toCollect.forEach(ins => {
+          const key = ins.policyName || ins.policyId || 'Sin Póliza';
+          if (!groups[key]) groups[key] = [];
+          groups[key].push(ins);
+        });
+
+        groupedData.items = Object.entries(groups).map(([policyName, list]) => {
+          const tTotal = list.reduce((sum, i) => sum + (i.totalFinal || 0), 0);
+          const tPaid = list.reduce((sum, i) => sum + (i.totalPaid || 0), 0);
+          return {
+            groupKey: policyName,
+            groupName: policyName,
+            count: list.length,
+            total: tTotal,
+            totalPaid: tPaid,
+            totalPending: tTotal - tPaid,
+            insurances: list
+          };
+        }).sort((a, b) => b.totalPending - a.totalPending);
+      } else {
+        const filteredByGroup = toCollect.filter(ins => ins.clientType === reportGrouping);
+        groupedData.title = reportGrouping === 'Agent' ? 'Por Agente' : reportGrouping === 'Corporate' ? 'Por Corporativo' : 'Por Individual';
+        
+        const groups: Record<string, InsuranceRequest[]> = {};
+        filteredByGroup.forEach(ins => {
+          const key = ins.clientId || 'Individual/Otros';
+          if (!groups[key]) groups[key] = [];
+          groups[key].push(ins);
+        });
+
+        groupedData.items = Object.entries(groups).map(([clientId, list]) => {
+          const name = clientId === 'Individual/Otros' ? 'Individual/Otros' : getClientName(clientId);
+          const tTotal = list.reduce((sum, i) => sum + (i.totalFinal || 0), 0);
+          const tPaid = list.reduce((sum, i) => sum + (i.totalPaid || 0), 0);
+          return {
+            groupKey: clientId,
+            groupName: name,
+            count: list.length,
+            total: tTotal,
+            totalPaid: tPaid,
+            totalPending: tTotal - tPaid,
+            insurances: list
+          };
+        }).sort((a, b) => b.totalPending - a.totalPending);
+      }
+
+      const totalDiscounts = toCollect.reduce((acc, curr) => acc + (curr.discount || 0), 0);
+      const totalCommissions = toCollect.reduce((acc, curr) => acc + (curr.agentCommission || 0), 0);
+
       return {
         filtered: toCollect,
         totalSales,
         totalPaid,
         totalPending,
-        count: toCollect.length
+        totalDiscounts,
+        totalCommissions,
+        count: toCollect.length,
+        groupedData
       };
     } else if (reportType === 'to_pay') {
       const toPay = filtered.filter(ins => ins.status === 'paid' && (!ins.providerPaymentStatus || ins.providerPaymentStatus === 'pending'));
@@ -228,10 +680,12 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
       const pending = filtered.filter(ins => ins.commissionStatus === 'confirmed');
       const totalSales = pending.reduce((acc, curr) => acc + (curr.totalFinal || 0), 0);
       const totalCommissions = pending.reduce((acc, curr) => acc + (curr.agentCommission || 0), 0);
+      const totalDiscounts = pending.reduce((acc, curr) => acc + (curr.discount || 0), 0);
       return {
         filtered: pending,
         totalSales,
         totalCommissions,
+        totalDiscounts,
         count: pending.length
       };
     } else if (reportType === 'income_statement') {
@@ -244,7 +698,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
       };
 
       const rangeInsurances = insurances.filter(ins => {
-        const insDate = ins.requestDate || (ins.createdAt?.toDate ? ins.createdAt.toDate().toISOString().split('T')[0] : '');
+        const insDate = getNormalizedYYYYMMDD(ins.requestDate) || getNormalizedYYYYMMDD(ins.createdAt);
         return insDate >= reportDates.start && insDate <= reportDates.end;
       });
 
@@ -317,187 +771,471 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
     return { filtered: [] };
   };
 
-  const generatePDF = () => {
-    const doc = new jsPDF();
-    const filtered = insurances.filter(ins => {
-      const insDate = ins.requestDate || (ins.createdAt?.toDate ? ins.createdAt.toDate().toISOString().split('T')[0] : '');
+  const generatePDF = async () => {
+    const isDetailed = (reportType === 'altas' || reportType === 'to_collect') && reportFormat === 'detailed';
+    const doc = new jsPDF({
+      orientation: isDetailed ? 'landscape' : 'portrait'
+    });
+
+    // Load active company logo image
+    let loadedLogo: { url: string; width: number; height: number } | null = null;
+    const logoUrl = companySettings?.logoUrl;
+    if (logoUrl) {
+      try {
+        const img = new Image();
+        img.crossOrigin = "anonymous";
+        img.src = logoUrl;
+        await new Promise((resolve) => {
+          img.onload = () => resolve(null);
+          img.onerror = (e) => {
+            console.error("Image load error in reports logo loader:", e);
+            resolve(null);
+          };
+          if (img.complete) {
+            resolve(null);
+          }
+        });
+
+        if (img.width > 0 && img.height > 0) {
+          const maxDim = 500;
+          let w = img.width;
+          let h = img.height;
+          if (w > maxDim || h > maxDim) {
+            if (w > h) {
+              h = Math.round((h * maxDim) / w);
+              w = maxDim;
+            } else {
+              w = Math.round((w * maxDim) / h);
+              h = maxDim;
+            }
+          }
+
+          const canvas = document.createElement('canvas');
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.drawImage(img, 0, 0, w, h);
+            loadedLogo = {
+              url: canvas.toDataURL('image/png'),
+              width: w,
+              height: h
+            };
+          }
+        }
+      } catch (error) {
+        console.error('Error loading logo for reports:', error);
+      }
+    }
+
+    const drawTopRightLogo = (pdfDoc: jsPDF, isLandscape: boolean = false) => {
+      const pageMetrics = pdfDoc.internal.pageSize;
+      const pageWidth = pageMetrics.width || (pdfDoc.internal.pageSize.getWidth ? pdfDoc.internal.pageSize.getWidth() : (isLandscape ? 297 : 210));
+      const marginFromRight = 14;
+
+      if (loadedLogo) {
+        const ratio = loadedLogo.width / loadedLogo.height;
+        const maxHeight = 14;
+        const maxWidth = 45;
+        let renderWidth = maxHeight * ratio;
+        let renderHeight = maxHeight;
+
+        if (renderWidth > maxWidth) {
+          renderWidth = maxWidth;
+          renderHeight = maxWidth / ratio;
+        }
+
+        const x = pageWidth - marginFromRight - renderWidth;
+        const y = 10;
+        pdfDoc.addImage(loadedLogo.url, 'PNG', x, y, renderWidth, renderHeight);
+      } else {
+        const scale = 0.8;
+        const x = pageWidth - marginFromRight - 55;
+        const y = 12;
+        drawVectorLogo(pdfDoc, x, y, scale, false);
+      }
+    };
+
+    const rawFiltered = insurances.filter(ins => {
+      const insDate = getNormalizedYYYYMMDD(ins.requestDate) || getNormalizedYYYYMMDD(ins.createdAt);
       const matchesDate = insDate >= reportDates.start && insDate <= reportDates.end;
       const matchesClient = reportClientId === 'All' || ins.clientId === reportClientId;
       return matchesDate && matchesClient;
     });
+    const filtered = sortInsurances(rawFiltered, reportSortBy);
 
     let title = '';
     let headers: string[] = [];
     let data: any[][] = [];
 
     if (reportType === 'altas') {
-      title = 'Reporte de Altas de Seguros';
-      headers = ['Póliza', 'Asegurado', 'Fecha Sol.', 'Inicio', 'Fin', 'Total'];
-      data = filtered.map(ins => [
-        ins.policyName || ins.policyId,
-        `${ins.firstName} ${ins.lastName}`,
-        ins.requestDate || '',
-        ins.startDate,
-        ins.endDate,
-        `$${(ins.totalFinal || 0).toFixed(2)}`
-      ]);
+      const reportData = getFilteredReportData() as {
+        filtered: InsuranceRequest[];
+        totalSales: number;
+        count: number;
+        groupedData: {
+          title: string;
+          items: {
+            groupKey: string;
+            groupName: string;
+            count: number;
+            total: number;
+            insurances: InsuranceRequest[];
+          }[];
+        };
+      };
 
-      doc.setFontSize(18);
-      doc.text(title, 14, 22);
-      doc.setFontSize(11);
-      doc.setTextColor(100);
-      doc.text(`Rango: ${reportDates.start} al ${reportDates.end}`, 14, 30);
-      doc.text(`Generado: ${format(new Date(), 'dd/MM/yyyy HH:mm')}`, 14, 36);
+      const { totalSales, count, groupedData } = reportData;
 
-      autoTable(doc, {
-        startY: 45,
-        head: [headers],
-        body: data,
-        theme: 'striped',
-        headStyles: { fillColor: [37, 99, 235] },
-        margin: { top: 45 },
-      });
-    } else if (reportType === 'to_collect') {
-      title = 'Reporte de Seguros por Cobrar';
-      const toCollect = filtered.filter(ins => ins.status === 'pending' || ins.status === 'partially_paid');
-      
       if (reportFormat === 'consolidated') {
-        const grouped: { [key: string]: { name: string, count: number, pendingAmount: number } } = {};
-        toCollect.forEach(ins => {
-          const client = clients.find(c => c.id === ins.clientId);
-          const groupName = client ? (client.commercialName || client.legalName || `${client.firstName} ${client.lastName}`) : 'Individual/Otros';
-          const pendingAmount = (ins.totalFinal || 0) - (ins.totalPaid || 0);
-          
-          if (!grouped[groupName]) {
-            grouped[groupName] = { name: groupName, count: 0, pendingAmount: 0 };
-          }
-          grouped[groupName].count += 1;
-          grouped[groupName].pendingAmount += pendingAmount;
-        });
-
-        const bodyData = Object.values(grouped).map(g => [
-          g.name,
-          g.count.toString(),
-          `$${g.pendingAmount.toFixed(2)}`
+        title = `Reporte Consolidado de Altas de Seguros (${groupedData.title})`;
+        headers = ['Grupo / Cliente', 'Cantidad de Pólizas', 'Venta Total'];
+        const bodyData = groupedData.items.map(item => [
+          item.groupName,
+          item.count.toString(),
+          `$${item.total.toFixed(2)}`
         ]);
-
-        const totalCount = toCollect.length;
-        const totalPending = toCollect.reduce((acc, curr) => acc + ((curr.totalFinal || 0) - (curr.totalPaid || 0)), 0);
 
         bodyData.push([
-          'TOTALES',
-          totalCount.toString(),
-          `$${totalPending.toFixed(2)}`
+          'TOTAL GENERAL',
+          count.toString(),
+          `$${totalSales.toFixed(2)}`
         ]);
 
-        doc.setFontSize(18);
-        doc.text('Reporte Consolidado de Seguros por Cobrar', 14, 22);
-        doc.setFontSize(11);
+        doc.setFontSize(16);
+        doc.text(title, 14, 22);
+        drawTopRightLogo(doc, false);
+        doc.setFontSize(10);
         doc.setTextColor(100);
         doc.text(`Rango: ${reportDates.start} al ${reportDates.end}`, 14, 30);
         doc.text(`Generado: ${format(new Date(), 'dd/MM/yyyy HH:mm')}`, 14, 36);
 
         autoTable(doc, {
-          startY: 45,
-          head: [['Agente', 'Número de Seguros', 'Saldo Deudor']],
+          startY: 42,
+          head: [headers],
+          body: bodyData,
+          theme: 'striped',
+          headStyles: { fillColor: [147, 51, 234] }, // purple-600
+          margin: { top: 45 },
+        });
+      } else {
+        title = `Reporte Detallado de Altas de Seguros (${groupedData.title})`;
+        
+        doc.setFontSize(16);
+        doc.text(title, 14, 22);
+        drawTopRightLogo(doc, true);
+        doc.setFontSize(10);
+        doc.setTextColor(100);
+        doc.text(`Rango: ${reportDates.start} al ${reportDates.end}`, 14, 30);
+        doc.text(`Generado: ${format(new Date(), 'dd/MM/yyyy HH:mm')}`, 14, 36);
+
+        let currentY = 42;
+
+        groupedData.items.forEach((group) => {
+          if (group.insurances.length === 0) return;
+
+          if (currentY > 150) {
+            doc.addPage();
+            currentY = 20;
+          }
+
+          doc.setFontSize(11);
+          doc.setFont("helvetica", "bold");
+          doc.setTextColor(17, 24, 39);
+          doc.text(`${group.groupName} (${group.count} pólizas, Total: $${group.total.toFixed(2)})`, 14, currentY + 6);
+          
+          const groupHeaders = [
+            'Fecha Sol.',
+            'Tipo Acción',
+            'Nombre',
+            'Apellido',
+            'Fecha Nac.',
+            'Cód Origen',
+            'Fecha Salida',
+            'Cód Dest.',
+            'Fecha Regreso',
+            'Meses/Días',
+            'Precio USD',
+            'Descuento USD',
+            'Comisión USD',
+            'Precio Total USD'
+          ];
+          const groupBody = group.insurances.map(ins => [
+            getRequestDateString(ins),
+            ins.actionType || '',
+            ins.firstName || '',
+            ins.lastName || '',
+            ins.birthDate || '',
+            ins.originCountry || '',
+            ins.startDate || '',
+            ins.destinationCountry || '',
+            ins.endDate || '',
+            formatMonthsDays(ins.days || 0),
+            `$${(ins.totalPrice || 0).toFixed(2)}`,
+            `$${(ins.discount || 0).toFixed(2)}`,
+            `$${(ins.agentCommission || 0).toFixed(2)}`,
+            `$${(ins.totalFinal || 0).toFixed(2)}`
+          ]);
+
+          autoTable(doc, {
+            startY: currentY + 10,
+            head: [groupHeaders],
+            body: groupBody,
+            theme: 'striped',
+            headStyles: { fillColor: [147, 51, 234] }, // purple-600
+            styles: { fontSize: 7, cellPadding: 1.5 },
+            margin: { top: 45, left: 14, right: 14 }
+          });
+
+          currentY = (doc as any).lastAutoTable.finalY + 10;
+        });
+
+        if (currentY > 165) {
+          doc.addPage();
+          currentY = 20;
+        }
+
+        doc.setFontSize(12);
+        doc.setFont("helvetica", "bold");
+        doc.setTextColor(17, 24, 39);
+        doc.text(`VENTA TOTAL GENERAL: $${totalSales.toFixed(2)} (${count} Pólizas)`, 14, currentY + 8);
+      }
+    } else if (reportType === 'to_collect') {
+      const reportData = getFilteredReportData() as {
+        filtered: InsuranceRequest[];
+        totalSales: number;
+        totalPaid: number;
+        totalPending: number;
+        totalDiscounts?: number;
+        totalCommissions?: number;
+        count: number;
+        groupedData: {
+          title: string;
+          items: {
+            groupKey: string;
+            groupName: string;
+            count: number;
+            total: number;
+            totalPaid: number;
+            totalPending: number;
+            insurances: InsuranceRequest[];
+          }[];
+        };
+      };
+
+      const { totalSales, totalPaid, totalPending, totalDiscounts = 0, totalCommissions = 0, count, groupedData } = reportData;
+
+      const selectedClient = reportClientId !== 'All' ? clients.find(cl => cl.id === reportClientId) : null;
+      const clientName = selectedClient ? (selectedClient.commercialName || selectedClient.legalName || `${selectedClient.firstName} ${selectedClient.lastName}`) : '';
+
+      const reportDayRate = exchangeRates[0]?.rate || 17.55;
+      const totalSalesMXP = reportData.filtered.reduce((sum, ins) => sum + (ins.totalFinal || 0) * getExchangeRateForRequestDate(ins, exchangeRates), 0);
+      const totalDiscountsMXP = reportData.filtered.reduce((sum, ins) => sum + (ins.discount || 0) * getExchangeRateForRequestDate(ins, exchangeRates), 0);
+      const totalCommissionsMXP = reportData.filtered.reduce((sum, ins) => sum + (ins.agentCommission || 0) * getExchangeRateForRequestDate(ins, exchangeRates), 0);
+
+      // Draw Logo of Mi Seguro Internacional in top right
+      const pageMetrics = doc.internal.pageSize;
+      const pageWidth = pageMetrics.width || (doc.internal.pageSize.getWidth ? doc.internal.pageSize.getWidth() : 210);
+      const pageHeight = pageMetrics.height || (doc.internal.pageSize.getHeight ? doc.internal.pageSize.getHeight() : 297);
+      drawTopRightLogo(doc, isDetailed);
+
+      const drawSummaryBlock = (pdfDoc: any, y: number) => {
+        const pW = pdfDoc.internal.pageSize.width || (pdfDoc.internal.pageSize.getWidth ? pdfDoc.internal.pageSize.getWidth() : 210);
+        const sW = pW - 28;
+        const sH = 22;
+        pdfDoc.setFillColor(249, 250, 251); // gray-50
+        pdfDoc.setDrawColor(229, 231, 235); // gray-200
+        pdfDoc.roundedRect(14, y, sW, sH, 3, 3, 'FD');
+
+        const cW = sW / 4;
+
+        // 1. Total de seguros
+        pdfDoc.setFont("helvetica", "bold");
+        pdfDoc.setFontSize(8);
+        pdfDoc.setTextColor(107, 114, 128); // gray-500
+        pdfDoc.text("TOTAL DE SEGUROS", 14 + 6, y + 5);
+        pdfDoc.setFont("helvetica", "bold");
+        pdfDoc.setFontSize(10);
+        pdfDoc.setTextColor(17, 24, 39); // gray-900
+        pdfDoc.text(`${count}`, 14 + 6, y + 11);
+        pdfDoc.setFont("helvetica", "bold");
+        pdfDoc.setFontSize(8);
+        pdfDoc.setTextColor(79, 70, 229); // indigo-600
+        pdfDoc.text(`T.C.: $${reportDayRate.toFixed(4)}`, 14 + 6, y + 17);
+
+        // 2. Ventas Totales
+        pdfDoc.setFont("helvetica", "bold");
+        pdfDoc.setFontSize(8);
+        pdfDoc.setTextColor(107, 114, 128);
+        pdfDoc.text("VENTAS TOTALES", 14 + cW + 6, y + 5);
+        pdfDoc.setFont("helvetica", "bold");
+        pdfDoc.setFontSize(10);
+        pdfDoc.setTextColor(17, 24, 39);
+        pdfDoc.text(`$${totalSales.toFixed(2)} USD`, 14 + cW + 6, y + 11);
+        pdfDoc.setFont("helvetica", "bold");
+        pdfDoc.setFontSize(8);
+        pdfDoc.setTextColor(16, 185, 129); // emerald-600
+        pdfDoc.text(`$${totalSalesMXP.toFixed(2)} MXP`, 14 + cW + 6, y + 17);
+
+        // 3. Descuentos Totales
+        pdfDoc.setFont("helvetica", "bold");
+        pdfDoc.setFontSize(8);
+        pdfDoc.setTextColor(107, 114, 128);
+        pdfDoc.text("DESCUENTOS TOTALES", 14 + cW * 2 + 6, y + 5);
+        pdfDoc.setFont("helvetica", "bold");
+        pdfDoc.setFontSize(10);
+        pdfDoc.setTextColor(17, 24, 39);
+        pdfDoc.text(`$${totalDiscounts.toFixed(2)} USD`, 14 + cW * 2 + 6, y + 11);
+        pdfDoc.setFont("helvetica", "bold");
+        pdfDoc.setFontSize(8);
+        pdfDoc.setTextColor(239, 68, 68); // red-500
+        pdfDoc.text(`$${totalDiscountsMXP.toFixed(2)} MXP`, 14 + cW * 2 + 6, y + 17);
+
+        // 4. Comisiones Totales
+        pdfDoc.setFont("helvetica", "bold");
+        pdfDoc.setFontSize(8);
+        pdfDoc.setTextColor(107, 114, 128);
+        pdfDoc.text("COMISIONES TOTALES", 14 + cW * 3 + 6, y + 5);
+        pdfDoc.setFont("helvetica", "bold");
+        pdfDoc.setFontSize(10);
+        pdfDoc.setTextColor(17, 24, 39);
+        pdfDoc.text(`$${totalCommissions.toFixed(2)} USD`, 14 + cW * 3 + 6, y + 11);
+        pdfDoc.setFont("helvetica", "bold");
+        pdfDoc.setFontSize(8);
+        pdfDoc.setTextColor(217, 119, 6); // amber-600
+        pdfDoc.text(`$${totalCommissionsMXP.toFixed(2)} MXP`, 14 + cW * 3 + 6, y + 17);
+      };
+
+      // Draw dynamic consolidation block at the start (under title / info)
+      const summaryY = 38;
+      drawSummaryBlock(doc, summaryY);
+
+      if (reportFormat === 'consolidated') {
+        title = `Reporte Consolidado de Seguros por Cobrar (${groupedData.title})`;
+        headers = ['Grupo / Cliente', 'Cantidad de Pólizas', 'Saldo Deudor Total'];
+        const bodyData = groupedData.items.map(item => [
+          item.groupName,
+          item.count.toString(),
+          `$${item.totalPending.toFixed(2)}`
+        ]);
+
+        bodyData.push([
+          'TOTAL GENERAL',
+          count.toString(),
+          `$${totalPending.toFixed(2)}`
+        ]);
+
+        doc.setFontSize(14);
+        doc.text(title, 14, 20);
+        doc.setFontSize(9);
+        doc.setTextColor(100);
+        if (selectedClient) {
+          doc.text(`Agente/Corporativo: ${clientName}`, 14, 26);
+          doc.text(`Rango: ${reportDates.start} al ${reportDates.end} | Generado: ${format(new Date(), 'dd/MM/yyyy HH:mm')}`, 14, 31);
+        } else {
+          doc.text(`Rango: ${reportDates.start} al ${reportDates.end} | Generado: ${format(new Date(), 'dd/MM/yyyy HH:mm')}`, 14, 29);
+        }
+
+        autoTable(doc, {
+          startY: 68,
+          head: [headers],
           body: bodyData,
           theme: 'striped',
           headStyles: { fillColor: [225, 29, 72] }, // rose-600
           margin: { top: 45 },
         });
-      } else {
-        // Global Summary Calculations
-        const totalInsurances = toCollect.length;
-        const totalSales = toCollect.reduce((acc, curr) => acc + (curr.totalFinal || 0), 0);
-        const totalCommissions = toCollect.reduce((acc, curr) => acc + (curr.agentCommission || 0), 0);
-        const policyCounts: { [key: string]: number } = {};
-        toCollect.forEach(ins => {
-          const pName = ins.policyName || 'Sin Póliza';
-          policyCounts[pName] = (policyCounts[pName] || 0) + 1;
-        });
 
-        // Render Summary Page (Page 1)
-        doc.setFontSize(18);
-        doc.text(title, 14, 22);
-        doc.setFontSize(11);
-        doc.setTextColor(100);
-        doc.text(`Rango: ${reportDates.start} al ${reportDates.end}`, 14, 30);
-        doc.text(`Generado: ${format(new Date(), 'dd/MM/yyyy HH:mm')}`, 14, 36);
-
-        autoTable(doc, {
-          startY: 45,
-          head: [['Resumen General', '']],
-          body: [
-            ['Total de Seguros', totalInsurances.toString()],
-            ['Ventas Totales', `$${totalSales.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`],
-            ['Comisiones Totales', `$${totalCommissions.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`],
-          ],
-          theme: 'grid',
-          headStyles: { fillColor: [100, 100, 100] },
-          styles: { fontSize: 10, fontStyle: 'bold' },
-          columnStyles: { 0: { cellWidth: 60 }, 1: { cellWidth: 40 } }
-        });
-
-        autoTable(doc, {
-          startY: (doc as any).lastAutoTable.finalY + 10,
-          head: [['Póliza', 'Cantidad de Seguros']],
-          body: Object.entries(policyCounts).map(([p, c]) => [p, c.toString()]),
-          theme: 'grid',
-          headStyles: { fillColor: [100, 100, 100] },
-          styles: { fontSize: 10 },
-          columnStyles: { 0: { cellWidth: 60 }, 1: { cellWidth: 40 } }
-        });
-
-        // Group by Client (Agent/Corporate)
-        const grouped: { [key: string]: any[] } = {};
-        toCollect.forEach(ins => {
-          const client = clients.find(c => c.id === ins.clientId);
-          const groupName = client ? (client.commercialName || client.legalName || `${client.firstName} ${client.lastName}`) : 'Individual/Otros';
-          if (!grouped[groupName]) grouped[groupName] = [];
-          grouped[groupName].push(ins);
-        });
-
-        headers = ['Asegurado', 'Póliza', 'Fecha Sol.', 'Total', 'Pagado', 'Pendiente'];
-        
-        Object.keys(grouped).forEach(group => {
+        const finalY = (doc as any).lastAutoTable.finalY + 10;
+        if (finalY + 30 > pageHeight) {
           doc.addPage();
-          doc.setFontSize(18);
-          doc.text(title, 14, 22);
+          drawSummaryBlock(doc, 20);
+        } else {
+          drawSummaryBlock(doc, finalY);
+        }
+      } else {
+        title = `Reporte Detallado de Seguros por Cobrar (${groupedData.title})`;
+        
+        doc.setFontSize(14);
+        doc.text(title, 14, 20);
+        doc.setFontSize(9);
+        doc.setTextColor(100);
+        if (selectedClient) {
+          doc.text(`Agente/Corporativo: ${clientName}`, 14, 26);
+          doc.text(`Rango: ${reportDates.start} al ${reportDates.end} | Generado: ${format(new Date(), 'dd/MM/yyyy HH:mm')}`, 14, 31);
+        } else {
+          doc.text(`Rango: ${reportDates.start} al ${reportDates.end} | Generado: ${format(new Date(), 'dd/MM/yyyy HH:mm')}`, 14, 29);
+        }
+
+        let currentY = 68;
+
+        groupedData.items.forEach((group) => {
+          if (group.insurances.length === 0) return;
+
+          if (currentY + 40 > pageHeight) {
+            doc.addPage();
+            currentY = 20;
+          }
+
           doc.setFontSize(11);
-          doc.setTextColor(100);
-          doc.text(`Rango: ${reportDates.start} al ${reportDates.end}`, 14, 30);
-          doc.text(`Cliente: ${group}`, 14, 36);
-          doc.text(`Generado: ${format(new Date(), 'dd/MM/yyyy HH:mm')}`, 14, 42);
-
-          const groupData = grouped[group].map(ins => [
-            `${ins.firstName} ${ins.lastName}`,
-            ins.policyName || ins.policyId,
-            ins.requestDate || '',
+          doc.setFont("helvetica", "bold");
+          doc.setTextColor(17, 24, 39);
+          doc.text(`${group.groupName} (${group.count} pólizas, Saldo Deudor: $${group.totalPending.toFixed(2)})`, 14, currentY + 6);
+          
+          const groupHeaders = [
+            'Tipo Acción',
+            'Nombre',
+            'Apellido',
+            'Fecha Nac.',
+            'Cód Origen',
+            'Fecha Salida',
+            'Cód Dest.',
+            'Fecha Regreso',
+            'Meses/Días',
+            'Precio USD',
+            'Descuento USD',
+            'Precio Total USD',
+            'Comisión USD'
+          ];
+          const groupBody = group.insurances.map(ins => [
+            ins.actionType || '',
+            ins.firstName || '',
+            ins.lastName || '',
+            ins.birthDate || '',
+            ins.originCountry || '',
+            ins.startDate || '',
+            ins.destinationCountry || '',
+            ins.endDate || '',
+            formatMonthsDays(ins.days || 0),
+            `$${(ins.totalPrice || 0).toFixed(2)}`,
+            `$${(ins.discount || 0).toFixed(2)}`,
             `$${(ins.totalFinal || 0).toFixed(2)}`,
-            `$${(ins.totalPaid || 0).toFixed(2)}`,
-            `$${((ins.totalFinal || 0) - (ins.totalPaid || 0)).toFixed(2)}`
-          ]);
-
-          const groupTotal = grouped[group].reduce((acc, curr) => acc + (curr.totalFinal || 0), 0);
-          const groupPaid = grouped[group].reduce((acc, curr) => acc + (curr.totalPaid || 0), 0);
-          const groupPending = groupTotal - groupPaid;
-
-          groupData.push([
-            { content: 'TOTALES', colSpan: 3, styles: { fontStyle: 'bold', halign: 'right' } },
-            `$${groupTotal.toFixed(2)}`,
-            `$${groupPaid.toFixed(2)}`,
-            `$${groupPending.toFixed(2)}`
+            `$${(ins.agentCommission || 0).toFixed(2)}`
           ]);
 
           autoTable(doc, {
-            startY: 50,
-            head: [headers],
-            body: groupData,
+            startY: currentY + 10,
+            head: [groupHeaders],
+            body: groupBody,
             theme: 'striped',
             headStyles: { fillColor: [225, 29, 72] }, // rose-600
-            margin: { top: 50 },
+            styles: { fontSize: 7, cellPadding: 1.5 },
+            margin: { top: 45, left: 14, right: 14 }
           });
+
+          currentY = (doc as any).lastAutoTable.finalY + 10;
         });
+
+        if (currentY + 35 > pageHeight) {
+          doc.addPage();
+          currentY = 20;
+        }
+
+        doc.setFontSize(10);
+        doc.setFont("helvetica", "bold");
+        doc.setTextColor(17, 24, 39);
+        doc.text(`SALDO DEUDOR GENERAL: $${totalPending.toFixed(2)} / VENTA TOTAL GENERAL: $${totalSales.toFixed(2)} (${count} Pólizas)`, 14, currentY + 6);
+        
+        drawSummaryBlock(doc, currentY + 11);
       }
     } else if (reportType === 'to_pay') {
       title = 'Reporte de Seguros por Pagar (Proveedores)';
@@ -511,7 +1249,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
             grouped[inv] = { invoice: inv, count: 0, totalCost: 0 };
           }
           grouped[inv].count += 1;
-          grouped[inv].totalCost += (ins.totalCost || 0);
+          grouped[inv].totalCost += getPolicyEffectiveCost(ins);
         });
 
         const bodyData = Object.values(grouped).map(g => [
@@ -521,7 +1259,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
         ]);
 
         const totalCount = toPay.length;
-        const totalCostSum = toPay.reduce((acc, curr) => acc + (curr.totalCost || 0), 0);
+        const totalCostSum = toPay.reduce((acc, curr) => acc + getPolicyEffectiveCost(curr), 0);
 
         bodyData.push([
           'TOTALES',
@@ -531,6 +1269,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
 
         doc.setFontSize(18);
         doc.text('Reporte Consolidado de Seguros por Pagar (Proveedores)', 14, 22);
+        drawTopRightLogo(doc, false);
         doc.setFontSize(11);
         doc.setTextColor(100);
         doc.text(`Rango: ${reportDates.start} al ${reportDates.end}`, 14, 30);
@@ -555,6 +1294,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
 
         doc.setFontSize(18);
         doc.text(title, 14, 22);
+        drawTopRightLogo(doc, false);
         doc.setFontSize(11);
         doc.setTextColor(100);
         doc.text(`Rango: ${reportDates.start} al ${reportDates.end}`, 14, 30);
@@ -570,142 +1310,165 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
         });
       }
     } else if (reportType === 'commissions') {
-      title = 'Reporte de Comisiones Pendientes';
       const pending = filtered.filter(ins => ins.commissionStatus === 'confirmed');
-      
-      if (reportFormat === 'consolidated') {
-        const grouped: { [key: string]: { name: string, count: number, totalCommissions: number } } = {};
-        pending.forEach(ins => {
-          const client = clients.find(c => c.id === ins.clientId);
-          const groupName = client ? (client.commercialName || client.legalName || `${client.firstName} ${client.lastName}`) : 'Individual/Otros';
-          if (!grouped[groupName]) {
-            grouped[groupName] = { name: groupName, count: 0, totalCommissions: 0 };
-          }
-          grouped[groupName].count += 1;
-          grouped[groupName].totalCommissions += (ins.agentCommission || 0);
-        });
+      const totalInsurances = pending.length;
+      const totalSales = pending.reduce((acc, curr) => acc + (curr.totalFinal || 0), 0);
+      const totalCommissions = pending.reduce((acc, curr) => acc + (curr.agentCommission || 0), 0);
+      const totalDiscounts = pending.reduce((acc, curr) => acc + (curr.discount || 0), 0);
 
-        const bodyData = Object.values(grouped).map(g => [
-          g.name,
-          g.count.toString(),
-          `$${g.totalCommissions.toFixed(2)}`
-        ]);
+      const policyCounts: { [key: string]: number } = {};
+      pending.forEach(ins => {
+        const pName = ins.policyName || ins.policyId || 'Sin Póliza';
+        policyCounts[pName] = (policyCounts[pName] || 0) + 1;
+      });
 
-        const totalCount = pending.length;
-        const totalCommissionsSum = pending.reduce((acc, curr) => acc + (curr.agentCommission || 0), 0);
+      // Create landscape PDF to accommodate 18 columns!
+      const landscapeDoc = new jsPDF('l', 'mm', 'a4');
 
-        bodyData.push([
-          'TOTALES',
-          totalCount.toString(),
-          `$${totalCommissionsSum.toFixed(2)}`
-        ]);
+      // Page 1: Executive Consolidated Summary
+      landscapeDoc.setFontSize(20);
+      landscapeDoc.text('Reporte de Comisiones Pendientes', 14, 22);
+      drawTopRightLogo(landscapeDoc, true);
+      landscapeDoc.setFontSize(11);
+      landscapeDoc.setTextColor(100);
+      landscapeDoc.text(`Rango: ${reportDates.start} al ${reportDates.end}`, 14, 30);
+      landscapeDoc.text(`Generado: ${format(new Date(), 'dd/MM/yyyy HH:mm')}`, 14, 36);
 
-        doc.setFontSize(18);
-        doc.text('Reporte Consolidado de Comisiones Pendientes', 14, 22);
-        doc.setFontSize(11);
-        doc.setTextColor(100);
-        doc.text(`Rango: ${reportDates.start} al ${reportDates.end}`, 14, 30);
-        doc.text(`Generado: ${format(new Date(), 'dd/MM/yyyy HH:mm')}`, 14, 36);
+      // Section 1: Consolidado
+      autoTable(landscapeDoc, {
+        startY: 45,
+        head: [['Consolidado de Comisiones Pendientes', 'Valor']],
+        body: [
+          ['Total de seguros', totalInsurances.toString()],
+          ['Ventas Totales', `$${totalSales.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD`],
+          ['Descuentos Totales', `$${totalDiscounts.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD`],
+          ['Comisiones Totales', `$${totalCommissions.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD`],
+        ],
+        theme: 'grid',
+        headStyles: { fillColor: [217, 119, 6] }, // amber-600
+        styles: { fontSize: 10, fontStyle: 'bold' },
+        columnStyles: { 0: { cellWidth: 80 }, 1: { cellWidth: 50 } }
+      });
 
-        autoTable(doc, {
-          startY: 45,
-          head: [['Agente / Corporativo', 'Número de Seguros', 'Saldo de Comisiones']],
-          body: bodyData,
-          theme: 'striped',
-          headStyles: { fillColor: [217, 119, 6] }, // amber-600
-          margin: { top: 45 },
-        });
-      } else {
-        // Global Summary Calculations
-        const totalInsurances = pending.length;
-        const totalSales = pending.reduce((acc, curr) => acc + (curr.totalFinal || 0), 0);
-        const totalCommissions = pending.reduce((acc, curr) => acc + (curr.agentCommission || 0), 0);
-        const policyCounts: { [key: string]: number } = {};
-        pending.forEach(ins => {
-          const pName = ins.policyName || 'Sin Póliza';
-          policyCounts[pName] = (policyCounts[pName] || 0) + 1;
-        });
+      // Section 2: breakdown by policy type (number of insurances)
+      autoTable(landscapeDoc, {
+        startY: (landscapeDoc as any).lastAutoTable.finalY + 12,
+        head: [['Tipo de Póliza', 'Número de Seguros']],
+        body: Object.entries(policyCounts).map(([p, c]) => [p, c.toString()]),
+        theme: 'grid',
+        headStyles: { fillColor: [100, 100, 100] },
+        styles: { fontSize: 10 },
+        columnStyles: { 0: { cellWidth: 80 }, 1: { cellWidth: 50 } }
+      });
 
-        // Render Summary Page (Page 1)
-        doc.setFontSize(18);
-        doc.text(title, 14, 22);
-        doc.setFontSize(11);
-        doc.setTextColor(100);
-        doc.text(`Rango: ${reportDates.start} al ${reportDates.end}`, 14, 30);
-        doc.text(`Generado: ${format(new Date(), 'dd/MM/yyyy HH:mm')}`, 14, 36);
+      // Page 2+: Detailed Table of those commissions matching the 18 columns in exact order
+      landscapeDoc.addPage();
+      landscapeDoc.setFontSize(16);
+      landscapeDoc.setTextColor(0);
+      landscapeDoc.text('Detalle de Comisiones Pendientes', 14, 20);
+      drawTopRightLogo(landscapeDoc, true);
+      landscapeDoc.setFontSize(9);
+      landscapeDoc.setTextColor(100);
+      landscapeDoc.text(`Página 2 - Listado de Registros`, 14, 26);
 
-        autoTable(doc, {
-          startY: 45,
-          head: [['Resumen General', '']],
-          body: [
-            ['Total de Seguros', totalInsurances.toString()],
-            ['Ventas Totales', `$${totalSales.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`],
-            ['Comisiones Totales', `$${totalCommissions.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`],
-          ],
-          theme: 'grid',
-          headStyles: { fillColor: [100, 100, 100] },
-          styles: { fontSize: 10, fontStyle: 'bold' },
-          columnStyles: { 0: { cellWidth: 60 }, 1: { cellWidth: 40 } }
-        });
+      const detailedHeaders = [
+        'Fecha Sol.',
+        'Tipo Accion',
+        'Nombre',
+        'Apellido',
+        'F. Nac.',
+        'Cód Origen',
+        'F. Salida',
+        'Cód Dest.',
+        'F. Regreso',
+        'Meses/Dias',
+        'Prec. USD',
+        'Desc. USD',
+        'Com. USD',
+        'Tot. USD',
+        'T.C.',
+        'Prec. MXP',
+        'Desc. MXP',
+        'Com. MXP',
+        'Tot. MXP'
+      ];
 
-        autoTable(doc, {
-          startY: (doc as any).lastAutoTable.finalY + 10,
-          head: [['Póliza', 'Cantidad de Seguros']],
-          body: Object.entries(policyCounts).map(([p, c]) => [p, c.toString()]),
-          theme: 'grid',
-          headStyles: { fillColor: [100, 100, 100] },
-          styles: { fontSize: 10 },
-          columnStyles: { 0: { cellWidth: 60 }, 1: { cellWidth: 40 } }
-        });
+      const detailedRows = pending.map(ins => {
+        const tc = getExchangeRateForRequestDate(ins, exchangeRates);
+        const precioUSD = ins.totalPrice || 0;
+        const descuentoUSD = ins.discount || 0;
+        const comisionUSD = ins.agentCommission || 0;
+        const totalUSD = ins.totalFinal || 0;
 
-        // Group by Client (Agent/Corporate)
-        const grouped: { [key: string]: any[] } = {};
-        pending.forEach(ins => {
-          const client = clients.find(c => c.id === ins.clientId);
-          const groupName = client ? (client.commercialName || client.legalName || `${client.firstName} ${client.lastName}`) : 'Individual/Otros';
-          if (!grouped[groupName]) grouped[groupName] = [];
-          grouped[groupName].push(ins);
-        });
+        const precioMXP = precioUSD * tc;
+        const descuentoMXP = descuentoUSD * tc;
+        const comisionMXP = comisionUSD * tc;
+        const totalMXP = totalUSD * tc;
 
-        headers = ['Asegurado', 'Póliza', 'Fecha Sol.', 'Venta', 'Comisión'];
-        
-        Object.keys(grouped).forEach(group => {
-          doc.addPage();
-          doc.setFontSize(18);
-          doc.text(title, 14, 22);
-          doc.setFontSize(11);
-          doc.setTextColor(100);
-          doc.text(`Rango: ${reportDates.start} al ${reportDates.end}`, 14, 30);
-          doc.text(`Agente: ${group}`, 14, 36);
-          doc.text(`Generado: ${format(new Date(), 'dd/MM/yyyy HH:mm')}`, 14, 42);
+        const durationStr = formatMonthsDays(ins.days || 0);
+        const reqDateStr = getRequestDateString(ins);
 
-          const groupData = grouped[group].map(ins => [
-            `${ins.firstName} ${ins.lastName}`,
-            ins.policyName || ins.policyId,
-            ins.requestDate || '',
-            `$${(ins.totalFinal || 0).toFixed(2)}`,
-            `$${(ins.agentCommission || 0).toFixed(2)}`
-          ]);
+        return [
+          reqDateStr,
+          ins.actionType || '',
+          ins.firstName || '',
+          ins.lastName || '',
+          ins.birthDate || '',
+          ins.originCountry || '',
+          ins.startDate || '',
+          ins.destinationCountry || '',
+          ins.endDate || '',
+          durationStr,
+          `$${precioUSD.toFixed(2)}`,
+          `$${descuentoUSD.toFixed(2)}`,
+          `$${comisionUSD.toFixed(2)}`,
+          `$${totalUSD.toFixed(2)}`,
+          tc.toFixed(4),
+          `$${precioMXP.toFixed(2)}`,
+          `$${descuentoMXP.toFixed(2)}`,
+          `$${comisionMXP.toFixed(2)}`,
+          `$${totalMXP.toFixed(2)}`
+        ];
+      });
 
-          const groupVenta = grouped[group].reduce((acc, curr) => acc + (curr.totalFinal || 0), 0);
-          const groupComision = grouped[group].reduce((acc, curr) => acc + (curr.agentCommission || 0), 0);
+      // Compute overall sums for detailed table footer
+      const sumPrecioUSD = pending.reduce((acc, curr) => acc + (curr.totalPrice || 0), 0);
+      const sumDescuentoUSD = pending.reduce((acc, curr) => acc + (curr.discount || 0), 0);
+      const sumComisionUSD = pending.reduce((acc, curr) => acc + (curr.agentCommission || 0), 0);
+      const sumTotalUSD = pending.reduce((acc, curr) => acc + (curr.totalFinal || 0), 0);
 
-          groupData.push([
-            { content: 'TOTALES', colSpan: 3, styles: { fontStyle: 'bold', halign: 'right' } },
-            `$${groupVenta.toFixed(2)}`,
-            `$${groupComision.toFixed(2)}`
-          ]);
+      const sumPrecioMXP = pending.reduce((acc, curr) => acc + ((curr.totalPrice || 0) * getExchangeRateForRequestDate(curr, exchangeRates)), 0);
+      const sumDescuentoMXP = pending.reduce((acc, curr) => acc + ((curr.discount || 0) * getExchangeRateForRequestDate(curr, exchangeRates)), 0);
+      const sumComisionMXP = pending.reduce((acc, curr) => acc + ((curr.agentCommission || 0) * getExchangeRateForRequestDate(curr, exchangeRates)), 0);
+      const sumTotalMXP = pending.reduce((acc, curr) => acc + ((curr.totalFinal || 0) * getExchangeRateForRequestDate(curr, exchangeRates)), 0);
 
-          autoTable(doc, {
-            startY: 50,
-            head: [headers],
-            body: groupData,
-            theme: 'striped',
-            headStyles: { fillColor: [217, 119, 6] }, // amber-600
-            margin: { top: 50 },
-          });
-        });
-      }
+      detailedRows.push([
+        'TOTALES',
+        '', '', '', '', '', '', '', '', '',
+        `$${sumPrecioUSD.toFixed(2)}`,
+        `$${sumDescuentoUSD.toFixed(2)}`,
+        `$${sumComisionUSD.toFixed(2)}`,
+        `$${sumTotalUSD.toFixed(2)}`,
+        '',
+        `$${sumPrecioMXP.toFixed(2)}`,
+        `$${sumDescuentoMXP.toFixed(2)}`,
+        `$${sumComisionMXP.toFixed(2)}`,
+        `$${sumTotalMXP.toFixed(2)}`
+      ]);
+
+      autoTable(landscapeDoc, {
+        startY: 32,
+        head: [detailedHeaders],
+        body: detailedRows,
+        theme: 'striped',
+        headStyles: { fillColor: [217, 119, 6] }, // amber-600
+        styles: { fontSize: 6.5, cellPadding: 1.5 },
+        margin: { top: 32 },
+      });
+
+      landscapeDoc.save(`reporte_comisiones_${reportDates.start}_${reportDates.end}.pdf`);
+      setShowReportModal(false);
+      return;
     } else if (reportType === 'income_statement') {
       title = 'Estado de Resultados';
       
@@ -783,6 +1546,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
       // PDF Rendering
       doc.setFontSize(18);
       doc.text(title, 14, 22);
+      drawTopRightLogo(doc, false);
       doc.setFontSize(11);
       doc.setTextColor(100);
       doc.text(`Rango: ${reportDates.start} al ${reportDates.end}`, 14, 30);
@@ -931,6 +1695,29 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
 
   return (
     <div className="space-y-8">
+      {limitToCurrentMonth && (
+        <div className="bg-gradient-to-r from-amber-50 to-orange-50 border-l-4 border-amber-500 p-4 rounded-r-2xl shadow-sm flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 animate-in fade-in duration-500">
+          <div className="flex gap-3">
+            <div className="p-2 bg-amber-100 text-amber-700 rounded-xl">
+              <Clock className="w-5 h-5 animate-pulse" />
+            </div>
+            <div>
+              <p className="text-sm font-semibold text-amber-950">
+                Visualizando Mes Actual Solamente
+              </p>
+              <p className="text-xs text-amber-700">
+                Para optimizar la velocidad y el consumo de base de datos, solo se han cargado los datos del mes en curso. Si deseas ver reportes de periodos anteriores, activa el historial completo o simplemente selecciona una fecha de inicio anterior.
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={() => setLimitToCurrentMonth(false)}
+            className="text-xs bg-amber-600 hover:bg-amber-700 text-white font-bold px-4 py-2 rounded-xl shadow-sm hover:shadow transition-all whitespace-nowrap"
+          >
+            Activar Historial Completo
+          </button>
+        </div>
+      )}
       <header className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Reportes y Estadísticas</h1>
@@ -1614,7 +2401,24 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                     </div>
                   )}
 
-                  {(reportType === 'to_collect' || reportType === 'to_pay' || reportType === 'commissions') && (
+                  {(reportType === 'altas' || reportType === 'to_collect') && (
+                    <div>
+                      <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1.5 ml-1">Agrupar por</label>
+                      <select 
+                        value={reportGrouping}
+                        onChange={(e) => setReportGrouping(e.target.value as 'all' | 'Agent' | 'Corporate' | 'Individual' | 'policy')}
+                        className="w-full px-4 py-3.5 bg-gray-50 border border-gray-100 rounded-2xl focus:ring-2 focus:ring-blue-500 outline-none text-sm font-medium appearance-none"
+                      >
+                        <option value="all">Tipo de Cliente (Agente, Corporativo o Individual)</option>
+                        <option value="Agent">Por Agente</option>
+                        <option value="policy">Por Tipo de Seguro (Póliza)</option>
+                        <option value="Corporate">Por Corporativos</option>
+                        <option value="Individual">Por Individuales</option>
+                      </select>
+                    </div>
+                  )}
+
+                  {(reportType === 'altas' || reportType === 'to_collect' || reportType === 'to_pay' || reportType === 'commissions') && (
                     <div>
                       <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1.5 ml-1">Formato de Reporte</label>
                       <select 
@@ -1624,6 +2428,21 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                       >
                         <option value="detailed">Detallado (Estándar)</option>
                         <option value="consolidated">Consolidado (Resumen)</option>
+                      </select>
+                    </div>
+                  )}
+
+                  {(reportType === 'altas' || reportType === 'to_collect' || reportType === 'to_pay' || reportType === 'commissions') && (
+                    <div>
+                      <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1.5 ml-1">Ordenar por</label>
+                      <select 
+                        value={reportSortBy}
+                        onChange={(e) => setReportSortBy(e.target.value as 'requestDate' | 'name' | 'startDate')}
+                        className="w-full px-4 py-3.5 bg-gray-50 border border-gray-100 rounded-2xl focus:ring-2 focus:ring-blue-500 outline-none text-sm font-medium appearance-none"
+                      >
+                        <option value="requestDate">Fecha de Solicitud</option>
+                        <option value="name">Nombre de Asegurado</option>
+                        <option value="startDate">Fecha de Inicio de Vigencia</option>
                       </select>
                     </div>
                   )}
@@ -1642,6 +2461,24 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                       <Download className="w-5 h-5" />
                       Exportar a PDF
                     </button>
+                    {reportType === 'altas' && (
+                      <button 
+                        onClick={generateCSVForAltas}
+                        className="w-full px-6 py-4 bg-purple-50 hover:bg-purple-100 text-purple-700 font-bold rounded-2xl transition-all flex items-center justify-center gap-2 border border-purple-200"
+                      >
+                        <FileSpreadsheet className="w-5 h-5" />
+                        Exportar a CSV
+                      </button>
+                    )}
+                    {reportType === 'to_collect' && (
+                      <button 
+                        onClick={generateCSVForToCollect}
+                        className="w-full px-6 py-4 bg-rose-50 hover:bg-rose-100 text-rose-700 font-bold rounded-2xl transition-all flex items-center justify-center gap-2 border border-rose-200"
+                      >
+                        <FileSpreadsheet className="w-5 h-5" />
+                        Exportar a CSV
+                      </button>
+                    )}
                     <button 
                       onClick={() => setShowReportModal(false)}
                       className="w-full px-6 py-3 bg-white text-gray-500 font-bold rounded-xl hover:bg-gray-100 transition-all border border-gray-200 text-sm"
@@ -1663,7 +2500,22 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                       const data = getFilteredReportData();
                       
                       if (reportType === 'altas') {
-                        const { filtered, totalSales, count } = data as { filtered: InsuranceRequest[], totalSales: number, count: number };
+                        const { filtered, totalSales, count, groupedData } = data as {
+                          filtered: InsuranceRequest[];
+                          totalSales: number;
+                          count: number;
+                          groupedData: {
+                            title: string;
+                            items: {
+                              groupKey: string;
+                              groupName: string;
+                              count: number;
+                              total: number;
+                              insurances: InsuranceRequest[];
+                            }[];
+                          };
+                        };
+
                         return (
                           <div className="space-y-6">
                             <div className="grid grid-cols-2 gap-4">
@@ -1677,148 +2529,267 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                               </div>
                             </div>
 
-                            <div className="overflow-x-auto">
-                              <table className="w-full text-left border-collapse">
-                                <thead>
-                                  <tr className="border-b border-gray-200 text-[10px] font-black text-gray-400 uppercase tracking-wider">
-                                    <th className="pb-2">Póliza</th>
-                                    <th className="pb-2">Asegurado</th>
-                                    <th className="pb-2">Fecha Sol.</th>
-                                    <th className="pb-2 text-right">Total</th>
-                                  </tr>
-                                </thead>
-                                <tbody className="divide-y divide-gray-100 text-xs">
-                                  {filtered.length === 0 ? (
-                                    <tr>
-                                      <td colSpan={4} className="py-8 text-center text-gray-400 italic">No hay registros en el rango de fechas.</td>
-                                    </tr>
-                                  ) : (
-                                    filtered.map((ins, idx) => (
-                                      <tr key={ins.id || idx}>
-                                        <td className="py-2 text-gray-600 font-bold">{ins.policyName || ins.policyId}</td>
-                                        <td className="py-2 font-medium">{ins.firstName} {ins.lastName}</td>
-                                        <td className="py-2 text-gray-500">{ins.requestDate || (ins.createdAt?.toDate ? format(ins.createdAt.toDate(), 'yyyy-MM-dd') : '')}</td>
-                                        <td className="py-2 text-right font-bold text-gray-900">${(ins.totalFinal || ins.totalPrice || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                            {reportFormat === 'consolidated' ? (
+                              <div className="space-y-4">
+                                <h4 className="text-xs font-black text-gray-400 uppercase tracking-wider">Resumen Consolidado ({groupedData.title})</h4>
+                                <div className="overflow-x-auto bg-white rounded-2xl border border-gray-100 shadow-sm p-4">
+                                  <table className="w-full text-left border-collapse">
+                                    <thead>
+                                      <tr className="border-b border-gray-100 text-[10px] font-black text-gray-400 uppercase tracking-wider pb-2">
+                                        <th className="pb-2">Grupo / Cliente</th>
+                                        <th className="pb-2 text-center">Pólizas</th>
+                                        <th className="pb-2 text-right">Venta Total</th>
                                       </tr>
-                                    ))
-                                  )}
-                                </tbody>
-                              </table>
-                            </div>
+                                    </thead>
+                                    <tbody className="divide-y divide-gray-50 text-xs">
+                                      {groupedData.items.length === 0 ? (
+                                        <tr>
+                                          <td colSpan={3} className="py-6 text-center text-gray-400 italic">No hay datos para agrupar.</td>
+                                        </tr>
+                                      ) : (
+                                        groupedData.items.map((item, idx) => (
+                                          <tr key={item.groupKey || idx} className="hover:bg-gray-50/50">
+                                            <td className="py-2.5 font-bold text-gray-700">{item.groupName}</td>
+                                            <td className="py-2.5 text-center text-gray-500 font-semibold">{item.count}</td>
+                                            <td className="py-2.5 text-right font-bold text-gray-900">${item.total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                                          </tr>
+                                        ))
+                                      )}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="space-y-6">
+                                <h4 className="text-xs font-black text-gray-400 uppercase tracking-wider">Detalle de Altas ({groupedData.title})</h4>
+                                {groupedData.items.length === 0 ? (
+                                  <div className="py-8 text-center text-gray-400 italic bg-white rounded-2xl border border-gray-100">No hay registros en el rango de fechas.</div>
+                                ) : (
+                                  groupedData.items.map((item, idx) => {
+                                    if (item.insurances.length === 0) return null;
+                                    return (
+                                      <div key={item.groupKey || idx} className="space-y-2">
+                                        <div className="flex justify-between items-center bg-purple-50/50 px-4 py-2 rounded-xl border border-purple-100/50">
+                                          <span className="text-xs font-bold text-purple-900">{item.groupName}</span>
+                                          <span className="text-[10px] font-black text-purple-700 bg-white px-2 py-0.5 rounded-md border border-purple-100">{item.count} pólizas • ${item.total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                                        </div>
+                                        <div className="overflow-x-auto bg-white rounded-2xl border border-gray-100 p-3 shadow-sm">
+                                          <table className="w-full text-left border-collapse">
+                                            <thead>
+                                              <tr className="border-b border-gray-100 text-[9px] font-black text-gray-400 uppercase tracking-wider pb-1">
+                                                <th className="pb-1.5 whitespace-nowrap">Fecha Sol.</th>
+                                                <th className="pb-1.5 whitespace-nowrap">Tipo Acción</th>
+                                                <th className="pb-1.5 whitespace-nowrap">Nombre</th>
+                                                <th className="pb-1.5 whitespace-nowrap">Apellido</th>
+                                                <th className="pb-1.5 whitespace-nowrap">Fecha Nac.</th>
+                                                <th className="pb-1.5 whitespace-nowrap">Cód Origen</th>
+                                                <th className="pb-1.5 whitespace-nowrap">Fecha Salida</th>
+                                                <th className="pb-1.5 whitespace-nowrap">Cód Dest.</th>
+                                                <th className="pb-1.5 whitespace-nowrap">Fecha Regreso</th>
+                                                <th className="pb-1.5 whitespace-nowrap">Meses/Días</th>
+                                                <th className="pb-1.5 whitespace-nowrap text-right">Precio USD</th>
+                                                <th className="pb-1.5 whitespace-nowrap text-right">Descuento USD</th>
+                                                <th className="pb-1.5 whitespace-nowrap text-right">Comisión USD</th>
+                                                <th className="pb-1.5 whitespace-nowrap text-right">Precio Total USD</th>
+                                              </tr>
+                                            </thead>
+                                            <tbody className="divide-y divide-gray-50 text-[11px]">
+                                              {item.insurances.map((ins, iIdx) => (
+                                                <tr key={ins.id || iIdx} className="hover:bg-gray-50/50">
+                                                  <td className="py-2 pr-3 text-gray-500 whitespace-nowrap">{getRequestDateString(ins)}</td>
+                                                  <td className="py-2 pr-3 text-gray-600 font-bold whitespace-nowrap">{ins.actionType || ''}</td>
+                                                  <td className="py-2 pr-3 font-medium text-gray-800 whitespace-nowrap">{ins.firstName || ''}</td>
+                                                  <td className="py-2 pr-3 text-gray-800 whitespace-nowrap">{ins.lastName || ''}</td>
+                                                  <td className="py-2 pr-3 text-gray-500 whitespace-nowrap">{ins.birthDate || ''}</td>
+                                                  <td className="py-2 pr-3 text-gray-500 whitespace-nowrap">{ins.originCountry || ''}</td>
+                                                  <td className="py-2 pr-3 text-gray-500 whitespace-nowrap">{ins.startDate || ''}</td>
+                                                  <td className="py-2 pr-3 text-gray-500 whitespace-nowrap">{ins.destinationCountry || ''}</td>
+                                                  <td className="py-2 pr-3 text-gray-500 whitespace-nowrap">{ins.endDate || ''}</td>
+                                                  <td className="py-2 pr-3 text-gray-600 font-semibold whitespace-nowrap">{formatMonthsDays(ins.days || 0)}</td>
+                                                  <td className="py-2 pr-3 text-right text-gray-600 whitespace-nowrap">${(ins.totalPrice || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                                                  <td className="py-2 pr-3 text-right text-gray-600 whitespace-nowrap">${(ins.discount || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                                                  <td className="py-2 pr-3 text-right text-gray-600 whitespace-nowrap">${(ins.agentCommission || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                                                  <td className="py-2 text-right font-bold text-gray-950 whitespace-nowrap">${(ins.totalFinal || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                                                </tr>
+                                              ))}
+                                            </tbody>
+                                          </table>
+                                        </div>
+                                      </div>
+                                    );
+                                  })
+                                )}
+                              </div>
+                            )}
                           </div>
                         );
                       }
 
                       if (reportType === 'to_collect') {
-                        const { filtered, totalSales, totalPaid, totalPending, count } = data as { filtered: InsuranceRequest[], totalSales: number, totalPaid: number, totalPending: number, count: number };
-                        
-                        if (reportFormat === 'consolidated') {
-                          // Group filtered by client
-                          const grouped: { [key: string]: { name: string, count: number, pendingAmount: number } } = {};
-                          filtered.forEach(ins => {
-                            const client = clients.find(c => c.id === ins.clientId);
-                            const groupName = client ? (client.commercialName || client.legalName || `${client.firstName} ${client.lastName}`) : 'Individual/Otros';
-                            const pendingAmount = (ins.totalFinal || ins.totalPrice || 0) - (ins.totalPaid || 0);
-                            
-                            if (!grouped[groupName]) {
-                              grouped[groupName] = { name: groupName, count: 0, pendingAmount: 0 };
-                            }
-                            grouped[groupName].count += 1;
-                            grouped[groupName].pendingAmount += pendingAmount;
-                          });
+                        const { filtered, totalSales, totalPaid, totalPending, totalDiscounts = 0, totalCommissions = 0, count, groupedData } = data as {
+                          filtered: InsuranceRequest[];
+                          totalSales: number;
+                          totalPaid: number;
+                          totalPending: number;
+                          totalDiscounts?: number;
+                          totalCommissions?: number;
+                          count: number;
+                          groupedData: {
+                            title: string;
+                            items: {
+                              groupKey: string;
+                              groupName: string;
+                              count: number;
+                              total: number;
+                              totalPaid: number;
+                              totalPending: number;
+                              insurances: InsuranceRequest[];
+                            }[];
+                          };
+                        };
 
-                          return (
-                            <div className="space-y-6">
-                              <div className="grid grid-cols-2 gap-4">
-                                <div className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm">
-                                  <p className="text-[10px] font-bold text-gray-400 uppercase">Total de Seguros</p>
-                                  <p className="text-xl font-black text-rose-600 mt-1">{count}</p>
-                                </div>
-                                <div className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm">
-                                  <p className="text-[10px] font-bold text-gray-400 uppercase">Saldo Deudor Total</p>
-                                  <p className="text-xl font-black text-gray-900 mt-1">${totalPending.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
-                                </div>
-                              </div>
+                        const reportDayRate = exchangeRates[0]?.rate || 17.55;
+                        const totalSalesMXP = filtered.reduce((sum, ins) => sum + (ins.totalFinal || 0) * getExchangeRateForRequestDate(ins, exchangeRates), 0);
+                        const totalDiscountsMXP = filtered.reduce((sum, ins) => sum + (ins.discount || 0) * getExchangeRateForRequestDate(ins, exchangeRates), 0);
+                        const totalCommissionsMXP = filtered.reduce((sum, ins) => sum + (ins.agentCommission || 0) * getExchangeRateForRequestDate(ins, exchangeRates), 0);
 
-                              <div className="overflow-x-auto">
-                                <table className="w-full text-left border-collapse">
-                                  <thead>
-                                    <tr className="border-b border-gray-200 text-[10px] font-black text-gray-400 uppercase tracking-widest">
-                                      <th className="pb-2">Agente</th>
-                                      <th className="pb-2 text-center">Número de Seguros</th>
-                                      <th className="pb-2 text-right">Saldo Deudor</th>
-                                    </tr>
-                                  </thead>
-                                  <tbody className="divide-y divide-gray-100 text-xs">
-                                    {Object.values(grouped).length === 0 ? (
-                                      <tr>
-                                        <td colSpan={3} className="py-8 text-center text-gray-400 italic">No hay registros de cobros pendientes.</td>
-                                      </tr>
-                                    ) : (
-                                      Object.values(grouped).map((g, idx) => (
-                                        <tr key={idx}>
-                                          <td className="py-2 font-semibold text-gray-800">{g.name}</td>
-                                          <td className="py-2 text-center font-medium text-gray-600">{g.count}</td>
-                                          <td className="py-2 text-right font-bold text-rose-600">${g.pendingAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
-                                        </tr>
-                                      ))
-                                    )}
-                                  </tbody>
-                                </table>
+                        const renderScreenSummary = () => (
+                          <div className="grid grid-cols-4 gap-3">
+                            <div className="bg-white p-3 rounded-2xl border border-gray-100 shadow-sm flex flex-col justify-between">
+                              <div>
+                                <p className="text-[9px] font-bold text-gray-400 uppercase">Total de seguros</p>
+                                <p className="text-base font-black text-gray-900 mt-1">{count}</p>
                               </div>
+                              <p className="text-[10px] font-bold text-indigo-600 mt-1.5 pt-1.5 border-t border-gray-50">T.C.: ${reportDayRate.toFixed(4)}</p>
                             </div>
-                          );
-                        }
+                            <div className="bg-white p-3 rounded-2xl border border-gray-100 shadow-sm flex flex-col justify-between">
+                              <div>
+                                <p className="text-[9px] font-bold text-gray-400 uppercase">Ventas Totales</p>
+                                <p className="text-base font-black text-rose-600 mt-1">${totalSales.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD</p>
+                              </div>
+                              <p className="text-[10px] font-bold text-emerald-600 mt-1.5 pt-1.5 border-t border-gray-50">${totalSalesMXP.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MXP</p>
+                            </div>
+                            <div className="bg-white p-3 rounded-2xl border border-gray-100 shadow-sm flex flex-col justify-between">
+                              <div>
+                                <p className="text-[9px] font-bold text-gray-400 uppercase">Descuentos Totales</p>
+                                <p className="text-base font-black text-amber-500 mt-1">${totalDiscounts.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD</p>
+                              </div>
+                              <p className="text-[10px] font-bold text-red-500 mt-1.5 pt-1.5 border-t border-gray-50">${totalDiscountsMXP.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MXP</p>
+                            </div>
+                            <div className="bg-white p-3 rounded-2xl border border-gray-100 shadow-sm flex flex-col justify-between">
+                              <div>
+                                <p className="text-[9px] font-bold text-gray-400 uppercase">Comisiones Totales</p>
+                                <p className="text-base font-black text-emerald-600 mt-1">${totalCommissions.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD</p>
+                              </div>
+                              <p className="text-[10px] font-bold text-amber-600 mt-1.5 pt-1.5 border-t border-gray-50">${totalCommissionsMXP.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MXP</p>
+                            </div>
+                          </div>
+                        );
 
                         return (
                           <div className="space-y-6">
-                            <div className="grid grid-cols-3 gap-3">
-                              <div className="bg-white p-3 rounded-2xl border border-gray-100 shadow-sm">
-                                <p className="text-[9px] font-bold text-gray-400 uppercase">Por Cobrar</p>
-                                <p className="text-base font-black text-rose-600 mt-1">${totalPending.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
-                              </div>
-                              <div className="bg-white p-3 rounded-2xl border border-gray-100 shadow-sm">
-                                <p className="text-[9px] font-bold text-gray-400 uppercase">Cobrado</p>
-                                <p className="text-base font-black text-emerald-600 mt-1">${totalPaid.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
-                              </div>
-                              <div className="bg-white p-3 rounded-2xl border border-gray-100 shadow-sm">
-                                <p className="text-[9px] font-bold text-gray-400 uppercase">Total Ventas</p>
-                                <p className="text-base font-black text-gray-900 mt-1">${totalSales.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
-                              </div>
-                            </div>
+                            {renderScreenSummary()}
 
-                            <div className="overflow-x-auto">
-                              <table className="w-full text-left border-collapse">
-                                <thead>
-                                  <tr className="border-b border-gray-200 text-[10px] font-black text-gray-400 uppercase tracking-widest">
-                                    <th className="pb-2">Asegurado</th>
-                                    <th className="pb-2">Póliza</th>
-                                    <th className="pb-2 text-right">Total</th>
-                                    <th className="pb-2 text-right">Pagado</th>
-                                    <th className="pb-2 text-right">Pendiente</th>
-                                  </tr>
-                                </thead>
-                                <tbody className="divide-y divide-gray-100 text-xs">
-                                  {filtered.length === 0 ? (
-                                    <tr>
-                                      <td colSpan={5} className="py-8 text-center text-gray-400 italic">No hay seguros pendientes de cobro.</td>
-                                    </tr>
-                                  ) : (
-                                    filtered.map((ins, idx) => {
-                                      const pending = (ins.totalFinal || ins.totalPrice || 0) - (ins.totalPaid || 0);
-                                      return (
-                                        <tr key={ins.id || idx}>
-                                          <td className="py-2 font-medium">{ins.firstName} {ins.lastName}</td>
-                                          <td className="py-2 text-gray-500 font-bold">{ins.policyName || ins.policyId}</td>
-                                          <td className="py-2 text-right font-medium text-gray-600">${(ins.totalFinal || ins.totalPrice || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
-                                          <td className="py-2 text-right text-emerald-600">${(ins.totalPaid || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
-                                          <td className="py-2 text-right font-bold text-rose-600">${pending.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                            {reportFormat === 'consolidated' ? (
+                              <div className="space-y-4">
+                                <h4 className="text-xs font-black text-gray-400 uppercase tracking-wider">Resumen Consolidado ({groupedData.title})</h4>
+                                <div className="overflow-x-auto bg-white rounded-2xl border border-gray-100 shadow-sm p-4">
+                                  <table className="w-full text-left border-collapse">
+                                    <thead>
+                                      <tr className="border-b border-gray-100 text-[10px] font-black text-gray-400 uppercase tracking-wider pb-2">
+                                        <th className="pb-2">Grupo / Cliente</th>
+                                        <th className="pb-2 text-center">Pólizas</th>
+                                        <th className="pb-2 text-right">Venta Total</th>
+                                        <th className="pb-2 text-right">Cobrado</th>
+                                        <th className="pb-2 text-right">Saldo Deudor</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-gray-50 text-xs">
+                                      {groupedData.items.length === 0 ? (
+                                        <tr>
+                                          <td colSpan={5} className="py-6 text-center text-gray-400 italic">No hay datos para agrupar.</td>
                                         </tr>
-                                      );
-                                    })
-                                  )}
-                                </tbody>
-                              </table>
+                                      ) : (
+                                        groupedData.items.map((item, idx) => (
+                                          <tr key={item.groupKey || idx} className="hover:bg-gray-50/50">
+                                            <td className="py-2.5 font-bold text-gray-700">{item.groupName}</td>
+                                            <td className="py-2.5 text-center text-gray-500 font-semibold">{item.count}</td>
+                                            <td className="py-2.5 text-right font-medium text-gray-600">${item.total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                                            <td className="py-2.5 text-right font-medium text-emerald-600">${item.totalPaid.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                                            <td className="py-2.5 text-right font-bold text-rose-600">${item.totalPending.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                                          </tr>
+                                        ))
+                                      )}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="space-y-6">
+                                <h4 className="text-xs font-black text-gray-400 uppercase tracking-wider">Detalle de Cobros ({groupedData.title})</h4>
+                                {groupedData.items.length === 0 ? (
+                                  <div className="py-8 text-center text-gray-400 italic bg-white rounded-2xl border border-gray-100">No hay registros de cobros en el rango de fechas.</div>
+                                ) : (
+                                  groupedData.items.map((item, idx) => {
+                                    if (item.insurances.length === 0) return null;
+                                    return (
+                                      <div key={item.groupKey || idx} className="space-y-2">
+                                        <div className="flex justify-between items-center bg-rose-50/50 px-4 py-2 rounded-xl border border-rose-100/50">
+                                          <span className="text-xs font-bold text-rose-900">{item.groupName}</span>
+                                          <span className="text-[10px] font-black text-rose-700 bg-white px-2 py-0.5 rounded-md border border-rose-100">
+                                            {item.count} pólizas • Saldo: ${item.totalPending.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                          </span>
+                                        </div>
+                                        <div className="overflow-x-auto bg-white rounded-2xl border border-gray-100 p-3 shadow-sm">
+                                          <table className="w-full text-left border-collapse">
+                                            <thead>
+                                              <tr className="border-b border-gray-100 text-[9px] font-black text-gray-400 uppercase tracking-wider pb-1">
+                                                <th className="pb-1.5 whitespace-nowrap">Tipo Acción</th>
+                                                <th className="pb-1.5 whitespace-nowrap">Nombre</th>
+                                                <th className="pb-1.5 whitespace-nowrap">Apellido</th>
+                                                <th className="pb-1.5 whitespace-nowrap">Fecha Nac.</th>
+                                                <th className="pb-1.5 whitespace-nowrap">Cód Origen</th>
+                                                <th className="pb-1.5 whitespace-nowrap">Fecha Salida</th>
+                                                <th className="pb-1.5 whitespace-nowrap">Cód Dest.</th>
+                                                <th className="pb-1.5 whitespace-nowrap">Fecha Regreso</th>
+                                                <th className="pb-1.5 whitespace-nowrap">Meses/Días</th>
+                                                <th className="pb-1.5 whitespace-nowrap text-right">Precio USD</th>
+                                                <th className="pb-1.5 whitespace-nowrap text-right">Descuento USD</th>
+                                                <th className="pb-1.5 whitespace-nowrap text-right">Precio Total USD</th>
+                                                <th className="pb-1.5 whitespace-nowrap text-right">Comisión USD</th>
+                                              </tr>
+                                            </thead>
+                                            <tbody className="divide-y divide-gray-50 text-[11px]">
+                                              {item.insurances.map((ins, iIdx) => (
+                                                <tr key={ins.id || iIdx} className="hover:bg-gray-50/50">
+                                                  <td className="py-2 pr-3 text-gray-600 font-bold whitespace-nowrap">{ins.actionType || ''}</td>
+                                                  <td className="py-2 pr-3 font-medium text-gray-800 whitespace-nowrap">{ins.firstName || ''}</td>
+                                                  <td className="py-2 pr-3 text-gray-800 whitespace-nowrap">{ins.lastName || ''}</td>
+                                                  <td className="py-2 pr-3 text-gray-500 whitespace-nowrap">{ins.birthDate || ''}</td>
+                                                  <td className="py-2 pr-3 text-gray-500 whitespace-nowrap">{ins.originCountry || ''}</td>
+                                                  <td className="py-2 pr-3 text-gray-500 whitespace-nowrap">{ins.startDate || ''}</td>
+                                                  <td className="py-2 pr-3 text-gray-500 whitespace-nowrap">{ins.destinationCountry || ''}</td>
+                                                  <td className="py-2 pr-3 text-gray-500 whitespace-nowrap">{ins.endDate || ''}</td>
+                                                  <td className="py-2 pr-3 text-gray-600 font-semibold whitespace-nowrap">{formatMonthsDays(ins.days || 0)}</td>
+                                                  <td className="py-2 pr-3 text-right text-gray-600 whitespace-nowrap">${(ins.totalPrice || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                                                  <td className="py-2 pr-3 text-right text-gray-600 whitespace-nowrap">${(ins.discount || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                                                  <td className="py-2 pr-3 text-right font-bold text-gray-950 whitespace-nowrap">${(ins.totalFinal || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                                                  <td className="py-2 text-right text-gray-600 whitespace-nowrap">${(ins.agentCommission || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                                                </tr>
+                                              ))}
+                                            </tbody>
+                                          </table>
+                                        </div>
+                                      </div>
+                                    );
+                                  })
+                                )}
+                              </div>
+                            )}
+
+                            <div className="pt-6 mt-6 border-t border-gray-100 space-y-4">
+                              <h4 className="text-xs font-black text-gray-400 uppercase tracking-wider">Resumen de Cobros (Final)</h4>
+                              {renderScreenSummary()}
                             </div>
                           </div>
                         );
@@ -1835,7 +2806,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                               grouped[inv] = { invoice: inv, count: 0, totalCost: 0 };
                             }
                             grouped[inv].count += 1;
-                            grouped[inv].totalCost += (ins.totalCost || 0);
+                            grouped[inv].totalCost += getPolicyEffectiveCost(ins);
                           });
 
                           return (
@@ -1927,103 +2898,141 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                       }
 
                       if (reportType === 'commissions') {
-                        const { filtered, totalSales, totalCommissions, count } = data as { filtered: InsuranceRequest[], totalSales: number, totalCommissions: number, count: number };
-                        
-                        if (reportFormat === 'consolidated') {
-                          const grouped: { [key: string]: { name: string, count: number, totalCommissions: number } } = {};
-                          filtered.forEach(ins => {
-                            const client = clients.find(c => c.id === ins.clientId);
-                            const groupName = client ? (client.commercialName || client.legalName || `${client.firstName} ${client.lastName}`) : 'Individual/Otros';
-                            if (!grouped[groupName]) {
-                              grouped[groupName] = { name: groupName, count: 0, totalCommissions: 0 };
-                            }
-                            grouped[groupName].count += 1;
-                            grouped[groupName].totalCommissions += (ins.agentCommission || 0);
-                          });
+                        const { filtered, totalSales, totalCommissions, totalDiscounts, count } = data as { 
+                          filtered: InsuranceRequest[], 
+                          totalSales: number, 
+                          totalCommissions: number, 
+                          totalDiscounts: number, 
+                          count: number 
+                        };
 
-                          return (
-                            <div className="space-y-6">
-                              <div className="grid grid-cols-2 gap-4">
+                        // Calculate number of insurances per policy type
+                        const policyCounts: { [key: string]: number } = {};
+                        filtered.forEach(ins => {
+                          const pName = ins.policyName || ins.policyId || 'Sin Póliza';
+                          policyCounts[pName] = (policyCounts[pName] || 0) + 1;
+                        });
+
+                        return (
+                          <div className="space-y-6">
+                            {/* Consolidated / Executive Summary */}
+                            <div className="space-y-3">
+                              <h4 className="text-xs font-black text-gray-500 uppercase tracking-widest">Consolidado de Comisiones Pendientes</h4>
+                              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                                 <div className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm">
-                                  <p className="text-[10px] font-bold text-gray-400 uppercase font-black">Agentes con Comisión</p>
-                                  <p className="text-xl font-black text-amber-600 mt-1">{Object.keys(grouped).length}</p>
+                                  <p className="text-[10px] font-bold text-gray-400 uppercase">Total de Seguros</p>
+                                  <p className="text-lg font-black text-amber-600 mt-1">{count}</p>
                                 </div>
                                 <div className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm">
-                                  <p className="text-[10px] font-bold text-gray-400 uppercase font-bold">Saldo de Comisiones Total</p>
-                                  <p className="text-xl font-black text-gray-900 mt-1">${totalCommissions.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                                  <p className="text-[10px] font-bold text-gray-400 uppercase">Ventas Totales</p>
+                                  <p className="text-lg font-black text-gray-900 mt-1">${(totalSales || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                                </div>
+                                <div className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm">
+                                  <p className="text-[10px] font-bold text-gray-400 uppercase font-bold">Descuentos Totales</p>
+                                  <p className="text-lg font-black text-red-600 mt-1">${(totalDiscounts || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                                </div>
+                                <div className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm">
+                                  <p className="text-[10px] font-bold text-gray-400 uppercase font-bold">Comisiones Totales</p>
+                                  <p className="text-lg font-black text-emerald-600 mt-1">${(totalCommissions || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
                                 </div>
                               </div>
+                            </div>
 
-                              <div className="overflow-x-auto">
+                            {/* Insurances by Policy Type */}
+                            <div className="space-y-3">
+                              <h4 className="text-xs font-black text-gray-500 uppercase tracking-widest">Seguros por Tipo de Póliza</h4>
+                              <div className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
+                                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+                                  {Object.entries(policyCounts).map(([policyName, countVal], idx) => (
+                                    <div key={idx} className="flex items-center justify-between p-2 bg-gray-50/50 rounded-xl border border-gray-100/40">
+                                      <span className="text-xs font-semibold text-gray-700 truncate mr-2" title={policyName}>{policyName}</span>
+                                      <span className="text-xs font-bold bg-amber-100 text-amber-800 px-2 py-0.5 rounded-lg">{countVal}</span>
+                                    </div>
+                                  ))}
+                                  {Object.keys(policyCounts).length === 0 && (
+                                    <p className="col-span-full text-center text-xs text-gray-400 italic py-2">No hay datos por póliza.</p>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Detailed 18-column Table */}
+                            <div className="space-y-3">
+                              <h4 className="text-xs font-black text-gray-500 uppercase tracking-widest">Detalle del Reporte</h4>
+                              <div className="overflow-x-auto border border-gray-100 rounded-2xl shadow-sm bg-white p-1">
                                 <table className="w-full text-left border-collapse">
                                   <thead>
-                                    <tr className="border-b border-gray-200 text-[10px] font-black text-gray-400 uppercase tracking-widest">
-                                      <th className="pb-2">Agente / Corporativo</th>
-                                      <th className="pb-2 text-center">Número de Seguros</th>
-                                      <th className="pb-2 text-right">Saldo de Comisiones</th>
+                                    <tr className="border-b border-gray-200 text-[10px] font-black text-gray-400 uppercase tracking-widest bg-gray-50/80">
+                                      <th className="p-3 whitespace-nowrap">Fecha Sol.</th>
+                                      <th className="p-3 whitespace-nowrap">Tipo Accion</th>
+                                      <th className="p-3 whitespace-nowrap">Nombre</th>
+                                      <th className="p-3 whitespace-nowrap">Apellido</th>
+                                      <th className="p-3 whitespace-nowrap">Fecha Nac.</th>
+                                      <th className="p-3 whitespace-nowrap">Cód Origen</th>
+                                      <th className="p-3 whitespace-nowrap">Fecha Salida</th>
+                                      <th className="p-3 whitespace-nowrap">Cód Destino</th>
+                                      <th className="p-3 whitespace-nowrap">Fecha Regreso</th>
+                                      <th className="p-3 whitespace-nowrap">Meses/Dias</th>
+                                      <th className="p-3 whitespace-nowrap text-right">Precio USD</th>
+                                      <th className="p-3 whitespace-nowrap text-right">Descuento USD</th>
+                                      <th className="p-3 whitespace-nowrap text-right">Comisión USD</th>
+                                      <th className="p-3 whitespace-nowrap text-right">Precio Total USD</th>
+                                      <th className="p-3 whitespace-nowrap text-right">T.C.</th>
+                                      <th className="p-3 whitespace-nowrap text-right">Precio MXP</th>
+                                      <th className="p-3 whitespace-nowrap text-right">Descuento MXP</th>
+                                      <th className="p-3 whitespace-nowrap text-right">Comisión MXP</th>
+                                      <th className="p-3 whitespace-nowrap text-right">Precio Total MXP</th>
                                     </tr>
                                   </thead>
                                   <tbody className="divide-y divide-gray-100 text-xs">
-                                    {Object.values(grouped).length === 0 ? (
+                                    {filtered.length === 0 ? (
                                       <tr>
-                                        <td colSpan={3} className="py-8 text-center text-gray-400 italic">No hay comisiones de agente pendientes.</td>
+                                        <td colSpan={19} className="py-8 text-center text-gray-400 italic">No hay comisiones de agente pendientes.</td>
                                       </tr>
                                     ) : (
-                                      Object.values(grouped).map((g, idx) => (
-                                        <tr key={idx}>
-                                          <td className="py-2 font-semibold text-gray-800">{g.name}</td>
-                                          <td className="py-2 text-center font-medium text-gray-600">{g.count}</td>
-                                          <td className="py-2 text-right font-bold text-amber-600">${g.totalCommissions.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
-                                        </tr>
-                                      ))
+                                      filtered.map((ins, idx) => {
+                                        const tc = getExchangeRateForRequestDate(ins, exchangeRates);
+                                        const precioUSD = ins.totalPrice || 0;
+                                        const descuentoUSD = ins.discount || 0;
+                                        const comisionUSD = ins.agentCommission || 0;
+                                        const totalUSD = ins.totalFinal || 0;
+
+                                        const precioMXP = precioUSD * tc;
+                                        const descuentoMXP = descuentoUSD * tc;
+                                        const comisionMXP = comisionUSD * tc;
+                                        const totalMXP = totalUSD * tc;
+
+                                        const durationStr = formatMonthsDays(ins.days || 0);
+                                        const reqDateStr = getRequestDateString(ins);
+
+                                        return (
+                                          <tr key={ins.id || idx} className="hover:bg-gray-50/50">
+                                            <td className="p-3 whitespace-nowrap font-medium text-gray-500">{reqDateStr}</td>
+                                            <td className="p-3 whitespace-nowrap font-medium text-gray-700">{ins.actionType || ''}</td>
+                                            <td className="p-3 whitespace-nowrap text-gray-600">{ins.firstName || ''}</td>
+                                            <td className="p-3 whitespace-nowrap text-gray-600">{ins.lastName || ''}</td>
+                                            <td className="p-3 whitespace-nowrap text-gray-500">{ins.birthDate || ''}</td>
+                                            <td className="p-3 whitespace-nowrap text-gray-500">{ins.originCountry || ''}</td>
+                                            <td className="p-3 whitespace-nowrap text-gray-500">{ins.startDate || ''}</td>
+                                            <td className="p-3 whitespace-nowrap text-gray-500">{ins.destinationCountry || ''}</td>
+                                            <td className="p-3 whitespace-nowrap text-gray-500">{ins.endDate || ''}</td>
+                                            <td className="p-3 whitespace-nowrap text-gray-500 font-semibold">{durationStr}</td>
+                                            <td className="p-3 whitespace-nowrap text-right text-gray-600">${precioUSD.toFixed(2)}</td>
+                                            <td className="p-3 whitespace-nowrap text-right text-red-600">-${descuentoUSD.toFixed(2)}</td>
+                                            <td className="p-3 whitespace-nowrap text-right text-emerald-600">${comisionUSD.toFixed(2)}</td>
+                                            <td className="p-3 whitespace-nowrap text-right font-bold text-gray-900">${totalUSD.toFixed(2)}</td>
+                                            <td className="p-3 whitespace-nowrap text-right text-blue-600 font-bold">{tc.toFixed(4)}</td>
+                                            <td className="p-3 whitespace-nowrap text-right text-gray-500">${precioMXP.toFixed(2)}</td>
+                                            <td className="p-3 whitespace-nowrap text-right text-red-500">-${descuentoMXP.toFixed(2)}</td>
+                                            <td className="p-3 whitespace-nowrap text-right text-emerald-500">${comisionMXP.toFixed(2)}</td>
+                                            <td className="p-3 whitespace-nowrap text-right font-bold text-gray-800">${totalMXP.toFixed(2)}</td>
+                                          </tr>
+                                        );
+                                      })
                                     )}
                                   </tbody>
                                 </table>
                               </div>
-                            </div>
-                          );
-                        }
-
-                        return (
-                          <div className="space-y-6">
-                            <div className="grid grid-cols-2 gap-4">
-                              <div className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm">
-                                <p className="text-[10px] font-bold text-gray-400 uppercase">Comisiones Coincidencias</p>
-                                <p className="text-xl font-black text-amber-600 mt-1">{count}</p>
-                              </div>
-                              <div className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm">
-                                <p className="text-[10px] font-bold text-gray-400 uppercase font-bold">Comisión Total Pendiente</p>
-                                <p className="text-xl font-black text-gray-900 mt-1">${totalCommissions.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
-                              </div>
-                            </div>
-
-                            <div className="overflow-x-auto">
-                              <table className="w-full text-left border-collapse">
-                                <thead>
-                                  <tr className="border-b border-gray-200 text-[10px] font-black text-gray-400 uppercase tracking-widest">
-                                    <th className="pb-2">Asegurado</th>
-                                    <th className="pb-2">Póliza</th>
-                                    <th className="pb-2 text-right">Venta</th>
-                                    <th className="pb-2 text-right">Comisión</th>
-                                  </tr>
-                                </thead>
-                                <tbody className="divide-y divide-gray-100 text-xs">
-                                  {filtered.length === 0 ? (
-                                    <tr>
-                                      <td colSpan={4} className="py-8 text-center text-gray-400 italic">No hay comisiones de agente pendientes.</td>
-                                    </tr>
-                                  ) : (
-                                    filtered.map((ins, idx) => (
-                                      <tr key={ins.id || idx}>
-                                        <td className="py-2 font-medium">{ins.firstName} {ins.lastName}</td>
-                                        <td className="py-2 text-gray-500 font-bold">{ins.policyName || ins.policyId}</td>
-                                        <td className="py-2 text-right font-medium text-gray-600">${(ins.totalFinal || ins.totalPrice || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
-                                        <td className="py-2 text-right font-bold text-amber-600">${(ins.agentCommission || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
-                                      </tr>
-                                    ))
-                                  )}
-                                </tbody>
-                              </table>
                             </div>
                           </div>
                         );

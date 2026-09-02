@@ -1,9 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { collection, query, onSnapshot, addDoc, doc, updateDoc, deleteDoc, orderBy, limit, serverTimestamp, getDocs, where } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../firebase';
 import { Country, ExchangeRate, UserProfile, CustomRole } from '../types';
 import { COUNTRIES } from '../constants';
-import { Plus, Trash2, Edit2, Save, X, Globe, DollarSign, History, TrendingUp, AlertCircle, Shield, List, Layers, RefreshCw } from 'lucide-react';
+import { Plus, Trash2, Edit2, Save, X, Globe, DollarSign, History, TrendingUp, AlertCircle, Shield, List, Layers, RefreshCw, ArrowUpDown, ArrowUp, ArrowDown, Calendar, CreditCard } from 'lucide-react';
 import { format } from 'date-fns';
 import InsuranceTypesManager from './InsuranceTypesManager';
 import ActionTypesManager from './ActionTypesManager';
@@ -14,11 +14,100 @@ import PaymentMethodsManager from './PaymentMethodsManager';
 import ConfirmModal from './ConfirmModal';
 import { usePermissions } from '../hooks/usePermissions';
 
+function parseExchangeRateDate(dateVal: any): Date | null {
+  if (!dateVal) return null;
+
+  if (typeof dateVal === 'object') {
+    if (typeof dateVal.toDate === 'function') {
+      return dateVal.toDate();
+    }
+    if (typeof dateVal.seconds === 'number') {
+      return new Date(dateVal.seconds * 1000);
+    }
+  }
+
+  if (dateVal instanceof Date) {
+    return isNaN(dateVal.getTime()) ? null : dateVal;
+  }
+
+  if (typeof dateVal === 'number') {
+    const d = new Date(dateVal);
+    return isNaN(d.getTime()) ? null : d;
+  }
+
+  if (typeof dateVal === 'string') {
+    const trimmed = dateVal.trim();
+    if (!trimmed) return null;
+
+    if (trimmed.includes('/') || (trimmed.includes('-') && !/^\d{4}-/.test(trimmed))) {
+      const separator = trimmed.includes('/') ? '/' : '-';
+      const parts = trimmed.split(separator);
+      if (parts.length === 3) {
+        let p1 = parseInt(parts[0], 10);
+        let p2 = parseInt(parts[1], 10);
+        let p3 = parseInt(parts[2], 10);
+
+        if (!isNaN(p1) && !isNaN(p2) && !isNaN(p3)) {
+          if (p1 > 1000) {
+            return new Date(p1, p2 - 1, p3);
+          }
+          if (p3 > 1000) {
+            return new Date(p3, p2 - 1, p1);
+          }
+          if (p3 < 100) {
+            return new Date(p3 + 2000, p2 - 1, p1);
+          }
+        }
+      }
+    }
+
+    if (/^\d{4}-\d{2}-\d{2}/.test(trimmed)) {
+      const datePart = trimmed.split('T')[0];
+      const [year, month, day] = datePart.split('-').map(Number);
+      if (year && month && day) {
+        return new Date(year, month - 1, day);
+      }
+    }
+
+    const parsed = new Date(trimmed);
+    if (!isNaN(parsed.getTime())) {
+      return parsed;
+    }
+  }
+
+  return null;
+}
+
+function formatExchangeRateDateDisplay(dateVal: any): string {
+  const parsed = parseExchangeRateDate(dateVal);
+  if (!parsed) return typeof dateVal === 'string' ? dateVal : '';
+  const day = String(parsed.getDate()).padStart(2, '0');
+  const month = String(parsed.getMonth() + 1).padStart(2, '0');
+  const year = parsed.getFullYear();
+  return `${day}/${month}/${year}`;
+}
+
+function getExchangeRateTimestamp(dateVal: any): number {
+  const parsed = parseExchangeRateDate(dateVal);
+  return parsed ? parsed.getTime() : 0;
+}
+
+function toISOInputDate(dateVal: any): string {
+  const parsed = parseExchangeRateDate(dateVal);
+  if (!parsed) return typeof dateVal === 'string' ? dateVal : '';
+  const year = parsed.getFullYear();
+  const month = String(parsed.getMonth() + 1).padStart(2, '0');
+  const day = String(parsed.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
 export default function CatalogsManager({ profile, rolePermissions }: { profile: UserProfile | null, rolePermissions: CustomRole | null }) {
   const { hasPermission } = usePermissions(profile, rolePermissions);
   const [activeSubTab, setActiveSubTab] = useState<'exchange' | 'countries' | 'insurance-types' | 'action-types' | 'categories' | 'subcategories' | 'payment-methods' | 'letters'>('exchange');
   const [countries, setCountries] = useState<Country[]>([]);
   const [exchangeRates, setExchangeRates] = useState<ExchangeRate[]>([]);
+  const [sortField, setSortField] = useState<'date' | 'rate' | 'cardFee'>('date');
+  const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('desc');
   const [editingCountry, setEditingCountry] = useState<Country | null>(null);
   const [isAddingCountry, setIsAddingCountry] = useState(false);
   const [editingRate, setEditingRate] = useState<ExchangeRate | null>(null);
@@ -73,7 +162,7 @@ export default function CatalogsManager({ profile, rolePermissions }: { profile:
       handleFirestoreError(error, OperationType.GET, 'countries');
     });
 
-    const qExchange = query(collection(db, 'exchangeRates'), orderBy('date', 'desc'), limit(30));
+    const qExchange = query(collection(db, 'exchangeRates'), orderBy('date', 'desc'), limit(500));
     const unsubExchange = onSnapshot(qExchange, (snap) => {
       setExchangeRates(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as ExchangeRate)));
     }, (error) => {
@@ -85,6 +174,50 @@ export default function CatalogsManager({ profile, rolePermissions }: { profile:
       unsubExchange();
     };
   }, []);
+
+  const handleSort = (field: 'date' | 'rate' | 'cardFee') => {
+    if (sortField === field) {
+      setSortOrder(prev => prev === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortField(field);
+      setSortOrder('desc');
+    }
+  };
+
+  const sortedExchangeRates = useMemo(() => {
+    return [...exchangeRates].sort((a, b) => {
+      let aVal: any;
+      let bVal: any;
+
+      if (sortField === 'cardFee') {
+        aVal = a.cardFee ?? (a as any).cargoTarjeta ?? 4.5;
+        bVal = b.cardFee ?? (b as any).cargoTarjeta ?? 4.5;
+      } else if (sortField === 'date') {
+        aVal = getExchangeRateTimestamp(a.date);
+        bVal = getExchangeRateTimestamp(b.date);
+      } else if (sortField === 'rate') {
+        aVal = a.rate || 0;
+        bVal = b.rate || 0;
+      }
+
+      if (aVal < bVal) return sortOrder === 'asc' ? -1 : 1;
+      if (aVal > bVal) return sortOrder === 'asc' ? 1 : -1;
+      return 0;
+    });
+  }, [exchangeRates, sortField, sortOrder]);
+
+  const prevRateMap = useMemo(() => {
+    const map = new Map<string, ExchangeRate>();
+    const sortedByDateDesc = [...exchangeRates].sort((a, b) => getExchangeRateTimestamp(b.date) - getExchangeRateTimestamp(a.date));
+    for (let i = 0; i < sortedByDateDesc.length; i++) {
+      const current = sortedByDateDesc[i];
+      const prev = sortedByDateDesc[i + 1];
+      if (current.id && prev) {
+        map.set(current.id, prev);
+      }
+    }
+    return map;
+  }, [exchangeRates]);
 
   // Automatically update existing countries with their Capital if they don't have one
   useEffect(() => {
@@ -390,7 +523,7 @@ export default function CatalogsManager({ profile, rolePermissions }: { profile:
           {/* History Table */}
           <div className="lg:col-span-2">
             <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
-              <div className="p-6 border-b border-gray-50 flex items-center justify-between">
+              <div className="p-6 border-b border-gray-50 flex flex-wrap items-center justify-between gap-4">
                 <div className="flex items-center gap-4">
                   <div className="flex items-center gap-2">
                     <History className="w-5 h-5 text-gray-400" />
@@ -406,7 +539,21 @@ export default function CatalogsManager({ profile, rolePermissions }: { profile:
                     </button>
                   )}
                 </div>
-                <TrendingUp className="w-5 h-5 text-green-500" />
+
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => handleSort('date')}
+                    className="flex items-center gap-1.5 text-xs font-bold text-slate-700 bg-slate-100 hover:bg-slate-200 px-3 py-1.5 rounded-xl transition-all cursor-pointer border border-slate-200"
+                    title="Hacer clic para ordenar por fecha"
+                  >
+                    <Calendar className="w-3.5 h-3.5 text-blue-600" />
+                    <span>Fecha: {sortField === 'date' ? (sortOrder === 'desc' ? 'Más Recientes' : 'Más Antiguos') : 'Ordenar'}</span>
+                    {sortField === 'date' && (
+                      sortOrder === 'desc' ? <ArrowDown className="w-3.5 h-3.5 text-blue-600" /> : <ArrowUp className="w-3.5 h-3.5 text-blue-600" />
+                    )}
+                  </button>
+                  <TrendingUp className="w-5 h-5 text-green-500 hidden sm:block" />
+                </div>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-left">
@@ -416,10 +563,10 @@ export default function CatalogsManager({ profile, rolePermissions }: { profile:
                         <th className="px-6 py-4 font-medium w-10">
                           <input
                             type="checkbox"
-                            checked={exchangeRates.length > 0 && selectedRates.length === exchangeRates.length}
+                            checked={sortedExchangeRates.length > 0 && selectedRates.length === sortedExchangeRates.length}
                             onChange={(e) => {
                               if (e.target.checked) {
-                                setSelectedRates(exchangeRates.map(r => r.id!));
+                                setSelectedRates(sortedExchangeRates.map(r => r.id!));
                               } else {
                                 setSelectedRates([]);
                               }
@@ -428,17 +575,56 @@ export default function CatalogsManager({ profile, rolePermissions }: { profile:
                           />
                         </th>
                       )}
-                      <th className="px-6 py-4 font-medium">Fecha</th>
-                      <th className="px-6 py-4 font-medium">Tasa (USD/MXP)</th>
-                      <th className="px-6 py-4 font-medium">Variación</th>
-                      {isAdmin && <th className="px-6 py-4 font-medium text-right">Acciones</th>}
+                      <th 
+                        className="px-6 py-4 font-bold cursor-pointer select-none hover:text-blue-600 transition-colors"
+                        onClick={() => handleSort('date')}
+                      >
+                        <div className="flex items-center gap-1.5">
+                          <span>Fecha</span>
+                          {sortField === 'date' ? (
+                            sortOrder === 'desc' ? <ArrowDown className="w-3.5 h-3.5 text-blue-600 font-bold" /> : <ArrowUp className="w-3.5 h-3.5 text-blue-600 font-bold" />
+                          ) : (
+                            <ArrowUpDown className="w-3.5 h-3.5 text-gray-400" />
+                          )}
+                        </div>
+                      </th>
+                      <th 
+                        className="px-6 py-4 font-bold cursor-pointer select-none hover:text-blue-600 transition-colors"
+                        onClick={() => handleSort('rate')}
+                      >
+                        <div className="flex items-center gap-1.5">
+                          <span>Tasa (USD/MXP)</span>
+                          {sortField === 'rate' ? (
+                            sortOrder === 'desc' ? <ArrowDown className="w-3.5 h-3.5 text-blue-600 font-bold" /> : <ArrowUp className="w-3.5 h-3.5 text-blue-600 font-bold" />
+                          ) : (
+                            <ArrowUpDown className="w-3.5 h-3.5 text-gray-400" />
+                          )}
+                        </div>
+                      </th>
+                      <th 
+                        className="px-6 py-4 font-bold cursor-pointer select-none hover:text-blue-600 transition-colors"
+                        onClick={() => handleSort('cardFee')}
+                      >
+                        <div className="flex items-center gap-1.5">
+                          <span>Cargo Tarjeta</span>
+                          {sortField === 'cardFee' ? (
+                            sortOrder === 'desc' ? <ArrowDown className="w-3.5 h-3.5 text-blue-600 font-bold" /> : <ArrowUp className="w-3.5 h-3.5 text-blue-600 font-bold" />
+                          ) : (
+                            <ArrowUpDown className="w-3.5 h-3.5 text-gray-400" />
+                          )}
+                        </div>
+                      </th>
+                      <th className="px-6 py-4 font-bold">Variación</th>
+                      {isAdmin && <th className="px-6 py-4 font-bold text-right">Acciones</th>}
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
-                    {exchangeRates.map((rate, idx) => {
-                      const prevRate = exchangeRates[idx + 1];
+                    {sortedExchangeRates.map((rate) => {
+                      const prevRate = rate.id ? prevRateMap.get(rate.id) : undefined;
                       const diff = prevRate ? rate.rate - prevRate.rate : 0;
                       const isSelected = selectedRates.includes(rate.id!);
+                      const fee = rate.cardFee !== undefined ? rate.cardFee : (rate as any).cargoTarjeta !== undefined ? (rate as any).cargoTarjeta : 4.5;
+
                       return (
                         <tr key={rate.id} className={`hover:bg-gray-50 transition-colors ${isSelected ? 'bg-blue-50/30' : ''}`}>
                           {isAdmin && (
@@ -457,22 +643,27 @@ export default function CatalogsManager({ profile, rolePermissions }: { profile:
                               />
                             </td>
                           )}
-                          <td className="px-6 py-4 text-sm text-gray-600">{rate.date}</td>
-                          <td className="px-6 py-4 text-sm font-bold text-gray-900">${rate.rate.toFixed(4)}</td>
+                          <td className="px-6 py-4 text-sm font-semibold text-gray-800">{formatExchangeRateDateDisplay(rate.date)}</td>
+                          <td className="px-6 py-4 text-sm font-black text-gray-900">${rate.rate.toFixed(4)}</td>
+                          <td className="px-6 py-4 text-sm font-medium text-amber-700 bg-amber-50/50 rounded-lg inline-block my-2">
+                            {fee}%
+                          </td>
                           <td className="px-6 py-4 text-sm">
-                            {idx < exchangeRates.length - 1 && (
-                              <span className={`font-medium ${diff > 0 ? 'text-red-500' : diff < 0 ? 'text-green-500' : 'text-gray-400'}`}>
+                            {prevRate ? (
+                              <span className={`font-semibold ${diff > 0 ? 'text-red-500' : diff < 0 ? 'text-green-500' : 'text-gray-400'}`}>
                                 {diff > 0 ? '↑' : diff < 0 ? '↓' : '='} {Math.abs(diff).toFixed(4)}
                               </span>
+                            ) : (
+                              <span className="text-gray-400 text-xs">Base</span>
                             )}
                           </td>
                           {isAdmin && (
                             <td className="px-6 py-4 text-right">
                               <div className="flex justify-end gap-2">
-                                <button onClick={() => setEditingRate(rate)} className="text-gray-400 hover:text-blue-600">
+                                <button onClick={() => setEditingRate(rate)} className="text-gray-400 hover:text-blue-600 p-1 rounded hover:bg-blue-50">
                                   <Edit2 className="w-4 h-4" />
                                 </button>
-                                <button onClick={() => handleDeleteRate(rate.id!)} className="text-gray-400 hover:text-red-600">
+                                <button onClick={() => handleDeleteRate(rate.id!)} className="text-gray-400 hover:text-red-600 p-1 rounded hover:bg-red-50">
                                   <Trash2 className="w-4 h-4" />
                                 </button>
                               </div>
@@ -481,9 +672,9 @@ export default function CatalogsManager({ profile, rolePermissions }: { profile:
                         </tr>
                       );
                     })}
-                    {exchangeRates.length === 0 && (
+                    {sortedExchangeRates.length === 0 && (
                       <tr>
-                        <td colSpan={3} className="px-6 py-12 text-center text-gray-400 italic">
+                        <td colSpan={6} className="px-6 py-12 text-center text-gray-400 italic">
                           No hay registros históricos disponibles.
                         </td>
                       </tr>
@@ -623,7 +814,7 @@ export default function CatalogsManager({ profile, rolePermissions }: { profile:
                 <input
                   type="date"
                   required
-                  value={editingRate.date}
+                  value={toISOInputDate(editingRate.date)}
                   onChange={e => setEditingRate({ ...editingRate, date: e.target.value })}
                   className="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
                 />
@@ -636,6 +827,17 @@ export default function CatalogsManager({ profile, rolePermissions }: { profile:
                   required
                   value={editingRate.rate}
                   onChange={e => setEditingRate({ ...editingRate, rate: parseFloat(e.target.value) || 0 })}
+                  className="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Cargo Tarjeta (%)</label>
+                <input
+                  type="number"
+                  step="0.1"
+                  required
+                  value={editingRate.cardFee !== undefined ? editingRate.cardFee : ((editingRate as any).cargoTarjeta !== undefined ? (editingRate as any).cargoTarjeta : 4.5)}
+                  onChange={e => setEditingRate({ ...editingRate, cardFee: parseFloat(e.target.value) || 0 })}
                   className="w-full p-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
                 />
               </div>

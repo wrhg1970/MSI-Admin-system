@@ -35,6 +35,7 @@ import {
 } from 'lucide-react';
 import { useState } from 'react';
 import { APP_LOGO, LOGO_LINK } from '../constants';
+import HeaderSearch from './HeaderSearch';
 
 interface LayoutProps {
   children: ReactNode;
@@ -423,7 +424,21 @@ export default function Layout({ children, profile, rolePermissions, companySett
       )}
 
       {/* Main Content */}
-      <main className="flex-1 pt-16 md:pt-0 overflow-auto">
+      <main className="flex-1 pt-16 md:pt-0 overflow-auto flex flex-col">
+        {/* Top Layout Header with Search */}
+        <header className="bg-white/95 backdrop-blur-md border-b border-gray-100 px-4 sm:px-8 py-3 sticky top-0 z-30 shadow-xs flex items-center justify-between gap-4">
+          <div className="flex-1 max-w-xl">
+            <HeaderSearch />
+          </div>
+          <div className="hidden sm:flex items-center gap-3 text-xs text-gray-500 font-medium">
+            <div className="flex items-center gap-2 px-3 py-1.5 bg-gray-50 border border-gray-100 rounded-xl">
+              <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+              <span className="font-bold text-gray-700">{profile?.displayName || 'Usuario'}</span>
+              <span className="text-[10px] bg-blue-100 text-blue-700 font-bold px-1.5 py-0.5 rounded uppercase">{profile?.role || 'Agente'}</span>
+            </div>
+          </div>
+        </header>
+
         <div className={`${
           location.pathname.includes('policies') || 
           location.pathname.includes('reports') || 
@@ -432,7 +447,7 @@ export default function Layout({ children, profile, rolePermissions, companySett
           location.pathname.includes('historico') 
             ? 'max-w-full lg:max-w-[96%] xl:max-w-[98%]' 
             : 'max-w-7xl'
-        } mx-auto p-4 md:p-8 w-full`}>
+        } mx-auto p-4 md:p-8 w-full flex-1`}>
           {children}
         </div>
       </main>

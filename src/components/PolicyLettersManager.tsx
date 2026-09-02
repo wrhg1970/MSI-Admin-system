@@ -4,8 +4,9 @@ import { db, handleFirestoreError, OperationType } from '../firebase';
 import { Policy, PolicyLetter } from '../types';
 import { Plus, Trash2, Edit2, Save, X, FileText, Globe, List, PlusCircle, MinusCircle, Copy, AlertTriangle } from 'lucide-react';
 import ConfirmModal from './ConfirmModal';
+import { findPolicyPrioritized } from '../lib/policyUtils';
 
-const LANGUAGE_ORDER = ['es', 'en', 'policy', 'covid', 'fr', 'it', 'de'];
+const LANGUAGE_ORDER = ['es', 'en', 'es_spain', 'embajada_spain', 'policy', 'covid', 'fr', 'it', 'de'];
 
 export const sortLettersByLanguage = <T extends { language: string }>(letters: T[]): T[] => {
   return [...letters].sort((a, b) => {
@@ -180,18 +181,10 @@ export default function PolicyLettersManager() {
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
         {[...new Set(letters.map(l => l.policyId))].filter(policyId => {
           if (selectedPlan === 'todos') return true;
-          const policy = policies.find(p => 
-            p.id === policyId || 
-            (p.CodigoPoliza && p.CodigoPoliza === policyId) ||
-            p.name === policyId
-          );
+          const policy = findPolicyPrioritized(policyId, policies);
           return policy?.plan === selectedPlan;
         }).map((policyId) => {
-          const policy = policies.find(p => 
-            p.id === policyId || 
-            (p.CodigoPoliza && p.CodigoPoliza === policyId) ||
-            p.name === policyId
-          );
+          const policy = findPolicyPrioritized(policyId, policies);
           const policyLetters = sortLettersByLanguage(letters.filter(l => l.policyId === policyId));
           const isArchived = policy?.status === 'archived';
           const isMissing = !policy;
@@ -237,6 +230,7 @@ export default function PolicyLettersManager() {
                       >
                         <Globe className="w-3 h-3" />
                         {letter.language === 'es_spain' ? 'ESPAÑA' : 
+                         letter.language === 'embajada_spain' ? 'EMBAJADA ESPAÑA' : 
                          letter.language === 'covid' ? 'CORONAVIRUS' : 
                          letter.language === 'policy' ? 'POLICY' : 
                          letter.language.toUpperCase()}
@@ -343,15 +337,92 @@ export default function PolicyLettersManager() {
                   >
                     <option value="es">Español</option>
                     <option value="en">Inglés</option>
+                    <option value="es_spain">España</option>
+                    <option value="embajada_spain">Embajada España</option>
                     <option value="policy">Policy</option>
                     <option value="covid">Coronavirus</option>
                     <option value="fr">Francés</option>
                     <option value="it">Italiano</option>
                     <option value="de">Alemán</option>
-                    <option value="es_spain">España</option>
                   </select>
                 </div>
               </div>
+
+              {editingLetter.language === 'es_spain' && (
+                <div className="bg-amber-50 border border-amber-200 p-4 rounded-xl flex items-center justify-between">
+                  <div>
+                    <h4 className="text-sm font-bold text-amber-800">Plantilla España</h4>
+                    <p className="text-xs text-amber-600">Aplica la plantilla estándar para viajes a España y espacio Schengen.</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingLetter({
+                        ...editingLetter,
+                        title: 'CERTIFICADO DE COBERTURA / ESPAÑA',
+                        content: `Por medio de la presente, certifico que {nombre}, con fecha de nacimiento {fecha_nacimiento}, ha adquirido un seguro médico de viaje internacional válido para su estancia en España y demás estados miembros del Espacio Schengen durante el periodo del {fechas}.
+
+El seguro contratado garantiza una cobertura médica integral que incluye asistencia médica de urgencia, atención hospitalaria y repatriación en España (mínimo de cobertura 30,000 EUR / 50,000 USD sin deducible ni copagos).
+
+Número de póliza: {poliza}
+Plan contratado: {plan}
+Duración de la estancia: {dias} días en {destino}`,
+                        benefits: [
+                          { label: 'Asistencia Médica por Enfermedad o Accidente', value: 'US$ 50,000 / €30,000', isBold: true },
+                          { label: 'Deducible / Copago', value: 'US$ 0 (Sin Deducible)', isBold: false },
+                          { label: 'Repatriación Sanitaria y Funeraria', value: 'Incluido', isBold: false },
+                          { label: 'Gastos de Hospitalización y Urgencias', value: 'Incluido', isBold: false },
+                          { label: 'Cobertura por COVID-19 y Enfermedades Virales', value: 'Incluido', isBold: false },
+                          { label: 'Asistencia en Viaje las 24 Horas', value: 'Incluido', isBold: false }
+                        ],
+                        footer: 'Es responsabilidad del asegurado conocer los términos y condiciones. Teléfono de emergencias: +1 888 505 2774 / +1 743 244 2474. Email: CISIAssist@robinassist.com'
+                      });
+                    }}
+                    className="px-4 py-2 bg-amber-600 text-white text-xs font-bold rounded-lg hover:bg-amber-700 transition-all flex items-center gap-2"
+                  >
+                    <Plus className="w-3 h-3" />
+                    Aplicar Plantilla
+                  </button>
+                </div>
+              )}
+
+              {editingLetter.language === 'embajada_spain' && (
+                <div className="bg-amber-50 border border-amber-200 p-4 rounded-xl flex items-center justify-between">
+                  <div>
+                    <h4 className="text-sm font-bold text-amber-800">Plantilla Embajada España</h4>
+                    <p className="text-xs text-amber-600">Aplica el texto oficial certificado requerido por los consulados y Embajada de España.</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingLetter({
+                        ...editingLetter,
+                        title: 'CERTIFICADO DE COBERTURA / EMBAJADA DE ESPAÑA',
+                        content: `Por medio de la presente, certifico que {nombre}, con fecha de nacimiento {fecha_nacimiento}, ha adquirido un seguro médico de viaje internacional válido para su estancia en España y demás estados miembros del Espacio Schengen durante el periodo del {fechas}.
+
+El seguro contratado garantiza una cobertura médica integral que incluye asistencia médica de urgencia, atención hospitalaria y repatriación por razones médicas o fallecimiento, cumpliendo con los requerimientos exigidos por la Embajada y Consulados de España (mínimo de cobertura 30,000 EUR / 50,000 USD sin deducible ni copagos).
+
+Número de póliza: {poliza}
+Plan contratado: {plan}
+Duración de la estancia: {dias} días en {destino}`,
+                        benefits: [
+                          { label: 'Asistencia Médica por Enfermedad o Accidente', value: 'US$ 50,000 / €30,000', isBold: true },
+                          { label: 'Deducible / Copago', value: 'US$ 0 (Sin Deducible)', isBold: false },
+                          { label: 'Repatriación Sanitaria y Funeraria', value: 'Incluido', isBold: false },
+                          { label: 'Gastos de Hospitalización y Urgencias', value: 'Incluido', isBold: false },
+                          { label: 'Cobertura por COVID-19 y Enfermedades Virales', value: 'Incluido', isBold: false },
+                          { label: 'Asistencia en Viaje las 24 Horas', value: 'Incluido', isBold: false }
+                        ],
+                        footer: 'Es responsabilidad del asegurado conocer los términos y condiciones. Teléfono de emergencias: +1 888 505 2774 / +1 743 244 2474. Email: CISIAssist@robinassist.com'
+                      });
+                    }}
+                    className="px-4 py-2 bg-amber-600 text-white text-xs font-bold rounded-lg hover:bg-amber-700 transition-all flex items-center gap-2"
+                  >
+                    <Plus className="w-3 h-3" />
+                    Aplicar Plantilla
+                  </button>
+                </div>
+              )}
 
               {editingLetter.language === 'covid' && (
                 <div className="bg-blue-50 border border-blue-200 p-4 rounded-xl flex items-center justify-between">

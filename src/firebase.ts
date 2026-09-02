@@ -1,10 +1,17 @@
 import { initializeApp } from 'firebase/app';
 import { getAuth } from 'firebase/auth';
-import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager, memoryLocalCache, doc, getDocFromServer } from 'firebase/firestore';
+import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager, memoryLocalCache, doc, getDocFromServer, setLogLevel } from 'firebase/firestore';
 import { getStorage } from 'firebase/storage';
 import firebaseConfig from '../firebase-applet-config.json';
 
-// Intercept and gracefully handle harmless Firestore gRPC idle stream cancellation messages
+// Set Firestore log level to error to suppress harmless gRPC stream disconnect warnings in the console
+try {
+  setLogLevel('error');
+} catch (e) {
+  console.warn('Failed to set Firestore log level:', e);
+}
+
+// Intercept and gracefully handle harmless Firestore gRPC idle stream cancellation messages and internal assertion crashes
 if (typeof window !== 'undefined') {
   const isHarmless = (msg: any) => {
     if (!msg) return false;
@@ -14,8 +21,42 @@ if (typeof window !== 'undefined') {
            lower.includes('timed out waiting for new targets') ||
            lower.includes('cancelled: disconnecting') ||
            lower.includes('grpcconnection rpc') ||
-           lower.includes('listen\' stream');
+           lower.includes('listen\' stream') ||
+           lower.includes('internal assertion failed') ||
+           lower.includes('unexpected state');
   };
+
+  window.addEventListener('error', (event) => {
+    const error = event.error;
+    if (error) {
+      const msg = error.message || String(error);
+      if (isHarmless(msg)) {
+        console.warn('Intercepted and neutralized background Firestore SDK internal crash event:', msg);
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    } else if (event.message && isHarmless(event.message)) {
+      console.warn('Intercepted and neutralized background Firestore SDK internal crash message:', event.message);
+      event.preventDefault();
+      event.stopPropagation();
+    }
+  });
+
+  window.addEventListener('unhandledrejection', (event) => {
+    const error = event.reason;
+    if (error) {
+      const msg = error.message || String(error);
+      if (isHarmless(msg)) {
+        console.warn('Intercepted and neutralized background Firestore SDK internal unhandled promise rejection:', msg);
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    } else if (isHarmless(event.reason)) {
+      console.warn('Intercepted and neutralized background Firestore SDK internal unhandled rejection:', event.reason);
+      event.preventDefault();
+      event.stopPropagation();
+    }
+  });
 
   const originalConsoleError = console.error;
   console.error = function (...args: any[]) {
@@ -101,12 +142,22 @@ function saveTelemetryEntry(entry: TelemetryEntry) {
   try {
     if (typeof window === 'undefined' || !window.localStorage) return;
 
-    // 1. Save recent list
+    const today = new Date();
+    const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+
+    // 1. Save recent list (only keep today's entries)
     const recentKey = 'firestore_telemetry_recent_v1';
     let recent: TelemetryEntry[] = [];
     try {
       const stored = localStorage.getItem(recentKey);
-      if (stored) recent = JSON.parse(stored);
+      if (stored) {
+        recent = JSON.parse(stored).filter((item: TelemetryEntry) => {
+          const itemDate = new Date(item.timestamp);
+          return itemDate.getFullYear() === today.getFullYear() &&
+                 itemDate.getMonth() === today.getMonth() &&
+                 itemDate.getDate() === today.getDate();
+        });
+      }
     } catch (e) {}
 
     recent.unshift(entry);
@@ -115,12 +166,19 @@ function saveTelemetryEntry(entry: TelemetryEntry) {
     }
     localStorage.setItem(recentKey, JSON.stringify(recent));
 
-    // 2. Save aggregated metrics
+    // 2. Save aggregated metrics (only keep today's keys starting with todayStr)
     const aggKey = 'firestore_telemetry_aggregated_v1';
     let agg: { [key: string]: any } = {};
     try {
       const stored = localStorage.getItem(aggKey);
-      if (stored) agg = JSON.parse(stored);
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        Object.keys(parsed).forEach(k => {
+          if (k.startsWith(todayStr)) {
+            agg[k] = parsed[k];
+          }
+        });
+      }
     } catch (e) {}
 
     const date = new Date(entry.timestamp);
@@ -160,12 +218,6 @@ function saveTelemetryEntry(entry: TelemetryEntry) {
     if (entry.operation === 'read') srcStats.reads++;
     else if (entry.operation === 'write') srcStats.writes++;
     else if (entry.operation === 'delete') srcStats.deletes++;
-
-    const sortedKeys = Object.keys(agg).sort();
-    if (sortedKeys.length > 168) {
-      const toDelete = sortedKeys.slice(0, sortedKeys.length - 168);
-      toDelete.forEach(k => delete agg[k]);
-    }
 
     localStorage.setItem(aggKey, JSON.stringify(agg));
     window.dispatchEvent(new CustomEvent('firestore_telemetry_updated', { detail: entry }));
@@ -325,7 +377,8 @@ const app = initializeApp(firebaseConfig);
 
 let firestoreSettings: any = {};
 try {
-  if (typeof window !== 'undefined' && window.localStorage) {
+  const isInIframe = typeof window !== 'undefined' && window.self !== window.top;
+  if (typeof window !== 'undefined' && window.localStorage && !isInIframe) {
     window.localStorage.setItem('__test_local_storage__', '1');
     window.localStorage.removeItem('__test_local_storage__');
     firestoreSettings = {

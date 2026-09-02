@@ -46,11 +46,12 @@ export default function InsuranceTypesManager() {
   const handleSeedTypes = async () => {
     if (types.length > 0) return;
     const initialTypes = [
-      { name: 'U6', description: 'Seguro para menores de 6 años', minAge: 0, maxAge: 5, status: 'active' },
-      { name: 'Student', description: 'Seguro para estudiantes internacionales (6-25 años)', minAge: 6, maxAge: 25, status: 'active' },
-      { name: 'Traveler', description: 'Seguro para viajeros frecuentes (26-69 años)', minAge: 26, maxAge: 69, status: 'active' },
-      { name: 'O70', description: 'Seguro para mayores de 70 años', minAge: 70, maxAge: 120, status: 'active' },
-      { name: 'Xtreme', description: 'Seguro para deportes extremos (15-69 años)', minAge: 15, maxAge: 69, status: 'active' }
+      { name: 'U6', description: 'Seguro para menores de 6 años (0-6 años)', minAge: 0, maxAge: 6, status: 'active' },
+      { name: 'Student', description: 'Seguro para estudiantes (7-25 años)', minAge: 7, maxAge: 25, status: 'active' },
+      { name: 'Traveler', description: 'Seguro para viajeros (26-69 años)', minAge: 26, maxAge: 69, status: 'active' },
+      { name: 'Platinum', description: 'Seguro Platinum integral (0-69 años)', minAge: 0, maxAge: 69, status: 'active' },
+      { name: 'O70', description: 'Seguro para mayores de 70 años (70-85 años)', minAge: 70, maxAge: 85, status: 'active' },
+      { name: 'Xtreme', description: 'Seguro para deportes extremos (7-69 años)', minAge: 7, maxAge: 69, status: 'active' }
     ];
 
     try {

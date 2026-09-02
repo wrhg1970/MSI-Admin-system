@@ -278,8 +278,15 @@
             }
           } 
         },
+        "reference": { "type": "string", "description": "Reference annotation in English" },
+        "claimAmount": { "type": "number", "description": "Claimed amount" },
+        "isExpedienteCompletoConfirmed": { "type": "boolean", "description": "Whether expediente completo was confirmed" },
+        "expedienteCompletoConfirmedAt": { "type": "string", "format": "date-time" },
         "sentToInsurerDate": { "type": "string", "format": "date" },
-        "insurerResponse": { "type": "string" },
+        "insurerResponse": { "type": "string", "enum": ["Pendiente", "Rechazado", "Aprobado"] },
+        "resolutionDate": { "type": "string", "format": "date" },
+        "resolutionDescription": { "type": "string", "description": "Description or reason for resolution" },
+        "reimbursedAmount": { "type": "number", "description": "Amount reimbursed by insurer" },
         "isClosed": { "type": "boolean" },
         "closedAt": { "type": "string", "format": "date-time" },
         "createdAt": { "type": "string", "format": "date-time" },

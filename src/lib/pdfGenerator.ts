@@ -3,11 +3,12 @@ import autoTable from 'jspdf-autotable';
 import { format, parseISO } from 'date-fns';
 import { es, de, it, fr } from 'date-fns/locale';
 import { InsuranceRequest, PolicyLetter, Policy } from '../types';
-import { APP_LOGO, LOGO_LINK } from '../constants';
-import { doc as firestoreDoc, getDoc } from 'firebase/firestore';
+import { getPolicyNumber, findPolicyPrioritized, formatDisplayDate } from './policyUtils';
+import { APP_LOGO, LOGO_LINK, COUNTRIES } from '../constants';
+import { doc as firestoreDoc, getDoc, collection, getDocs } from 'firebase/firestore';
 import { db } from '../firebase';
 
-const drawVectorLogo = (doc: jsPDF, x: number, y: number, scale: number = 1.0, isDarkBg: boolean = false) => {
+export const drawVectorLogo = (doc: jsPDF, x: number, y: number, scale: number = 1.0, isDarkBg: boolean = false) => {
   const prevFontName = doc.getFont().fontName;
   const prevFontStyle = doc.getFont().fontStyle;
   const prevFontSize = doc.getFontSize();
@@ -85,8 +86,8 @@ const drawCovidCard = (
   bgColor: [number, number, number] = [248, 250, 252], // slate-50 bg
   headerColor: [number, number, number] = [29, 78, 216] // blue-700 header
 ) => {
-  let currentY = startY + 12; // Title space + padding
-  const paddingX = 6;
+  let currentY = startY + 9; // Title space + padding
+  const paddingX = 5;
   const innerWidth = contentWidth - (paddingX * 2);
   
   const parsedParas = paras.map(p => {
@@ -96,62 +97,148 @@ const drawCovidCard = (
       p.toLowerCase().includes('póliza') || 
       p.toLowerCase().includes('policy number')
     );
+    doc.setFontSize(isHeading ? 9.2 : 8.8);
     const split = doc.splitTextToSize(p, innerWidth);
     return { text: p, split, isHeading };
   });
 
   // Calculate total height
   parsedParas.forEach((p, idx) => {
-    const lineHeight = p.isHeading ? 4.5 : 3.8;
+    const lineHeight = p.isHeading ? 4.0 : 3.4;
     const height = p.split.length * lineHeight;
     currentY += height;
     if (idx < parsedParas.length - 1) {
-      currentY += p.isHeading ? 2 : 4; // Gap between paragraphs
+      currentY += p.isHeading ? 1.8 : 2.2; // Gap between paragraphs
     }
   });
   
-  const cardHeight = (currentY + 6) - startY; // Add bottom padding
+  const cardHeight = (currentY + 4) - startY; // Add bottom padding
 
   // Background and border
   doc.setFillColor(...bgColor);
   doc.setDrawColor(...borderColor);
   doc.setLineWidth(0.3);
-  doc.roundedRect(margin, startY, contentWidth, cardHeight, 3, 3, 'FD');
+  doc.roundedRect(margin, startY, contentWidth, cardHeight, 2, 2, 'FD');
 
   // Header Title
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(8.5);
+  doc.setFontSize(10.0);
   doc.setTextColor(...headerColor);
-  doc.text(title, margin + paddingX, startY + 7);
+  doc.text(title, margin + paddingX, startY + 6.0);
 
   // Divider line
   doc.setDrawColor(...borderColor);
   doc.setLineWidth(0.2);
-  doc.line(margin + paddingX, startY + 10, margin + contentWidth - paddingX, startY + 10);
+  doc.line(margin + paddingX, startY + 8.0, margin + contentWidth - paddingX, startY + 8.0);
 
   // Draw Paragraphs
-  let textY = startY + 15;
-  parsedParas.forEach((p, idx) => {
+  let textY = startY + 12;
+  parsedParas.forEach((p) => {
     if (p.isHeading) {
       doc.setFont('helvetica', 'bold');
-      doc.setFontSize(8);
+      doc.setFontSize(9.2);
       doc.setTextColor(30, 41, 59); // Slate-800
       doc.text(p.split, margin + paddingX, textY, { align: 'left' });
-      textY += (p.split.length * 4.5) + 2;
+      textY += (p.split.length * 4.0) + 1.8;
     } else {
       doc.setFont('helvetica', 'normal');
-      doc.setFontSize(8);
+      doc.setFontSize(8.8);
       doc.setTextColor(51, 65, 85); // Slate-700
-      doc.text(p.split, margin + paddingX, textY, { align: 'left' }); // Left alignment as requested
-      textY += (p.split.length * 3.8) + 4;
+      doc.text(p.split, margin + paddingX, textY, { align: 'left' });
+      textY += (p.split.length * 3.4) + 2.2;
     }
   });
 
   return cardHeight;
 };
 
-export const generatePDF = async (insurance: InsuranceRequest, template?: PolicyLetter, policies: Policy[] = [], customLogo?: string, returnRaw: boolean = false) => {
-  const doc = new jsPDF({
+/**
+ * Helper to load logo image safely with dimension normalization and CORS fallback
+ */
+export const loadLogoData = async (logoSrc: string): Promise<{ url: string, width: number, height: number } | null> => {
+  if (!logoSrc) return null;
+  const isDataUrl = logoSrc.startsWith('data:image/');
+
+  return new Promise((resolve) => {
+    const img = new Image();
+    if (!isDataUrl) {
+      img.crossOrigin = "anonymous";
+    }
+
+    img.onload = () => {
+      try {
+        const maxDim = 600;
+        let w = img.naturalWidth || img.width || 200;
+        let h = img.naturalHeight || img.height || 60;
+        if (w > maxDim || h > maxDim) {
+          if (w > h) {
+            h = Math.round((h * maxDim) / w);
+            w = maxDim;
+          } else {
+            w = Math.round((w * maxDim) / h);
+            h = maxDim;
+          }
+        }
+
+        if (isDataUrl) {
+          resolve({ url: logoSrc, width: w, height: h });
+          return;
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          ctx.drawImage(img, 0, 0, w, h);
+          resolve({
+            url: canvas.toDataURL('image/png'),
+            width: w,
+            height: h
+          });
+        } else {
+          resolve({ url: logoSrc, width: w, height: h });
+        }
+      } catch (canvasErr) {
+        console.warn("Canvas export warning in loadLogoData (using direct url):", canvasErr);
+        resolve({ url: logoSrc, width: img.naturalWidth || 200, height: img.naturalHeight || 60 });
+      }
+    };
+
+    img.onerror = () => {
+      // If remote image failed with crossOrigin, try loading without crossOrigin
+      if (!isDataUrl && img.crossOrigin) {
+        const fallbackImg = new Image();
+        fallbackImg.onload = () => {
+          resolve({
+            url: logoSrc,
+            width: fallbackImg.naturalWidth || 200,
+            height: fallbackImg.naturalHeight || 60
+          });
+        };
+        fallbackImg.onerror = (e) => {
+          console.error("Failed to load logo image even without CORS:", e);
+          resolve(null);
+        };
+        fallbackImg.src = logoSrc;
+      } else {
+        resolve(null);
+      }
+    };
+
+    img.src = logoSrc;
+  });
+};
+
+export const generatePDF = async (
+  insurance: InsuranceRequest,
+  template?: PolicyLetter,
+  policies: Policy[] = [],
+  customLogo?: string,
+  returnRaw: boolean = false,
+  existingDoc?: jsPDF
+) => {
+  const doc = existingDoc || new jsPDF({
     orientation: 'p',
     unit: 'mm',
     format: 'letter'
@@ -159,81 +246,57 @@ export const generatePDF = async (insurance: InsuranceRequest, template?: Policy
   
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
-  const margin = 15;
+  const margin = 12;
   const contentWidth = pageWidth - (margin * 2);
   const isCovidLetter = template?.language === 'covid';
   const isPolicyLetter = template?.language === 'policy';
+  const isSpainLetter = template?.language === 'es_spain' || template?.language === 'embajada_spain';
 
-  // Find policy with robust matching
-  const policy = policies.find(p => 
-    p.id === insurance.policyId || 
-    (p.CodigoPoliza && p.CodigoPoliza === insurance.policyId) ||
-    p.name === insurance.policyId
-  );
+  let firestoreCountries: any[] = [];
+  try {
+    const countriesSnap = await getDocs(collection(db, 'countries'));
+    firestoreCountries = countriesSnap.docs.map(doc => doc.data());
+  } catch (err) {
+    console.error("Error fetching countries in pdfGenerator:", err);
+  }
+
+  const getCountryName = (code: string) => {
+    if (!code) return '';
+    const found = firestoreCountries.find((c: any) => c.code === code) || COUNTRIES.find(c => c.code === code);
+    return found ? found.name : code;
+  };
+
+  // Find policy with robust prioritized matching
+  const policy = findPolicyPrioritized(insurance.policyId, policies) || 
+                 findPolicyPrioritized(insurance.policyNumber, policies) ||
+                 findPolicyPrioritized(insurance.policyName, policies);
   
   const plan = insurance.plan || policy?.plan || insurance.policyId.split('-')[0];
   
-  let logoData: { url: string, width: number, height: number } | null = null;
-
-  // 1. Logo (Top Left)
-  try {
-    const img = new Image();
-    img.crossOrigin = "anonymous";
-    img.src = customLogo || APP_LOGO;
-    await new Promise((resolve, reject) => {
-      img.onload = resolve;
-      img.onerror = (e) => {
-        console.error("Image load error:", e);
-        reject(e);
-      };
-    });
-    
-    const maxDim = 500;
-    let w = img.width;
-    let h = img.height;
-    if (w > maxDim || h > maxDim) {
-      if (w > h) {
-        h = Math.round((h * maxDim) / w);
-        w = maxDim;
-      } else {
-        w = Math.round((w * maxDim) / h);
-        h = maxDim;
-      }
-    }
-
-    const canvas = document.createElement('canvas');
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext('2d');
-    if (ctx) {
-      ctx.drawImage(img, 0, 0, w, h);
-      logoData = {
-        url: canvas.toDataURL('image/png'),
-        width: w,
-        height: h
-      };
-    }
-  } catch (error) {
-    console.error('Error loading logo in generatePDF:', error);
-  }
-
-  let directorSignatureData: string | null = null;
+  // 1. Company settings & Logo resolution from Firestore (Primary source of truth)
+  let companySettings: any = {};
   try {
     const companySnap = await getDoc(firestoreDoc(db, 'settings', 'company'));
     if (companySnap.exists()) {
-      const companyData = companySnap.data() as any;
-      if (companyData && companyData.directorSignature) {
-        directorSignatureData = companyData.directorSignature;
-      }
+      companySettings = companySnap.data() || {};
     }
   } catch (err) {
-    console.error("Error loading company settings for signature:", err);
+    console.error("Error loading company settings in generatePDF:", err);
   }
+
+  const effectiveLogo = (customLogo && customLogo.trim() !== '')
+    ? customLogo
+    : (companySettings.logoUrl || APP_LOGO);
+
+  const directorSignatureData: string | null = companySettings.directorSignature || null;
+
+  // Load Logo Data
+  const logoData = await loadLogoData(effectiveLogo);
 
   if (logoData) {
     const ratio = logoData.width / logoData.height;
-    const maxWidth = isPolicyLetter ? 40 : 55;
-    const maxHeight = isPolicyLetter ? 15 : 25;
+    const maxWidth = isPolicyLetter ? 38 : 46;
+    const maxHeight = isPolicyLetter ? 12 : 18;
     let renderWidth = maxWidth;
     let renderHeight = maxWidth / ratio;
     
@@ -241,15 +304,15 @@ export const generatePDF = async (insurance: InsuranceRequest, template?: Policy
       renderHeight = maxHeight;
       renderWidth = maxHeight * ratio;
     }
-    const logoY = isPolicyLetter ? 8 : 15;
+    const logoY = isPolicyLetter ? 6 : 9;
     doc.addImage(logoData.url, 'PNG', margin, logoY, renderWidth, renderHeight);
     
     // Add clickable link over the logo
     doc.link(margin, logoY, renderWidth, renderHeight, { url: LOGO_LINK });
   } else {
     // Beautiful vector logo fallback
-    const logoY = isPolicyLetter ? 8 : 15;
-    const scale = isPolicyLetter ? 0.75 : 1.0;
+    const logoY = isPolicyLetter ? 6 : 9;
+    const scale = isPolicyLetter ? 0.7 : 0.85;
     drawVectorLogo(doc, margin, logoY, scale);
   }
 
@@ -367,10 +430,10 @@ export const generatePDF = async (insurance: InsuranceRequest, template?: Policy
       .replace(/{fecha_nacimiento}/gi, birthDateStr)
       .replace(/{dob}/gi, birthDateStr)
       .replace(/{date_of_birth}/gi, birthDateStr)
-      .replace(/{pais}/gi, insurance.destinationCountry)
-      .replace(/{country}/gi, insurance.destinationCountry)
-      .replace(/{destino}/gi, insurance.destinationCountry)
-      .replace(/{destination}/gi, insurance.destinationCountry)
+      .replace(/{pais}/gi, getCountryName(insurance.destinationCountry))
+      .replace(/{country}/gi, getCountryName(insurance.destinationCountry))
+      .replace(/{destino}/gi, getCountryName(insurance.destinationCountry))
+      .replace(/{destination}/gi, getCountryName(insurance.destinationCountry))
       .replace(/{fechas}/gi, `${startDateStr} ${datesJoinWord} ${endDateStr}`)
       .replace(/{dates}/gi, `${startDateStr} ${datesJoinWord} ${endDateStr}`)
       .replace(/{fecha_inicio}/gi, startDateStr)
@@ -381,23 +444,22 @@ export const generatePDF = async (insurance: InsuranceRequest, template?: Policy
       .replace(/{days}/gi, insurance.days.toString())
       .replace(/{duracion}/gi, insurance.days.toString())
       .replace(/{duration}/gi, insurance.days.toString())
-      .replace(/{policy}/gi, policy?.CodigoPoliza || insurance.policyId)
-      .replace(/{poliza}/gi, policy?.CodigoPoliza || insurance.policyId)
+      .replace(/{policy}/gi, insurance.policyNumber || getPolicyNumber(policy, insurance.age) || policy?.id || insurance.policyId)
+      .replace(/{poliza}/gi, insurance.policyNumber || getPolicyNumber(policy, insurance.age) || policy?.id || insurance.policyId)
       .replace(/{plan}/gi, insurance.plan || '');
   } else if (!isPolicyLetter) {
     // Default fallback (Spanish)
-    introText = `Por medio de la presente, certifico que ${insurance.firstName} ${insurance.lastName}. Fecha de Nacimiento: ${birthDateStr} adquirió un seguro internacional válido en todo el mundo excepto en su pais de residencia oficial, por el siguiente periodo de tiempo: ${insurance.days} Dias empezando el ${startDateStr} hasta ${endDateStr} durante su estancia en ${insurance.destinationCountry}. En Europa, incluye todos los países Schengen.`;
+    introText = `Por medio de la presente, certifico que ${insurance.firstName} ${insurance.lastName}. Fecha de Nacimiento: ${birthDateStr} adquirió un seguro internacional válido en todo el mundo excepto en su pais de residencia oficial, por el siguiente periodo de tiempo: ${insurance.days} Dias empezando el ${startDateStr} hasta ${endDateStr} durante su estancia en ${getCountryName(insurance.destinationCountry)}. En Europa, incluye todos los países Schengen.`;
   }
 
   if (isPolicyLetter) {
     // ---------------------------------------------------------
     // SPECIAL POLICY ID CARD / CONFIRMATION LAYOUT
     // ---------------------------------------------------------
-    const policyNum = policy?.CodigoPoliza || insurance.policyId;
-    const yOffset = 18; // Offset to accommodate logo at top left
-    const cardY = 24;
-    const cardHeight = 52;
-    const cardWidth = contentWidth / 2 - 2; // 93
+    const policyNum = insurance.policyNumber || getPolicyNumber(policy, insurance.age) || policy?.id || insurance.policyId;
+    const cardY = 20;
+    const cardHeight = 48;
+    const cardWidth = contentWidth / 2 - 2;
 
     // Left Card Background & Border
     doc.setFillColor(248, 250, 252); // slate-50
@@ -406,28 +468,28 @@ export const generatePDF = async (insurance: InsuranceRequest, template?: Policy
     doc.roundedRect(margin, cardY, cardWidth, cardHeight, 1.5, 1.5, 'FD');
 
     // Left Card Content
-    let leftY = cardY + 4;
+    let leftY = cardY + 3.5;
     const leftX = margin + 3.5;
     const leftInnerWidth = cardWidth - 7;
 
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(8);
+    doc.setFontSize(9.5);
     doc.setTextColor(29, 78, 216); // blue-700
     doc.text('GROUP SPONSOR: SETMEX', leftX, leftY);
     
     doc.setDrawColor(219, 234, 254); // light blue-100 divider
     doc.setLineWidth(0.2);
-    doc.line(leftX, leftY + 1.5, leftX + leftInnerWidth, leftY + 1.5);
+    doc.line(leftX, leftY + 1.2, leftX + leftInnerWidth, leftY + 1.2);
     
-    leftY += 4.8;
-    doc.setFontSize(7);
+    leftY += 4.2;
+    doc.setFontSize(8.8);
     
     doc.setFont('helvetica', 'bold');
     doc.setTextColor(71, 85, 105); // slate-600
     doc.text('Subscriber:', leftX, leftY);
     doc.setFont('helvetica', 'normal');
     doc.setTextColor(15, 23, 42); // slate-900
-    doc.text(`${insurance.lastName}, ${insurance.firstName}`, leftX + 16, leftY);
+    doc.text(`${insurance.lastName}, ${insurance.firstName}`, leftX + 18, leftY);
     
     leftY += 3.2;
     doc.setFont('helvetica', 'bold');
@@ -435,7 +497,7 @@ export const generatePDF = async (insurance: InsuranceRequest, template?: Policy
     doc.text('Group #:', leftX, leftY);
     doc.setFont('helvetica', 'normal');
     doc.setTextColor(15, 23, 42);
-    doc.text('0863971-021-00100', leftX + 16, leftY);
+    doc.text('0863971-021-00100', leftX + 18, leftY);
     
     leftY += 3.2;
     doc.setFont('helvetica', 'bold');
@@ -443,7 +505,7 @@ export const generatePDF = async (insurance: InsuranceRequest, template?: Policy
     doc.text('Member ID:', leftX, leftY);
     doc.setFont('helvetica', 'normal');
     doc.setTextColor(15, 23, 42);
-    doc.text(policyNum, leftX + 16, leftY);
+    doc.text(policyNum, leftX + 18, leftY);
     
     leftY += 3.2;
     doc.setFont('helvetica', 'bold');
@@ -451,18 +513,18 @@ export const generatePDF = async (insurance: InsuranceRequest, template?: Policy
     doc.text('Dates:', leftX, leftY);
     doc.setFont('helvetica', 'normal');
     doc.setTextColor(15, 23, 42);
-    doc.text(`${startDateStr} - ${endDateStr}`, leftX + 16, leftY);
+    doc.text(`${startDateStr} - ${endDateStr}`, leftX + 18, leftY);
 
     doc.setDrawColor(226, 232, 240);
-    doc.line(leftX, leftY + 2.0, leftX + leftInnerWidth, leftY + 2.0);
+    doc.line(leftX, leftY + 1.8, leftX + leftInnerWidth, leftY + 1.8);
     
-    leftY += 5.5;
+    leftY += 4.8;
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(7);
+    doc.setFontSize(8.8);
     doc.setTextColor(30, 41, 59); // slate-800
     doc.text('For Travellers in the United States:', leftX, leftY);
     
-    doc.setFontSize(6);
+    doc.setFontSize(7.8);
     doc.setFont('helvetica', 'normal');
     doc.setTextColor(71, 85, 105);
     
@@ -470,109 +532,109 @@ export const generatePDF = async (insurance: InsuranceRequest, template?: Policy
     doc.setFont('helvetica', 'bold');
     doc.text('Aetna Provider Service:', leftX, leftY);
     doc.setFont('helvetica', 'normal');
-    doc.text('1-800-414-0596', leftX + 27, leftY);
+    doc.text('1-800-414-0596', leftX + 32, leftY);
     
     leftY += 3.2;
     doc.setFont('helvetica', 'bold');
     doc.text('Submit Claims to:', leftX, leftY);
     doc.setFont('helvetica', 'normal');
-    const splitAetna = doc.splitTextToSize('Aetna, PO Box 981543, El Paso TX 79998-1543', leftInnerWidth - 21);
-    doc.text(splitAetna, leftX + 20, leftY);
+    const splitAetna = doc.splitTextToSize('Aetna, PO Box 981543, El Paso TX 79998-1543', leftInnerWidth - 25);
+    doc.text(splitAetna, leftX + 24, leftY);
     
     leftY += 3.2 * splitAetna.length;
     doc.setFont('helvetica', 'bold');
     doc.text('Electronic Payer ID:', leftX, leftY);
     doc.setFont('helvetica', 'normal');
-    doc.text('60054', leftX + 22, leftY);
+    doc.text('60054', leftX + 26, leftY);
 
     // Right Card Background & Border
-    const rightCardX = margin + contentWidth / 2 + 2; // 107
+    const rightCardX = margin + contentWidth / 2 + 2;
     doc.setFillColor(248, 250, 252); // slate-50
     doc.setDrawColor(226, 232, 240); // slate-200
     doc.setLineWidth(0.35);
     doc.roundedRect(rightCardX, cardY, cardWidth, cardHeight, 1.5, 1.5, 'FD');
 
     // Right Card Content
-    let rightY = cardY + 4;
+    let rightY = cardY + 3.5;
     const rightX = rightCardX + 3.5;
     const rightInnerWidth = cardWidth - 7;
 
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(7.5);
+    doc.setFontSize(9.0);
     doc.setTextColor(30, 41, 59); // slate-800
     doc.text('MEMBER & CONTACT INFO', rightX, rightY);
     
     doc.setFont('helvetica', 'italic');
-    doc.setFontSize(5.5);
+    doc.setFontSize(7.2);
     doc.setTextColor(100, 116, 139); // slate-500
     doc.text('Keep this card at all times', rightX + rightInnerWidth, rightY, { align: 'right' });
     
     doc.setDrawColor(226, 232, 240);
     doc.setLineWidth(0.2);
-    doc.line(rightX, rightY + 1.5, rightX + rightInnerWidth, rightY + 1.5);
+    doc.line(rightX, rightY + 1.2, rightX + rightInnerWidth, rightY + 1.2);
     
-    rightY += 4.8;
-    doc.setFontSize(6.5);
+    rightY += 4.2;
+    doc.setFontSize(8.2);
     
     doc.setFont('helvetica', 'bold');
     doc.setTextColor(71, 85, 105);
     doc.text('Plan Policy #:', rightX, rightY);
     doc.setFont('helvetica', 'normal');
     doc.setTextColor(15, 23, 42);
-    doc.text(policyNum, rightX + 16, rightY);
+    doc.text(policyNum, rightX + 18, rightY);
     
-    rightY += 3.2;
+    rightY += 3.0;
     doc.setFont('helvetica', 'normal');
     doc.setTextColor(100, 116, 139);
-    doc.setFontSize(6);
+    doc.setFontSize(7.5);
     doc.text('Underwritten by CUC, Administered by CareMed USA', rightX, rightY);
     
-    rightY += 5.0;
+    rightY += 4.2;
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(7);
+    doc.setFontSize(8.5);
     doc.setTextColor(30, 41, 59);
     doc.text('Coverage & Claim Questions?', rightX, rightY);
     
     doc.setFont('helvetica', 'normal');
-    doc.setFontSize(6);
+    doc.setFontSize(7.5);
     doc.setTextColor(71, 85, 105);
-    rightY += 3.2;
+    rightY += 3.0;
     doc.text('Contact CareMed USA: Phone +1 203 399 5130 | claimhelp@mycisi.com', rightX, rightY);
     
     doc.setDrawColor(226, 232, 240);
-    doc.line(rightX, rightY + 2.0, rightX + rightInnerWidth, rightY + 2.0);
+    doc.line(rightX, rightY + 1.5, rightX + rightInnerWidth, rightY + 1.5);
 
-    rightY += 5.5;
+    rightY += 4.8;
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(7);
+    doc.setFontSize(8.5);
     doc.setTextColor(220, 38, 38); // Red-600
     doc.text('FOR EMERGENCIES (24/7/365) - Contact Team Assist', rightX, rightY);
     
     doc.setFont('helvetica', 'italic');
-    doc.setFontSize(5.5);
+    doc.setFontSize(7.2);
     doc.setTextColor(100, 116, 139);
     rightY += 2.8;
     doc.text('(Inpatient or Emergency Care)', rightX, rightY);
     
     doc.setFont('helvetica', 'normal');
-    doc.setFontSize(6);
+    doc.setFontSize(7.5);
     doc.setTextColor(71, 85, 105);
-    rightY += 3.2;
+    rightY += 3.0;
     const splitEmergency = doc.splitTextToSize('Call ON CALL INTERNATIONAL at +1 877 714 8179 (in US), +1 603 952 2660 (call collect from outside US). Email: mail@ONCALLINTERNATIONAL.COM', rightInnerWidth);
     doc.text(splitEmergency, rightX, rightY);
     
-    rightY += 2.8 * splitEmergency.length + 1;
+    rightY += 2.8 * splitEmergency.length + 0.8;
     doc.setDrawColor(226, 232, 240);
     doc.line(rightX, rightY, rightX + rightInnerWidth, rightY);
     
-    rightY += 3.2;
+    rightY += 3.0;
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(6);
+    doc.setFontSize(7.5);
     doc.setTextColor(21, 128, 61); // Green-700
     doc.text('Non-Life Threatening Care: Call-A-Doc is FREE', rightX, rightY);
     
     doc.setFont('helvetica', 'normal');
-    doc.setFontSize(6);
+    doc.setFontSize(7.5);
     doc.setTextColor(71, 85, 105);
     rightY += 2.8;
     doc.text('You will be connected right away. Phone 925-732-4701', rightX, rightY);
@@ -580,30 +642,30 @@ export const generatePDF = async (insurance: InsuranceRequest, template?: Policy
     doc.setTextColor(0, 0, 0);
     
     // Insurance Confirmation section
-    const confirmY = 78; 
+    const confirmY = 70; 
     doc.setFillColor(29, 78, 216); // blue-700 primary banner
-    doc.rect(margin, confirmY, contentWidth, 6.0, 'F');
-    doc.setFontSize(8.5);
+    doc.rect(margin, confirmY, contentWidth, 5.5, 'F');
+    doc.setFontSize(10.0);
     doc.setFont('helvetica', 'bold');
     doc.setTextColor(255, 255, 255); // White text
-    doc.text('Insurance Confirmation', margin + 4, confirmY + 4.2); 
+    doc.text('Insurance Confirmation', margin + 4, confirmY + 3.8); 
     
-    const confirmTableY = confirmY + 14; 
-    const footerTextY = confirmTableY + 22; 
-    doc.setFontSize(6);
+    const confirmTableY = confirmY + 11; 
+    const footerTextY = confirmTableY + 19; 
+    doc.setFontSize(7.8);
     const splitBlock = doc.splitTextToSize(introText, contentWidth - 8);
-    const blockHeight = splitBlock.length * 2.4; 
-    const boxPadding = 3; 
-    const calculatedBoxHeight = (footerTextY + blockHeight + boxPadding) - (confirmY + 6);
+    const blockHeight = splitBlock.length * 2.8; 
+    const boxPadding = 2.5; 
+    const calculatedBoxHeight = (footerTextY + blockHeight + boxPadding) - (confirmY + 5.5);
  
     doc.setDrawColor(203, 213, 225); // Slate-300 elegant border
     doc.setLineWidth(0.35);
-    doc.roundedRect(margin, confirmY + 6, contentWidth, calculatedBoxHeight, 1.5, 1.5, 'D');
+    doc.roundedRect(margin, confirmY + 5.5, contentWidth, calculatedBoxHeight, 1.5, 1.5, 'D');
     
-    doc.setFontSize(7.5);
+    doc.setFontSize(9.0);
     doc.setFont('helvetica', 'bold');
     doc.setTextColor(30, 41, 59); // Slate-800
-    doc.text('We hereby confirm that the person listed below is insured with CareMed®.', margin + 4, confirmY + 10.5); 
+    doc.text('We hereby confirm that the person listed below is insured with CareMed®.', margin + 4, confirmY + 9.5); 
     
     const col1 = margin + 4;
     const col2 = margin + 35;
@@ -614,67 +676,68 @@ export const generatePDF = async (insurance: InsuranceRequest, template?: Policy
     doc.setDrawColor(241, 245, 249); // slate-100 very elegant dividers
     doc.setLineWidth(0.25);
     for (let i = 0; i < 4; i++) {
-      const lineY = confirmTableY + 1.2 + (i * 4.5);
+      const lineY = confirmTableY + 1.0 + (i * 4.0);
       doc.line(margin + 4, lineY, margin + contentWidth - 4, lineY);
     }
 
     doc.setFont('helvetica', 'bold');
-    doc.setFontSize(7);
+    doc.setFontSize(8.8);
     doc.setTextColor(71, 85, 105); // slate-600
     doc.text('Mr. / Ms:', col1, confirmTableY);
-    doc.text('First name:', col1, confirmTableY + 4.5);
-    doc.text('Last name:', col1, confirmTableY + 9);
-    doc.text('Date of birth:', col1, confirmTableY + 13.5);
-    doc.text('Policy number:', col1, confirmTableY + 18);
+    doc.text('First name:', col1, confirmTableY + 4.0);
+    doc.text('Last name:', col1, confirmTableY + 8.0);
+    doc.text('Date of birth:', col1, confirmTableY + 12.0);
+    doc.text('Policy number:', col1, confirmTableY + 16.0);
  
     doc.text('Start date of insurance:', col3, confirmTableY);
-    doc.text('End date of insurance:', col3, confirmTableY + 4.5);
-    doc.text('Home country:', col3, confirmTableY + 9);
-    doc.text('Destination:', col3, confirmTableY + 13.5);
+    doc.text('End date of insurance:', col3, confirmTableY + 4.0);
+    doc.text('Home country:', col3, confirmTableY + 8.0);
+    doc.text('Destination:', col3, confirmTableY + 12.0);
  
     doc.setFont('helvetica', 'normal');
     doc.setTextColor(15, 23, 42); // slate-900
     const genderStr = insurance.gender === 'F' ? 'Ms' : 'Mr';
     doc.text(genderStr, col2, confirmTableY);
-    doc.text(insurance.firstName, col2, confirmTableY + 4.5);
-    doc.text(insurance.lastName, col2, confirmTableY + 9);
-    doc.text(birthDateStr, col2, confirmTableY + 13.5);
-    doc.text(policyNum, col2, confirmTableY + 18);
+    doc.text(insurance.firstName, col2, confirmTableY + 4.0);
+    doc.text(insurance.lastName, col2, confirmTableY + 8.0);
+    doc.text(birthDateStr, col2, confirmTableY + 12.0);
+    doc.text(policyNum, col2, confirmTableY + 16.0);
  
     doc.text(startDateStr, col4, confirmTableY);
-    doc.text(endDateStr, col4, confirmTableY + 4.5);
-    doc.text(insurance.originCountry || 'Mexico', col4, confirmTableY + 9);
-    doc.text(insurance.destinationCountry, col4, confirmTableY + 13.5);
+    doc.text(endDateStr, col4, confirmTableY + 4.0);
+    doc.text(getCountryName(insurance.originCountry || 'MX'), col4, confirmTableY + 8.0);
+    doc.text(getCountryName(insurance.destinationCountry), col4, confirmTableY + 12.0);
  
     // Separator line before the paragraph block
     doc.setDrawColor(226, 232, 240); // slate-200
     doc.setLineWidth(0.3);
-    doc.line(margin + 4, footerTextY - 2.5, margin + contentWidth - 4, footerTextY - 2.5);
+    doc.line(margin + 4, footerTextY - 2.0, margin + contentWidth - 4, footerTextY - 2.0);
 
     // Text block below table
-    doc.setFontSize(6.5);
+    doc.setFontSize(8.0);
     doc.setTextColor(71, 85, 105); // slate-600
-    doc.setLineHeightFactor(1.15); // Elegant spacing
+    doc.setLineHeightFactor(1.1);
     doc.text(splitBlock, margin + 4, footerTextY, { align: 'left', maxWidth: contentWidth - 8 });
  
     // Schedule of Benefits
-    const benefitsHeaderY = confirmY + 6 + calculatedBoxHeight + 3.5; 
+    const benefitsHeaderY = confirmY + 5.5 + calculatedBoxHeight + 3.0; 
     doc.setFillColor(29, 78, 216); // blue-700 primary banner
-    doc.rect(margin, benefitsHeaderY, contentWidth, 6.0, 'F');
-    doc.setFontSize(8.5);
+    doc.rect(margin, benefitsHeaderY, contentWidth, 5.5, 'F');
+    doc.setFontSize(10.0);
     doc.setFont('helvetica', 'bold');
     doc.setTextColor(255, 255, 255); // White text
-    doc.text('Schedule of Benefits', margin + 4, benefitsHeaderY + 4.2); 
+    doc.text('Schedule of Benefits', margin + 4, benefitsHeaderY + 3.8); 
     
     if (template?.benefits && template.benefits.length > 0) {
       const body = template.benefits.map(b => [b.label, b.value]);
       autoTable(doc, {
-        startY: benefitsHeaderY + 7.0,
+        startY: benefitsHeaderY + 6.0,
         margin: { left: margin, right: margin },
+        pageBreak: 'avoid',
         styles: { 
-          fontSize: 7.0, 
-          cellPadding: 0.9, 
-          minCellHeight: 3.2,
+          fontSize: 8.2, 
+          cellPadding: 0.6,  
+          minCellHeight: 2.5,
           textColor: [51, 65, 85], // slate-700
           lineColor: [241, 245, 249], // slate-100 table lines
           lineWidth: 0.1 
@@ -718,40 +781,51 @@ export const generatePDF = async (insurance: InsuranceRequest, template?: Policy
   }
 
   if (!isPolicyLetter) {
-    doc.setTextColor(0, 0, 0);
-    doc.setFontSize(7);
+    // 1. Top Header Divider & Right Align Date/ID
+    doc.setFontSize(8.5);
     doc.setFont('helvetica', 'normal');
-    doc.text(`${locationPrefix}${capitalizedDate}`, pageWidth - margin, 18, { align: 'right' });
+    doc.setTextColor(100, 116, 139); // slate-500
+    doc.text(`${locationPrefix}${capitalizedDate}`, pageWidth - margin, 12, { align: 'right' });
     
-    // 2. Date and ID (Top Right)
     doc.setFont('helvetica', 'bold');
-    doc.text(idStr, pageWidth - margin, 22, { align: 'right' });
+    doc.setTextColor(30, 41, 59); // slate-800
+    doc.text(idStr, pageWidth - margin, 16.5, { align: 'right' });
 
-    // 3. Letter Title (Centered)
+    // Subtle header line separator
+    doc.setDrawColor(226, 232, 240); // slate-200
+    doc.setLineWidth(0.3);
+    doc.line(margin, 24.5, pageWidth - margin, 24.5);
+
+    // 2. Letter Title (Centered, Navy Blue)
     const policyName = insurance.policyName || policy?.name || plan;
-    doc.setFontSize(10);
+    doc.setFontSize(11.5);
     doc.setFont('helvetica', 'bold');
-    doc.setTextColor(37, 99, 235);
+    doc.setTextColor(29, 78, 216); // blue-700
     const letterHeading = `${policyName.toUpperCase()} ${enrollmentCertificateLabel}`;
-    doc.text(letterHeading, pageWidth / 2, 35, { align: 'center' });
-    doc.setTextColor(0, 0, 0);
+    doc.text(letterHeading, pageWidth / 2, 31, { align: 'center' });
 
-    // 4. Salutation (Centered)
-    doc.setFontSize(9);
+    // 3. Salutation (Centered)
+    let curY = 37;
+    doc.setFontSize(10.0);
     doc.setFont('helvetica', 'normal');
+    doc.setTextColor(30, 41, 59);
     if (!isCovidLetter) {
       const salutation = template?.title || (sincerelyLabel === 'Sincerely,' ? 'To Whom It May Concern:' : 'A quien corresponda');
-      doc.text(salutation, pageWidth / 2, 44, { align: 'center' });
-      doc.text(presentLabel, pageWidth / 2, 48, { align: 'center' });
+      doc.text(salutation, pageWidth / 2, curY, { align: 'center' });
+      curY += 4.5;
+      doc.text(presentLabel, pageWidth / 2, curY, { align: 'center' });
+      curY += 6.5;
     }
 
-    let yAfterIntro = 58;
+    let benefitsY = 0;
+    let footerSignOffName = '';
+    let footerSignOffTitle = '';
 
     if (isCovidLetter) {
       const paragraphs = introText.split(/\n+/).map(p => p.trim()).filter(p => p.length > 0);
       const englishStartIndex = paragraphs.findIndex(p => p.toLowerCase().includes('this is to certify'));
       
-      let currentY = 44; // Start Y for covid cards
+      let covidY = 34; // Start Y for covid cards
       
       if (englishStartIndex !== -1) {
         const spanishParas = paragraphs.slice(0, englishStartIndex);
@@ -764,165 +838,360 @@ export const generatePDF = async (insurance: InsuranceRequest, template?: Policy
           margin,
           'CERTIFICADO DE COBERTURA (ESPAÑOL)',
           spanishParas,
-          currentY,
-          [191, 219, 254], // blue-200 border
-          [248, 250, 252], // slate-50 bg
-          [29, 78, 216]    // blue-700 header
+          covidY,
+          [191, 219, 254],
+          [248, 250, 252],
+          [29, 78, 216]
         );
         
-        currentY += h1 + 5; // Spacing between cards
+        covidY += h1 + 4;
         
         // Draw English Card
-        drawCovidCard(
+        const h2 = drawCovidCard(
           doc,
           contentWidth,
           margin,
           'ENROLLMENT & COVERAGE CERTIFICATE (ENGLISH)',
           englishParas,
-          currentY,
-          [226, 232, 240], // gray-200 border
-          [248, 250, 252], // slate-50 bg
-          [71, 85, 105]     // slate-600 header
+          covidY,
+          [226, 232, 240],
+          [248, 250, 252],
+          [71, 85, 105]
         );
+        covidY += h2;
       } else {
-        // Render all in a single elegant card
-        drawCovidCard(
+        const h1 = drawCovidCard(
           doc,
           contentWidth,
           margin,
           template?.title?.toUpperCase() || 'CERTIFICADO DE COBERTURA / COBERTURA COVID-19',
           paragraphs,
-          currentY,
+          covidY,
           [191, 219, 254],
           [248, 250, 252],
           [29, 78, 216]
         );
+        covidY += h1;
       }
+      benefitsY = covidY + 4;
     } else {
-      // 5. Intro Paragraph
-      doc.setFontSize(9);
+      // 4. Intro Paragraph
+      doc.setFontSize(10.0);
       doc.setFont('helvetica', 'normal');
-      const splitIntro = doc.splitTextToSize(introText, contentWidth);
-      doc.text(splitIntro, margin, 58, { align: 'justify', maxWidth: contentWidth });
+      doc.setTextColor(30, 41, 59);
+      doc.setLineHeightFactor(1.15);
+
+      if (isSpainLetter) {
+        const paragraphs = introText.split(/\n+/).map(p => p.trim()).filter(p => p.length > 0);
+        paragraphs.forEach((p, idx) => {
+          const split = doc.splitTextToSize(p, contentWidth);
+          doc.text(split, margin, curY, { align: 'left', maxWidth: contentWidth });
+          const pH = split.length * 4.2;
+          curY += pH + (idx < paragraphs.length - 1 ? 3 : 0);
+        });
+        curY += 4;
+      } else {
+        const splitIntro = doc.splitTextToSize(introText, contentWidth);
+        doc.text(splitIntro, margin, curY, { align: 'justify', maxWidth: contentWidth });
+        
+        const introHeight = (splitIntro.length * 4.2);
+        curY += introHeight + 4;
+      }
+
+      // 5. Plan & Policy Summary Box (Sleek Banner)
+      const policyVal = insurance.policyNumber || getPolicyNumber(policy, insurance.age) || policy?.id || insurance.policyId;
+      const summaryBoxY = curY;
+      const summaryBoxHeight = 9.5;
+      doc.setFillColor(248, 250, 252); // slate-50
+      doc.setDrawColor(219, 234, 254); // blue-100
+      doc.setLineWidth(0.3);
+      doc.roundedRect(margin, summaryBoxY, contentWidth, summaryBoxHeight, 1.5, 1.5, 'FD');
+
+      // Left: Plan
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(9.5);
+      doc.setTextColor(71, 85, 105); // slate-600
+      doc.text('Plan: ', margin + 4, summaryBoxY + 6.2);
+      const planLabelW = doc.getTextWidth('Plan: ');
+      doc.setTextColor(29, 78, 216); // blue-700
+      doc.text(`${policy?.name || plan}`, margin + 4 + planLabelW, summaryBoxY + 6.2);
+
+      // Right: Policy Number
+      const polTextVal = `${policyVal}`;
+      doc.setFont('helvetica', 'bold');
+      doc.setTextColor(15, 23, 42); // slate-900
+      doc.text(polTextVal, pageWidth - margin - 4, summaryBoxY + 6.2, { align: 'right' });
+      const polValW = doc.getTextWidth(polTextVal);
+      doc.setTextColor(71, 85, 105); // slate-600
+      doc.text(`${policyNumLabel}: `, pageWidth - margin - 4 - polValW, summaryBoxY + 6.2, { align: 'right' });
+
+      curY = summaryBoxY + summaryBoxHeight + 6;
+
+      // 6. Benefits List (Categorized)
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(10.0);
+      doc.setTextColor(29, 78, 216); // blue-700
+      doc.text(featuresLabel, margin, curY);
       
-      // 6. Plan and Policy Number Line
-      const introHeight = (splitIntro.length * 4);
-      yAfterIntro = 58 + introHeight + 6;
-    }
-  
-  if (!isCovidLetter) {
-    doc.setFont('helvetica', 'bold');
-    const planLabelLine = 'Plan';
-    doc.text(`${planLabelLine} : ${policy?.name || plan}`, margin, yAfterIntro);
-    doc.setFont('helvetica', 'normal');
-    doc.text(`${policyNumLabel}: ${policy?.CodigoPoliza || insurance.policyId}`, pageWidth - margin, yAfterIntro, { align: 'right' });
-    
-    // 6. Benefits List (Categorized like in PDF)
-    doc.setFont('helvetica', 'bold');
-    doc.text(featuresLabel, margin, yAfterIntro + 10);
-    
-    let benefitsY = yAfterIntro + 15;
-    doc.setFontSize(7.2);
-    
-    if (template?.benefits && template.benefits.length > 0) {
-      template.benefits.forEach((b) => {
-        // Don't overflow
-        if (benefitsY > pageHeight - 85) return;
-        
-        if (b.isBold) doc.setFont('helvetica', 'bold');
-        else doc.setFont('helvetica', 'normal');
-        
-        // If it's a category/title (no value)
-        if (!b.value || b.value.trim() === '') {
-          benefitsY += 2;
-          doc.setFont('helvetica', 'bold');
-          doc.text(b.label, margin, benefitsY);
-          benefitsY += 4;
-        } else {
-          doc.text(b.label, margin, benefitsY);
-          doc.text(b.value, pageWidth - margin, benefitsY, { align: 'right' });
-          benefitsY += 3.5;
+      doc.setDrawColor(219, 234, 254);
+      doc.setLineWidth(0.3);
+      doc.line(margin, curY + 2, pageWidth - margin, curY + 2);
+
+      curY += 6.5;
+
+      const benefitsList = template?.benefits || [];
+      const benefitsCount = benefitsList.length;
+
+      // Dynamic spacing calculation based on remaining space to fit strictly on 1 page
+      const pageFooterLineY = pageHeight - 14;
+      const sigHeightEstimate = directorSignatureData ? 22 : 16;
+      const maxAllowedContentY = pageFooterLineY - sigHeightEstimate - 8;
+
+      // Calculate legal text height estimate
+      let customFooterText = '';
+      if (template?.footer && template.footer !== 'UNDEFINED' && template.footer.trim() !== '') {
+        const datesJoinWord = template.language === 'en' ? 'to' : (template.language === 'de' ? 'bis' : (template.language === 'it' ? 'al' : (template.language === 'fr' ? 'au' : 'hasta')));
+        const processedFooter = template.footer
+          .replace(/{nombre}/gi, clientName)
+          .replace(/{name}/gi, clientName)
+          .replace(/{fecha_nacimiento}/gi, birthDateStr)
+          .replace(/{dob}/gi, birthDateStr)
+          .replace(/{date_of_birth}/gi, birthDateStr)
+          .replace(/{pais}/gi, getCountryName(insurance.destinationCountry))
+          .replace(/{country}/gi, getCountryName(insurance.destinationCountry))
+          .replace(/{destino}/gi, getCountryName(insurance.destinationCountry))
+          .replace(/{destination}/gi, getCountryName(insurance.destinationCountry))
+          .replace(/{fechas}/gi, `${startDateStr} ${datesJoinWord} ${endDateStr}`)
+          .replace(/{dates}/gi, `${startDateStr} ${datesJoinWord} ${endDateStr}`)
+          .replace(/{fecha_inicio}/gi, startDateStr)
+          .replace(/{start_date}/gi, startDateStr)
+          .replace(/{fecha_fin}/gi, endDateStr)
+          .replace(/{end_date}/gi, endDateStr)
+          .replace(/{dias}/gi, String(insurance.days || 0))
+          .replace(/{days}/gi, String(insurance.days || 0))
+          .replace(/{poliza}/gi, insurance.policyName || policy?.name || plan)
+          .replace(/{policy}/gi, insurance.policyName || policy?.name || plan);
+
+        const footerLines = processedFooter.split('\n');
+        const signOffKeywords = ['atentamente', 'sincerely', 'cordialement', 'mit freundlichen', 'cordiali saluti'];
+        let splitIndex = -1;
+        for (let i = 0; i < footerLines.length; i++) {
+          if (signOffKeywords.some(kw => footerLines[i].toLowerCase().includes(kw))) {
+            splitIndex = i;
+            break;
+          }
         }
-      });
-    } else {
-      doc.setFont('helvetica', 'italic');
-      doc.text(genericCoverageLabel, margin, benefitsY);
-      benefitsY += 5;
+        if (splitIndex !== -1) {
+          customFooterText = footerLines.slice(0, splitIndex).join('\n').trim();
+          const signOffLines = footerLines.slice(splitIndex).map(l => l.trim()).filter(l => l !== '');
+          if (signOffLines.length > 0) sincerelyLabel = signOffLines[0];
+          if (signOffLines.length > 1) footerSignOffName = signOffLines[1];
+          if (signOffLines.length > 2) footerSignOffTitle = signOffLines.slice(2).join('\n');
+        } else {
+          customFooterText = processedFooter.trim();
+        }
+      }
+
+      const estimatedLegalHeight = customFooterText !== '' ? 20 : 38;
+      const spaceForBenefits = maxAllowedContentY - curY - estimatedLegalHeight - 6;
+
+      let bStep = 4.0;
+      let titleStep = 4.8;
+      let bFontSize = 9.0;
+
+      if (benefitsCount > 0) {
+        const rawStep = spaceForBenefits / benefitsCount;
+        bStep = Math.min(4.8, Math.max(2.8, rawStep));
+        titleStep = Math.min(5.4, Math.max(3.4, bStep + 0.8));
+        bFontSize = bStep >= 4.0 ? 9.2 : (bStep >= 3.4 ? 8.5 : 8.0);
+      }
+
+      doc.setFontSize(bFontSize);
+
+      if (benefitsCount > 0) {
+        benefitsList.forEach((b) => {
+          if (!b.value || b.value.trim() === '') {
+            curY += 1.2;
+            doc.setFont('helvetica', 'bold');
+            doc.setTextColor(29, 78, 216); // blue-700 category header
+            doc.text(b.label, margin, curY);
+            curY += titleStep;
+          } else {
+            doc.setFont('helvetica', b.isBold ? 'bold' : 'normal');
+            doc.setTextColor(15, 23, 42); // slate-900
+            
+            // Label on left
+            doc.text(b.label, margin, curY);
+            
+            // Value on right
+            doc.setFont('helvetica', 'bold');
+            doc.text(b.value, pageWidth - margin, curY, { align: 'right' });
+            
+            curY += bStep;
+          }
+        });
+      } else {
+        doc.setFont('helvetica', 'italic');
+        doc.setTextColor(71, 85, 105);
+        doc.text(genericCoverageLabel, margin, curY);
+        curY += 5;
+      }
+
+      curY += 2;
+
+      // 7. Legal Disclaimer & Contact / Deductible Block
+      const hasNoDeductible = (policy && policy.deductible === false) ||
+                              (policy && policy.CantidadDeducible === 0) ||
+                              (policy && policy.name && policy.name.toLowerCase().includes('sin')) ||
+                              (insurance.policyId && insurance.policyId.toLowerCase().includes('sin')) ||
+                              (insurance.policyName && insurance.policyName.toLowerCase().includes('sin'));
+
+      const deductibleValue = hasNoDeductible 
+        ? 'US $ 0' 
+        : (policy?.CantidadDeducible !== undefined ? `US $ ${policy.CantidadDeducible}` : 'US $ 100');
+
+      if (customFooterText !== '') {
+        doc.setFontSize(8.5);
+        doc.setFont('helvetica', 'normal');
+        doc.setTextColor(71, 85, 105);
+        const splitCustomFooter = doc.splitTextToSize(customFooterText, contentWidth);
+        splitCustomFooter.forEach((line: string) => {
+          doc.text(line, margin, curY);
+          curY += 3.4;
+        });
+      } else {
+        const legalText = template?.language === 'en' 
+          ? "It is the insured's responsibility to read to know the benefits, terms, conditions, limitations and exclusions of the policy they are acquiring. To obtain an electronic copy and more information about it, it is recommended to consult the website: http://www.misegurointernacional.com/sblock/www/web.php where you can consult the policy in detail."
+          : (template?.language === 'de' 
+            ? "Es liegt in der Verantwortung des Versicherten, die Leistungen, Bedingungen, Einschränkungen und Ausschlüsse der von ihm erworbenen Police zu lesen und zu kennen. Um eine elektronische Kopie und weitere Informationen zu erhalten, wird empfohlen, die Website zu besuchen: http://www.misegurointernacional.com/sblock/www/web.php, wo Sie die Police im Detail einsehen können."
+            : (template?.language === 'it'
+              ? "È responsabilità dell'assicurato leggere per conoscere benefici, termini, condizioni, limitazioni ed esclusioni della polizza che sta acquistando. Per ottenere una copia elettronica e maggiori informazioni al riguardo, si consiglia di consultare il sito internet: http://www.misegurointernacional.com/sblock/www/web.php dove è possible consultare la polizza in dettaglio."
+              : (template?.language === 'fr'
+                ? "Il est de la responsabilité de l'assuré de lire pour connaître les avantages, les termes, les conditions, les limitations et les exclusions de la police qu'il acquiert. Pour obtenir une copie électronique et plus d'informations à ce sujet, il est recommandé de consulter le site internet : http://www.misegurointernacional.com/sblock/www/web.php où vous pourrez consulter la police en detail."
+                : "Es responsabilidad del asegurado leer para conocer los beneficios, términos, condiciones, limitaciones y exclusiones de la póliza que está adquiriendo. Para obtener una copia electrónica y mayor información de la misma se recomienda consultar la página de internet:\nhttp://www.misegurointernacional.com/sblock/www/web.php donde podrá consultar la póliza en detalle.")));
+        
+        doc.setFontSize(8.0);
+        doc.setFont('helvetica', 'normal');
+        doc.setTextColor(100, 116, 139); // slate-500
+        const splitLegal = doc.splitTextToSize(legalText, contentWidth);
+        splitLegal.forEach((line: string) => {
+          doc.text(line, margin, curY);
+          curY += 3.2;
+        });
+
+        curY += 2;
+
+        const infoRows = [
+          [deductibleLabel, deductibleValue],
+          [insuranceCompanyLabel, 'CAREMED & Cultural Insurance Services International'],
+          [emergencyUSALabel, '+ 1 888 505 2774 gratuito desde EUA'],
+          [emergencyGlobalLabel, '+ 1 743 244 2474 (Mundial, llamada a cobro revertido posible)'],
+          [emailLabel, 'CISIAssist@robinassist.com']
+        ];
+
+        // Render info box
+        const infoBoxY = curY;
+        const infoBoxHeight = (infoRows.length * 4.0) + 3;
+        doc.setFillColor(248, 250, 252); // slate-50
+        doc.setDrawColor(226, 232, 240); // slate-200
+        doc.setLineWidth(0.3);
+        doc.roundedRect(margin, infoBoxY, contentWidth, infoBoxHeight, 1.5, 1.5, 'FD');
+
+        let infoRowY = infoBoxY + 4.0;
+        infoRows.forEach(([label, value]) => {
+          doc.setFont('helvetica', 'bold');
+          doc.setFontSize(8.5);
+          doc.setTextColor(71, 85, 105); // slate-600
+          doc.text(`${label}:`, margin + 4, infoRowY);
+          
+          doc.setFont('helvetica', 'normal');
+          doc.setTextColor(15, 23, 42); // slate-900
+          doc.text(value, margin + 56, infoRowY);
+          infoRowY += 4.0;
+        });
+
+        curY = infoBoxY + infoBoxHeight + 3;
+      }
+      benefitsY = curY;
     }
-  
-    // 7. Legal and Contact Information (Replacing Dynamic Info and Table Footer)
-    benefitsY += 4;
-    doc.setFontSize(7.5);
-    doc.setTextColor(0, 0, 0);
+
+    // 8. Signature Placement (Dynamic Proportional Spacing)
+    const neededSigHeight = directorSignatureData ? 20 : 14;
+    const pageFooterY = pageHeight - 14;
+    const maxSigY = pageFooterY - neededSigHeight - 2;
+    
+    // Proportional positioning: anchor cleanly below content with comfortable breathing space
+    let sY = benefitsY + 6;
+    if (sY > maxSigY) {
+      sY = maxSigY;
+    }
+
+    doc.setFontSize(10.0);
     doc.setFont('helvetica', 'normal');
-  
-  const legalText = template?.language === 'en' 
-    ? "It is the insured's responsibility to read to know the benefits, terms, conditions, limitations and exclusions of the policy they are acquiring. To obtain an electronic copy and more information about it, it is recommended to consult the website: http://www.misegurointernacional.com/sblock/www/web.php where you can consult the policy in detail."
-    : (template?.language === 'de' 
-      ? "Es liegt in der Verantwortung des Versicherten, die Leistungen, Bedingungen, Einschränkungen und Ausschlüsse der von ihm erworbenen Police zu lesen und zu kennen. Um eine elektronische Kopie und weitere Informationen zu erhalten, wird empfohlen, die Website zu besuchen: http://www.misegurointernacional.com/sblock/www/web.php, wo Sie die Police im Detail einsehen können."
-      : (template?.language === 'it'
-        ? "È responsabilità dell'assicurato leggere per conoscere benefici, termini, condizioni, limitazioni ed esclusioni della polizza che sta acquistando. Per ottenere una copia elettronica e maggiori informazioni al riguardo, si consiglia di consultare il sito internet: http://www.misegurointernacional.com/sblock/www/web.php dove è possibile consultare la polizza in dettaglio."
-        : (template?.language === 'fr'
-          ? "Il est de la responsabilité de l'assuré de lire pour connaître les avantages, les termes, les conditions, les limitations et les exclusions de la police qu'il acquiert. Pour obtenir une copie électronique et plus d'informations à ce sujet, il est recommandé de consulter le site internet : http://www.misegurointernacional.com/sblock/www/web.php où vous pourrez consulter la police en détail."
-          : "Es responsabilidad del asegurado leer para conocer los beneficios, términos, condiciones, limitaciones y exclusiones de la póliza que está adquiriendo. Para obtener una copia electrónica y mayor información de la misma se recomienda consultar la página de internet:\nhttp://www.misegurointernacional.com/sblock/www/web.php donde podrá consultar la póliza en detalle.")));
-  
-  const splitLegal = doc.splitTextToSize(legalText, contentWidth);
-  doc.text(splitLegal, margin, benefitsY);
-  benefitsY += (splitLegal.length * 3.5) + 3;
-
-  const infoRows = [
-    [deductibleLabel, insurance.policyId.includes('sin') ? 'US $ 0' : 'US $ 100'],
-    [insuranceCompanyLabel, 'CAREMED & Cultural Insurance Services International'],
-    [emergencyUSALabel, '+ 1 888 505 2774 gratuito desde EUA'],
-    [emergencyGlobalLabel, '+ 1 743 244 2474 (Mundial, llamada a cobro revertido posible)'],
-    [emailLabel, 'CISIAssist@robinassist.com']
-  ];
-
-  infoRows.forEach(([label, value]) => {
+    doc.setTextColor(30, 41, 59);
+    doc.text(sincerelyLabel, margin, sY);
+    
+    let signatureOffset = 0;
+    if (directorSignatureData) {
+      try {
+        doc.addImage(directorSignatureData, 'PNG', margin, sY + 1.5, 38, 11);
+        signatureOffset = 10;
+      } catch (sigErr) {
+        console.error("Error rendering signature image in PDF:", sigErr);
+      }
+    }
+    
     doc.setFont('helvetica', 'bold');
-    doc.text(`${label}:`, margin, benefitsY);
+    doc.setFontSize(10.0);
+    doc.setTextColor(15, 23, 42);
+    doc.text(footerSignOffName || 'Lic. Renán E. Herrera Garza', margin, sY + 7 + signatureOffset);
+    
+    doc.setFontSize(8.8);
     doc.setFont('helvetica', 'normal');
-    doc.text(value, margin + 45, benefitsY);
-    benefitsY += 3.5;
+    doc.setTextColor(71, 85, 105);
+    doc.text(footerSignOffTitle || directorLabel, margin, sY + 11 + signatureOffset);
+
+    // 9. Page Footer
+    const pFY = pageHeight - 10;
+    doc.setDrawColor(226, 232, 240);
+    doc.line(margin, pFY - 4, pageWidth - margin, pFY - 4);
+    doc.setFontSize(7.0);
+    doc.setTextColor(148, 163, 184); // slate-400
+    doc.text('Calzada San Pedro 217 local 23 Col. del Valle San Pedro Garza García, NL 66220', pageWidth / 2, pFY - 1, { align: 'center' });
+    doc.text('Tel: 81 8335 2701 / 8002861010  www.misegurointernacional.com  info@misegurointernacional.com', pageWidth / 2, pFY + 2.5, { align: 'center' });
+    
+    if (returnRaw) return doc;
+    doc.save(`Carta_Seguro_${insurance.firstName}_${insurance.lastName}_${template?.language || 'es'}.pdf`);
+  }
+};
+
+export const generateMergedLettersPDF = async (
+  insurance: InsuranceRequest,
+  templates: (PolicyLetter | undefined)[],
+  policies: Policy[] = [],
+  customLogo?: string,
+  returnRaw: boolean = true
+) => {
+  if (!templates || templates.length === 0) {
+    return generatePDF(insurance, undefined, policies, customLogo, returnRaw);
+  }
+
+  const doc = new jsPDF({
+    orientation: 'p',
+    unit: 'mm',
+    format: 'letter'
   });
 
-  benefitsY += 3;
-  doc.text(moreInfoLabel, margin, benefitsY);
-  }
-
-  // 9. Signature
-  const sY = pageHeight - 40;
-  doc.setFontSize(8.5);
-  doc.text(sincerelyLabel, margin, sY);
-  
-  let signatureOffset = 0;
-  if (directorSignatureData) {
-    try {
-      doc.addImage(directorSignatureData, 'PNG', margin, sY + 1, 40, 12);
-      signatureOffset = 10;
-    } catch (sigErr) {
-      console.error("Error rendering signature image in PDF:", sigErr);
+  for (let i = 0; i < templates.length; i++) {
+    if (i > 0) {
+      doc.addPage('letter', 'p');
     }
+    await generatePDF(insurance, templates[i], policies, customLogo, true, doc);
   }
-  
-  doc.setFont('helvetica', 'bold');
-  doc.text('Lic. Renán E. Herrera Garza', margin, sY + 10 + signatureOffset);
-  doc.setFontSize(7);
-  doc.setFont('helvetica', 'normal');
-  doc.text(directorLabel, margin, sY + 14 + signatureOffset);
 
-  // 10. Page Footer
-  const pFY = pageHeight - 12;
-  doc.setDrawColor(220, 220, 220);
-  doc.line(margin, pFY - 6, pageWidth - margin, pFY - 6);
-  doc.setFontSize(7);
-  doc.setTextColor(150, 150, 150);
-  doc.text('Calzada San Pedro 217 local 23 Col. del Valle San Pedro Garza García, NL 66220', pageWidth / 2, pFY - 2, { align: 'center' });
-  doc.text('Tel: 81 8335 2701 / 8002861010  www.misegurointernacional.com  info@misegurointernacional.com', pageWidth / 2, pFY + 2, { align: 'center' });
-  
   if (returnRaw) return doc;
-  doc.save(`Carta_Seguro_${insurance.firstName}_${insurance.lastName}_${template?.language || 'es'}.pdf`);
-  }
+  doc.save(`Cartas_Seguro_Integradas_${insurance.firstName}_${insurance.lastName}.pdf`);
+  return doc;
 };
 
 export const generateReceiptPDF = async (payment: any, insurance: any, customLogo?: string, customLogoDark?: string) => {
@@ -935,42 +1204,19 @@ export const generateReceiptPDF = async (payment: any, insurance: any, customLog
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
   
-  // Load Logo
-  let logoData = null;
+  // 1. Company settings & Logo resolution from Firestore
+  let companySettings: any = {};
   try {
-    const img = new Image();
-    // Use Dark background logo for the blue header if available, otherwise fallback to primary
-    img.src = customLogoDark || customLogo || APP_LOGO;
-    img.crossOrigin = "Anonymous";
-    await new Promise((resolve, reject) => {
-      img.onload = resolve;
-      img.onerror = reject;
-    });
-    const maxDim = 500;
-    let w = img.width;
-    let h = img.height;
-    if (w > maxDim || h > maxDim) {
-      if (w > h) {
-        h = Math.round((h * maxDim) / w);
-        w = maxDim;
-      } else {
-        w = Math.round((w * maxDim) / h);
-        h = maxDim;
-      }
+    const companySnap = await getDoc(firestoreDoc(db, 'settings', 'company'));
+    if (companySnap.exists()) {
+      companySettings = companySnap.data() || {};
     }
-    const canvas = document.createElement('canvas');
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext('2d');
-    ctx?.drawImage(img, 0, 0, w, h);
-    logoData = {
-      url: canvas.toDataURL('image/png'),
-      width: w,
-      height: h
-    };
-  } catch (e) {
-    console.error("Error loading logo for receipt:", e);
+  } catch (err) {
+    console.error("Error loading company settings in generateReceiptPDF:", err);
   }
+
+  const effectiveLogo = customLogoDark || customLogo || companySettings.logoUrlDark || companySettings.logoUrl || APP_LOGO;
+  const logoData = await loadLogoData(effectiveLogo);
 
   // Header
   doc.setFillColor(37, 99, 235); // blue-600
@@ -1014,7 +1260,7 @@ export const generateReceiptPDF = async (payment: any, insurance: any, customLog
   doc.text('DETALLES DEL RECIBO', 120, 55);
   doc.setFont('helvetica', 'normal');
   doc.text(`No. Recibo: ${payment.id?.substring(0, 8).toUpperCase()}`, 120, 65);
-  doc.text(`Fecha: ${payment.date?.toDate ? format(payment.date.toDate(), 'dd/MM/yyyy') : format(new Date(payment.date), 'dd/MM/yyyy')}`, 120, 72);
+  doc.text(`Fecha: ${formatDisplayDate(payment.date)}`, 120, 72);
   doc.text(`Método: ${payment.paymentMethod}`, 120, 79);
   
   // Payment Table

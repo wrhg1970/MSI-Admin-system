@@ -10,6 +10,7 @@ import {
 } from 'firebase/firestore';
 import { db } from '../firebase';
 import { HistoricalRecord, UserProfile } from '../types';
+import { getNormalizedYYYYMMDD, formatDisplayDate } from '../lib/policyUtils';
 import { 
   Search, 
   Download, 
@@ -213,14 +214,12 @@ export default function HistoricoManager({ profile }: HistoricoManagerProps) {
   // Filter records
   const filteredRecords = useMemo(() => {
     return records.filter(record => {
-      const fullName = `${record.firstName} ${record.lastName}`.toLowerCase();
-      const matchSearch = searchTerm.trim() === '' || 
-        fullName.includes(searchTerm.toLowerCase()) ||
-        (record.email || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
-        (record.destino || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
-        (record.ciudad || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
-        (record.agente || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
-        (record.cliente || '').toLowerCase().includes(searchTerm.toLowerCase());
+      const fullName = `${record.firstName || ''} ${record.lastName || ''}`.trim();
+      const reqDateNorm = getNormalizedYYYYMMDD(record.fechaAlta || record.createdAt);
+      const reqDateDisp = formatDisplayDate(record.fechaAlta || record.createdAt);
+      const searchTarget = `${fullName} ${record.firstName || ''} ${record.lastName || ''} ${record.email || ''} ${record.destino || ''} ${record.ciudad || ''} ${record.agente || ''} ${record.cliente || ''} ${record.noRecibo || ''} ${record.invoice || ''} ${reqDateNorm} ${reqDateDisp}`.toLowerCase();
+      const searchTokens = searchTerm.toLowerCase().trim().split(/\s+/);
+      const matchSearch = !searchTerm.trim() || searchTokens.every(token => searchTarget.includes(token));
 
       const matchPlan = selectedPlan === 'All' || record.tipoPoliza === selectedPlan;
       const matchDest = selectedDestination === 'All' || record.destino === selectedDestination;
@@ -539,6 +538,10 @@ export default function HistoricoManager({ profile }: HistoricoManagerProps) {
 
   // Destructive delete for SuperAdmin audit maintenance
   const handleDeleteRecord = async (recordId: string) => {
+    if (profile?.role !== 'super_admin') {
+      alert("Solo el super administrador puede eliminar registros históricos.");
+      return;
+    }
     if (!window.confirm("¿Está seguro de que desea eliminar permanentemente este registro histórico de la base de datos?")) {
       return;
     }

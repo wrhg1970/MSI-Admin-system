@@ -3,7 +3,7 @@ import { collection, query, onSnapshot, addDoc, getDoc, doc, updateDoc, deleteDo
 import { db, handleFirestoreError, OperationType, auth } from '../firebase';
 import { InsuranceRequest, Payment, Country, UserProfile, ExchangeRate, CustomRole, Category, Subcategory, Client, Provider, Policy, PlanType } from '../types';
 import { COUNTRIES } from '../constants';
-import { CheckCircle, XCircle, X, ShieldCheck, Eye, AlertCircle, Download, BarChart3, TrendingUp, Users, DollarSign, Calendar, Filter, Settings, Building2, Shield, Users2, FileText, Upload, Database, Search, Receipt, Trash2, Edit2, ArrowRightLeft, CheckSquare, Square, Plus, AlertTriangle, Percent, ChevronLeft, ChevronRight, ChevronDown, Coins, ArrowUpDown, Sliders, Scale, RefreshCw, CreditCard, Link2, Copy, Mail, MessageSquare } from 'lucide-react';
+import { CheckCircle, XCircle, X, Check, ShieldCheck, Eye, AlertCircle, Download, BarChart3, TrendingUp, Users, DollarSign, Calendar, Filter, Settings, Building2, Shield, Users2, FileText, Upload, Database, Search, Receipt, Trash2, Edit2, ArrowRightLeft, CheckSquare, Square, Plus, AlertTriangle, Percent, ChevronLeft, ChevronRight, ChevronDown, Coins, ArrowUpDown, ArrowUp, ArrowDown, Sliders, Scale, RefreshCw, CreditCard, Link2, Copy, Mail, MessageSquare, Clock, User, Calculator, Layers } from 'lucide-react';
 import TransactionModal from './TransactionModal';
 import ConfirmModal from './ConfirmModal';
 import StatementOCRManager from './StatementOCRManager';
@@ -15,14 +15,19 @@ import Papa from 'papaparse';
 import { usePermissions } from '../hooks/usePermissions';
 import BulkImportModal from './BulkImportModal';
 import { useCompany } from '../App';
+import { useFirestoreData } from '../context/FirestoreDataContext';
 import { APP_LOGO } from '../constants';
 
 import { useSearchParams } from 'react-router-dom';
 import { triggerWhatsAppNotification } from '../services/whatsapp';
+import { getNormalizedYYYYMMDD, formatDisplayDate, getPolicyEffectiveCost } from '../lib/policyUtils';
+import { isCardPaymentMethod } from '../utils/paymentUtils';
+import { logInsuranceActivity } from '../utils/activityLogger';
 
 export const isInsuranceClosed = (insurance: any) => {
   if (!insurance) return false;
   if (insurance.closed === false) return false;
+  if (insurance.closed === true) return true;
   
   const totalFinal = insurance.totalFinal !== undefined && insurance.totalFinal !== null 
     ? insurance.totalFinal 
@@ -30,10 +35,10 @@ export const isInsuranceClosed = (insurance: any) => {
   const totalPaid = insurance.totalPaid || 0;
   const balance = totalFinal - totalPaid;
   
-  const balanceIsSmall = Math.abs(balance) < 5;
+  const balanceIsZero = Math.abs(balance) < 0.01;
   const isCommissionPaid = !insurance.agentCommission || insurance.agentCommission <= 0 || insurance.commissionStatus === 'paid';
   
-  return balanceIsSmall && isCommissionPaid;
+  return balanceIsZero && isCommissionPaid;
 };
 
 export const isAlreadyLoaded = (insurance: any) => {
@@ -47,19 +52,35 @@ export const isAlreadyLoaded = (insurance: any) => {
 export default function AdminPanel({ profile, rolePermissions }: { profile: UserProfile | null, rolePermissions: CustomRole | null }) {
   const [searchParams, setSearchParams] = useSearchParams();
   const { hasPermission } = usePermissions(profile, rolePermissions);
-  const isSuperAdmin = profile?.role === 'super_admin';
-  const isSuperAdminOrDirector = profile?.role === 'super_admin' || profile?.role === 'director';
-  const canManageClosedState = !!(profile?.role && ['super_admin', 'director', 'seguros', 'administracion', 'admin'].includes(profile.role));
+  const userEmail = auth.currentUser?.email?.toLowerCase().trim() || '';
+  const isSuperAdmin = profile?.role === 'super_admin' || 
+    userEmail === 'ventas@misegurointernacional.com' || 
+    userEmail === 'wrhg1970@gmail.com' || 
+    auth.currentUser?.uid === 'VTuoortBNjVYkwVviYkbSlyUzNS2' || 
+    false;
+  const isSuperAdminOrDirector = isSuperAdmin || profile?.role === 'director' || profile?.role === 'admin';
+  const canManageClosedState = isSuperAdmin || !!(profile?.role && ['super_admin', 'director', 'seguros', 'administracion', 'admin'].includes(profile.role));
   const { settings: companySettings } = useCompany();
-  const [insurances, setInsurances] = useState<InsuranceRequest[]>([]);
-  const [payments, setPayments] = useState<Payment[]>([]);
-  const [categories, setCategories] = useState<Category[]>([]);
-  const [subcategories, setSubcategories] = useState<Subcategory[]>([]);
-  const [clients, setClients] = useState<Client[]>([]);
-  const [providers, setProviders] = useState<Provider[]>([]);
-  const [policies, setPolicies] = useState<Policy[]>([]);
-  const [countries, setCountries] = useState<Country[]>([]);
-  const [insuranceTypes, setInsuranceTypes] = useState<{name: string, minAge: number, maxAge: number}[]>([]);
+
+  const {
+    clients,
+    insurances,
+    payments,
+    providers,
+    policies,
+    countries,
+    categories,
+    subcategories,
+    latestExchangeRate: exchangeRate,
+    users,
+    paymentMethods,
+    insuranceTypes,
+    limitToCurrentMonth,
+    setLimitToCurrentMonth,
+    quotaExceeded,
+    setQuotaExceeded,
+  } = useFirestoreData();
+
   const [showImportModal, setShowImportModal] = useState(false);
   const [selectedPaymentIds, setSelectedPaymentIds] = useState<string[]>([]);
   const [showBulkEditModal, setShowBulkEditModal] = useState(false);
@@ -73,7 +94,6 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
   const [activeTab, setActiveTab] = useState<'incomes' | 'expenses' | 'commissions' | 'accounts_payable' | 'accounts_receivable' | 'dashboard' | 'reconciliation' | 'comparison' | 'cash_flow' | 'income_statement'>((searchParams.get('tab') as any) || 'dashboard');
   const [incomeCurrencyTab, setIncomeCurrencyTab] = useState<'USD' | 'MXP'>('USD');
   const [expenseCurrencyTab, setExpenseCurrencyTab] = useState<'USD' | 'MXP'>('USD');
-  const [exchangeRate, setExchangeRate] = useState<number>(17.5);
   const [comparisonFilters, setComparisonFilters] = useState({
     periodA: {
       startDate: format(startOfMonth(subMonths(new Date(), 1)), 'yyyy-MM-dd'),
@@ -161,9 +181,28 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
     setSelectedPaymentIds([]);
   }, [activeTab, incomeCurrencyTab, expenseCurrencyTab]);
 
+  const [caremedInvoices, setCaremedInvoices] = useState<any[]>([]);
+
+  useEffect(() => {
+    const unsubInvoices = onSnapshot(collection(db, 'caremedInvoices'), (snapshot) => {
+      const list: any[] = [];
+      snapshot.forEach(doc => {
+        list.push({ id: doc.id, ...doc.data() });
+      });
+      setCaremedInvoices(list);
+    }, (error) => {
+      handleFirestoreError(error, OperationType.GET, 'caremedInvoices');
+    });
+
+    return () => unsubInvoices();
+  }, []);
+
   const handleTabChange = (tab: 'dashboard' | 'incomes' | 'expenses' | 'commissions' | 'accounts_payable' | 'accounts_receivable' | 'reconciliation' | 'comparison' | 'cash_flow' | 'income_statement') => {
     setActiveTab(tab);
     setSearchParams({ tab });
+    if (tab === 'comparison' || tab === 'cash_flow' || tab === 'income_statement') {
+      setLimitToCurrentMonth(false);
+    }
   };
 
   // Dashboard Filters
@@ -191,7 +230,6 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
   const [paymentAmountMXP, setPaymentAmountMXP] = useState<number>(0);
   const [paymentAmount, setPaymentAmount] = useState<number>(0);
   const [editingCommission, setEditingCommission] = useState<number>(0);
-  const [paymentMethods, setPaymentMethods] = useState<{ id: string; name: string; status: string }[]>([]);
   const [selectedInsuranceForTransactions, setSelectedInsuranceForTransactions] = useState<string | null>(null);
   const [showDiscountCommissionModal, setShowDiscountCommissionModal] = useState(false);
   const [discountCommissionAmount, setDiscountCommissionAmount] = useState<string>('');
@@ -210,10 +248,25 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
   const [expandedInvoices, setExpandedInvoices] = useState<Record<string, boolean>>({});
   const [payableFilter, setPayableFilter] = useState<'pending' | 'all'>('pending');
   const [payableValidationFilter, setPayableValidationFilter] = useState<'all' | 'valid' | 'invalid' | 'uncotejado'>('all');
+  const [payableDateRange, setPayableDateRange] = useState({ start: '', end: '' });
+  const [payableSearchTerm, setPayableSearchTerm] = useState('');
+  const [payableSortField, setPayableSortField] = useState<'invoiceNumber' | 'date' | 'pendingAmount' | 'systemCost'>('date');
+  const [payableSortOrder, setPayableSortOrder] = useState<'asc' | 'desc'>('desc');
   const [invoicePaymentDate, setInvoicePaymentDate] = useState(new Date().toISOString().split('T')[0]);
   const [invoicePaymentMethod, setInvoicePaymentMethod] = useState('');
   const [invoiceDepositAccount, setInvoiceDepositAccount] = useState('');
   const [showInvoicePrompt, setShowInvoicePrompt] = useState(false);
+  const [deductCommission, setDeductCommission] = useState(false);
+  const [customCommissionDeduction, setCustomCommissionDeduction] = useState<string>('');
+  const [showBulkAdjustModal, setShowBulkAdjustModal] = useState(false);
+  const [bulkAdjustSource, setBulkAdjustSource] = useState<'accounts_payable' | 'accounts_receivable'>('accounts_payable');
+  const [bulkAdjustScope, setBulkAdjustScope] = useState<'selected' | 'all_visible'>('selected');
+  const [bulkAdjustTarget, setBulkAdjustTarget] = useState<'totalCost' | 'discount' | 'adjustment' | 'totalPrice' | 'balance_clear'>('adjustment');
+  const [bulkAdjustType, setBulkAdjustType] = useState<'percentage' | 'fixed_per_policy' | 'fixed_total_distributed'>('percentage');
+  const [bulkAdjustMode, setBulkAdjustMode] = useState<'subtract' | 'add' | 'set'>('add');
+  const [bulkAdjustValue, setBulkAdjustValue] = useState<string>('10');
+  const [bulkAdjustReason, setBulkAdjustReason] = useState<string>('');
+  const [bulkAdjustPreviewSearch, setBulkAdjustPreviewSearch] = useState<string>('');
   const [differenceModalOpen, setDifferenceModalOpen] = useState(false);
   const [selectedDifferenceGroup, setSelectedDifferenceGroup] = useState<any>(null);
   const [selectedAmountType, setSelectedAmountType] = useState<'registered' | 'expected' | 'custom'>('registered');
@@ -226,12 +279,11 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
     status: 'completed',
     date: new Date().toISOString().split('T')[0],
     amount: 0,
-    exchangeRate: 17.5,
+    exchangeRate: 17.55,
     amountMXP: 0
   });
 
   // Incomes filters, sorting, and pagination state variables
-  const [users, setUsers] = useState<UserProfile[]>([]);
   const [incomeFilters, setIncomeFilters] = useState({
     startDate: '',
     endDate: '',
@@ -308,6 +360,9 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
     status: 'all' as 'all' | 'active' | 'cancelled' | 'pending' | 'partially_paid' | 'paid',
     requestDateStart: '',
     requestDateEnd: '',
+    clientType: 'all' as 'all' | 'Individual' | 'Agent' | 'Corporate',
+    clientId: 'all',
+    subAgentId: 'all',
     agentName: 'all'
   });
   const [accountsReceivablePage, setAccountsReceivablePage] = useState(1);
@@ -341,6 +396,21 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
   const [isSavingInlineAr, setIsSavingInlineAr] = useState<string | null>(null);
   const [selectedArIds, setSelectedArIds] = useState<string[]>([]);
   const [isBulkSavingAr, setIsBulkSavingAr] = useState(false);
+  const [showBulkPaymentArModal, setShowBulkPaymentArModal] = useState(false);
+  const [bulkPaymentArData, setBulkPaymentArData] = useState<{
+    date: string;
+    paymentMethod: string;
+    receiptNumber: string;
+    depositAccount: string;
+    notes: string;
+  }>({
+    date: format(new Date(), 'yyyy-MM-dd'),
+    paymentMethod: '',
+    receiptNumber: '',
+    depositAccount: '',
+    notes: ''
+  });
+  const [isBulkPayingAr, setIsBulkPayingAr] = useState(false);
 
   const [confirmModalState, setConfirmModalState] = useState<{
     isOpen: boolean;
@@ -635,98 +705,141 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
     );
   };
 
-  useEffect(() => {
-    if (!profile || !hasPermission('admin')) return;
+  const handleBulkPaymentArSave = async (e?: React.FormEvent) => {
+    if (e) e.preventDefault();
+    if (selectedArIds.length === 0) return;
+    if (!bulkPaymentArData.paymentMethod) {
+      alert('Por favor selecciona una forma de pago.');
+      return;
+    }
+    if (!bulkPaymentArData.date) {
+      alert('Por favor indica la fecha de pago.');
+      return;
+    }
+    if (!bulkPaymentArData.receiptNumber?.trim()) {
+      alert('Por favor ingresa el número o referencia del recibo.');
+      return;
+    }
 
-    const unsubInsurances = onSnapshot(collection(db, 'insurances'), (snap) => {
-      setInsurances(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as InsuranceRequest)));
-    }, (error) => {
-      handleFirestoreError(error, OperationType.GET, 'insurances');
-    });
-    const unsubPayments = onSnapshot(collection(db, 'payments'), (snap) => {
-      setPayments(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Payment)));
-    }, (error) => {
-      handleFirestoreError(error, OperationType.GET, 'payments');
-    });
+    setIsBulkPayingAr(true);
+    let successCount = 0;
+    let failCount = 0;
 
-    const unsubRate = onSnapshot(query(collection(db, 'exchangeRates'), orderBy('date', 'desc'), limit(1)), (snap) => {
-      if (!snap.empty) {
-        const latestRate = snap.docs[0].data() as ExchangeRate;
-        setExchangeRate(latestRate.rate);
+    try {
+      const paymentDate = new Date(bulkPaymentArData.date + 'T12:00:00');
+      const currentRate = typeof exchangeRate === 'number' ? exchangeRate : ((exchangeRate as any)?.rate || 20);
+      const currentUserName = profile?.displayName || profile?.email || userEmail || 'Usuario';
+
+      for (const id of selectedArIds) {
+        try {
+          const item = accountsReceivableData.items.find(i => i.id === id);
+          if (!item) {
+            failCount++;
+            continue;
+          }
+
+          const pendingBalance = item.balance || 0;
+          const amountToPay = pendingBalance > 0 ? Number(pendingBalance.toFixed(2)) : 0;
+
+          // 1. If there is a positive debt, create client_payment record
+          if (amountToPay > 0) {
+            const paymentRecord: any = {
+              insuranceId: item.id,
+              amount: amountToPay,
+              currency: 'USD',
+              amountMXP: Number((amountToPay * currentRate).toFixed(2)),
+              exchangeRate: currentRate,
+              type: 'client_payment',
+              paymentMethod: bulkPaymentArData.paymentMethod,
+              receiptNumber: bulkPaymentArData.receiptNumber.trim(),
+              depositAccount: bulkPaymentArData.depositAccount?.trim() || '',
+              status: 'completed',
+              date: paymentDate,
+              notes: bulkPaymentArData.notes?.trim() || `Pago masivo registrado desde Cuentas por Cobrar. Recibo: ${bulkPaymentArData.receiptNumber.trim()}`,
+              createdAt: serverTimestamp()
+            };
+
+            await addDoc(collection(db, 'payments'), paymentRecord);
+          }
+
+          // 2. Update insurance document
+          const currentPaid = item.totalPaid || 0;
+          const newTotalPaid = Number((currentPaid + amountToPay).toFixed(2));
+          const expectedTotal = item.expected !== undefined && item.expected !== null 
+            ? item.expected 
+            : (item.totalFinal !== undefined && item.totalFinal !== null ? item.totalFinal : (item.totalPrice || 0));
+          const newBalance = expectedTotal - newTotalPaid;
+          const isSettled = Math.abs(newBalance) < 0.01;
+
+          const updateData: any = {
+            totalPaid: newTotalPaid,
+            status: isSettled ? 'paid' : (item.status || 'active'),
+            paymentMethod: bulkPaymentArData.paymentMethod,
+            updatedAt: serverTimestamp()
+          };
+
+          if (isSettled) {
+            const isCommissionSettled = !item.agentCommission || item.agentCommission <= 0 || item.commissionStatus === 'paid';
+            if (isCommissionSettled) {
+              updateData.closed = true;
+            }
+          }
+
+          await updateDoc(doc(db, 'insurances', item.id), updateData);
+
+          // 3. Log insurance activity
+          try {
+            await logInsuranceActivity({
+              insuranceId: item.id,
+              userName: currentUserName,
+              action: 'payment_created',
+              description: `Pago masivo registrado por $${amountToPay.toFixed(2)} USD (${bulkPaymentArData.paymentMethod}) - Recibo: ${bulkPaymentArData.receiptNumber.trim()}. Estado de póliza: ${isSettled ? 'Pagado' : item.status}.`
+            });
+          } catch (logErr) {
+            console.warn('Could not log insurance activity:', logErr);
+          }
+
+          // 4. Auto-generate pending agent commission payment if policy is fully settled and commission not yet created
+          if (isSettled && item.agentCommission && item.agentCommission > 0) {
+            const hasAgentComm = payments.some(p => p.insuranceId === item.id && p.type === 'agent_commission');
+            if (!hasAgentComm) {
+              try {
+                await addDoc(collection(db, 'payments'), {
+                  insuranceId: item.id,
+                  amount: item.agentCommission,
+                  currency: 'USD',
+                  type: 'agent_commission',
+                  status: 'pending',
+                  date: paymentDate,
+                  notes: 'Comisión generada automáticamente tras liquidación de pago masivo',
+                  createdAt: serverTimestamp()
+                });
+              } catch (commErr) {
+                console.warn('Could not add pending agent commission:', commErr);
+              }
+            }
+          }
+
+          successCount++;
+        } catch (itemErr) {
+          console.error(`Error processing bulk payment for insurance ${id}:`, itemErr);
+          failCount++;
+        }
       }
-    }, (error) => {
-      handleFirestoreError(error, OperationType.GET, 'exchangeRates');
-    });
 
-    const unsubCats = onSnapshot(query(collection(db, 'categories'), orderBy('name', 'asc')), (snap) => {
-      setCategories(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Category)));
-    }, (error) => {
-      handleFirestoreError(error, OperationType.GET, 'categories');
-    });
+      setSelectedArIds([]);
+      setShowBulkPaymentArModal(false);
+      alert(`Pago Masivo completado exitosamente.\n\n• Pólizas modificadas y actualizadas: ${successCount}${failCount > 0 ? `\n• Errores: ${failCount}` : ''}`);
+    } catch (error) {
+      console.error('Error in bulk payment operation:', error);
+      alert('Ocurrió un error al procesar el pago masivo: ' + (error instanceof Error ? error.message : String(error)));
+    } finally {
+      setIsBulkPayingAr(false);
+    }
+  };
 
-    const unsubSubs = onSnapshot(query(collection(db, 'subcategories'), orderBy('name', 'asc')), (snap) => {
-      setSubcategories(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Subcategory)));
-    }, (error) => {
-      handleFirestoreError(error, OperationType.GET, 'subcategories');
-    });
-
-    const unsubClients = onSnapshot(collection(db, 'clients'), (snap) => {
-      setClients(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Client)));
-    }, (error) => {
-      handleFirestoreError(error, OperationType.GET, 'clients');
-    });
-
-    const unsubProviders = onSnapshot(collection(db, 'providers'), (snap) => {
-      setProviders(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Provider)));
-    }, (error) => {
-      handleFirestoreError(error, OperationType.GET, 'providers');
-    });
-
-    const unsubPolicies = onSnapshot(collection(db, 'policies'), (snap) => {
-      setPolicies(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Policy)));
-    }, (error) => {
-      handleFirestoreError(error, OperationType.GET, 'policies');
-    });
-
-    const unsubCountries = onSnapshot(collection(db, 'countries'), (snap) => {
-      setCountries(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Country)));
-    }, (error) => {
-      handleFirestoreError(error, OperationType.GET, 'countries');
-    });
-
-    const unsubTypes = onSnapshot(collection(db, 'insuranceTypes'), (snap) => {
-      setInsuranceTypes(snap.docs.map(doc => doc.data() as any));
-    }, (error) => {
-      handleFirestoreError(error, OperationType.GET, 'insuranceTypes');
-    });
-
-    const unsubUsers = onSnapshot(collection(db, 'users'), (snap) => {
-      setUsers(snap.docs.map(doc => ({ uid: doc.id, ...doc.data() } as UserProfile)));
-    }, (error) => {
-      handleFirestoreError(error, OperationType.GET, 'users');
-    });
-
-    const unsubPaymentMethods = onSnapshot(collection(db, 'paymentMethods'), (snap) => {
-      setPaymentMethods(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as any)));
-    }, (error) => {
-      handleFirestoreError(error, OperationType.GET, 'paymentMethods');
-    });
-
-    return () => {
-      unsubInsurances();
-      unsubPayments();
-      unsubRate();
-      unsubCats();
-      unsubSubs();
-      unsubClients();
-      unsubProviders();
-      unsubPolicies();
-      unsubCountries();
-      unsubTypes();
-      unsubUsers();
-      unsubPaymentMethods();
-    };
-  }, []);
+  // Note: Local database subscription useEffect was removed. All database access 
+  // is now optimized and centralized via useFirestoreData() context.
 
   const handleDownloadDashboardReport = () => {
     const doc = new jsPDF();
@@ -820,6 +933,22 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
     }
     doc.text(`Filtro Fecha Solicitud: ${periodText}`, 20, 50);
     doc.text(`Filtro Tipo: ${accountsReceivableFilters.type === 'deudor' ? 'Solo Deudores' : accountsReceivableFilters.type === 'overpaid' ? 'Solo Sobrepagos' : 'Todos'}`, 20, 56);
+
+    let entityFilterText = '';
+    if (accountsReceivableFilters.clientType !== 'all') {
+      entityFilterText += `Tipo: ${accountsReceivableFilters.clientType === 'Agent' ? 'Agente' : accountsReceivableFilters.clientType === 'Corporate' ? 'Corporativo' : 'Individual'} `;
+    }
+    if (accountsReceivableFilters.clientId !== 'all') {
+      const c = clients.find(cl => cl.id === accountsReceivableFilters.clientId);
+      if (c) entityFilterText += `| Cliente: ${c.commercialName || c.legalName || c.id} `;
+    }
+    if (accountsReceivableFilters.subAgentId !== 'all') {
+      const sa = availableArSubAgents.find(s => s.id === accountsReceivableFilters.subAgentId || s.email === accountsReceivableFilters.subAgentId);
+      entityFilterText += `| Subagente: ${sa ? sa.name : accountsReceivableFilters.subAgentId}`;
+    }
+    if (entityFilterText) {
+      doc.text(`Filtro Entidad: ${entityFilterText}`, 20, 62);
+    }
 
     // KPI Summary Cards in PDF
     doc.setFontSize(14);
@@ -1008,7 +1137,7 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
       async () => {
         setSubmitting(true);
         try {
-          const isCard = paymentMethod === 'Tarjeta AMEX' || paymentMethod === 'Tarjeta VISA/MC';
+          const isCard = isCardPaymentMethod(paymentMethod);
           const isNewIns = !isAlreadyLoaded(selectedInsurance);
           
           let cardCommission = selectedInsurance.comision || 0;
@@ -1185,7 +1314,7 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
         const totalPrice = insData.totalFinal || insData.totalPrice || 0;
         
         let newStatus = insData.status;
-        if (newTotalPaid >= totalPrice) {
+        if ((totalPrice - newTotalPaid) < 2) {
           newStatus = 'paid';
         } else if (newTotalPaid > 0) {
           newStatus = 'partially_paid';
@@ -1213,7 +1342,7 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
 
       // 4. Log to bitacora
       try {
-        await addDoc(collection(db, 'insuranceActivities'), {
+        await logInsuranceActivity({
           insuranceId: selectedInsurance.id,
           type: 'automatic',
           description: `Se aplicó descuento de comisión por $${amt.toLocaleString('es-MX', { minimumFractionDigits: 2 })} USD. Se generó Pago de Cliente y Pago de Comisión con método "Descuento comision".`,
@@ -1287,7 +1416,7 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
               let newStatus = insurance.status;
               if (newTotalPaid <= 0) {
                 newStatus = 'pending';
-              } else if (newTotalPaid < totalPrice) {
+              } else if ((totalPrice - newTotalPaid) >= 2) {
                 newStatus = 'partially_paid';
               } else {
                 newStatus = 'paid';
@@ -1367,7 +1496,7 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
               let newStatus = insurance.status;
               if (newTotalPaid <= 0) {
                 newStatus = 'pending';
-              } else if (newTotalPaid < totalPrice) {
+              } else if ((totalPrice - newTotalPaid) >= 2) {
                 newStatus = 'partially_paid';
               } else {
                 newStatus = 'paid';
@@ -1441,7 +1570,7 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
                 if (newTotalPaid !== (insurance.totalPaid || 0)) {
                   const totalPrice = insurance.totalFinal || insurance.totalPrice;
                   let newStatus = insurance.status;
-                  if (newTotalPaid >= totalPrice) {
+                  if ((totalPrice - newTotalPaid) < 2) {
                     newStatus = 'paid';
                   } else if (newTotalPaid > 0) {
                     newStatus = 'partially_paid';
@@ -1473,7 +1602,8 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
       const payment = payments.find(p => p.id === paymentId);
       if (!payment) return;
 
-      await deleteDoc(doc(db, 'payments', paymentId));
+      const batch = writeBatch(db);
+      batch.delete(doc(db, 'payments', paymentId));
 
       // If it was a client payment, update the insurance totalPaid
       if (payment.type === 'client_payment' && payment.status === 'completed') {
@@ -1484,20 +1614,97 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
           let newStatus = insurance.status;
           if (newTotalPaid <= 0) {
             newStatus = 'pending';
-          } else if (newTotalPaid < totalPrice) {
+          } else if ((totalPrice - newTotalPaid) >= 2) {
             newStatus = 'partially_paid';
           } else {
             newStatus = 'paid';
           }
-          await updateDoc(doc(db, 'insurances', insurance.id!), {
+          batch.update(doc(db, 'insurances', insurance.id!), {
             totalPaid: newTotalPaid,
             status: newStatus
           });
         }
       }
+
+      // If it was a provider payment, update affected insurances providerPaymentStatus
+      if (payment.type === 'provider_payment') {
+        const otherPayments = payments.filter(p => 
+          p.id !== paymentId && 
+          p.type === 'provider_payment' && 
+          p.status === 'completed'
+        );
+
+        const affectedInsurances = insurances.filter(ins => {
+          if (payment.insuranceId && ins.id === payment.insuranceId) return true;
+          if (payment.invoiceNumber && ins.InvoiceCaremed && ins.InvoiceCaremed.trim().toLowerCase() === payment.invoiceNumber.trim().toLowerCase()) return true;
+          if (payment.notes && ins.InvoiceCaremed && ins.InvoiceCaremed.trim().toLowerCase() === payment.notes.trim().toLowerCase()) return true;
+          return false;
+        });
+
+        affectedInsurances.forEach(ins => {
+          const hasOtherPayment = otherPayments.some(p => 
+            (p.insuranceId && p.insuranceId === ins.id) ||
+            (p.invoiceNumber && ins.InvoiceCaremed && p.invoiceNumber.trim().toLowerCase() === ins.InvoiceCaremed.trim().toLowerCase()) ||
+            (p.notes && ins.InvoiceCaremed && p.notes.trim().toLowerCase() === ins.InvoiceCaremed.trim().toLowerCase())
+          );
+
+          if (!hasOtherPayment) {
+            batch.update(doc(db, 'insurances', ins.id!), {
+              providerPaymentStatus: 'pending',
+              providerPaymentMethod: null,
+              providerPaymentDate: null,
+              providerPaymentReceipt: null
+            });
+          }
+        });
+      }
+
+      await batch.commit();
     } catch (error) {
       handleFirestoreError(error, OperationType.DELETE, `payments/${paymentId}`);
     }
+  };
+
+  const handleRevertInvoicePayments = (group: any) => {
+    const relatedPayments = payments.filter(p =>
+      p.type === 'provider_payment' && (
+        (p.invoiceNumber && p.invoiceNumber.trim().toLowerCase() === group.invoiceNumber.trim().toLowerCase()) ||
+        (p.notes && p.notes.trim().toLowerCase() === group.invoiceNumber.trim().toLowerCase()) ||
+        (p.insuranceId && group.insurances.some((ins: any) => ins.id === p.insuranceId))
+      )
+    );
+
+    confirmAction(
+      "Borrar Pagos de Invoice",
+      `¿Estás seguro de eliminar todos los pagos a proveedor asociados al Invoice "${group.invoiceNumber}"? Se borrarán ${relatedPayments.length} registro(s) de pago y las ${group.insurances.length} pólizas asociadas volverán a estado de pago pendiente.`,
+      async () => {
+        setSubmitting(true);
+        try {
+          const batch = writeBatch(db);
+
+          relatedPayments.forEach(p => {
+            batch.delete(doc(db, 'payments', p.id));
+          });
+
+          group.insurances.forEach((ins: InsuranceRequest) => {
+            batch.update(doc(db, 'insurances', ins.id!), {
+              providerPaymentStatus: 'pending',
+              providerPaymentMethod: null,
+              providerPaymentDate: null,
+              providerPaymentReceipt: null
+            });
+          });
+
+          await batch.commit();
+          alert("Pagos a proveedor eliminados correctamente. El invoice ha vuelto a estado pendiente.");
+        } catch (error) {
+          console.error("Error al revertir pagos:", error);
+          alert("Error al intentar borrar los pagos a proveedor.");
+        } finally {
+          setSubmitting(false);
+        }
+      }
+    );
   };
 
   const handleSaveEditedPayment = async (e: React.FormEvent) => {
@@ -1540,7 +1747,7 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
                 const newTotalPaid = (insurance.totalPaid || 0) + diff;
                 const totalPrice = insurance.totalFinal || insurance.totalPrice;
                 let newStatus = insurance.status;
-                if (newTotalPaid >= totalPrice) {
+                if ((totalPrice - newTotalPaid) < 2) {
                   newStatus = 'paid';
                 } else if (newTotalPaid > 0) {
                   newStatus = 'partially_paid';
@@ -1587,12 +1794,34 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
   const invoiceGroups = useMemo(() => {
     const groups: Record<string, {
       invoiceNumber: string;
+      invoiceDate: string;
+      exportDate: string;
       insurances: InsuranceRequest[];
       totalCost: number;
       paidAmount: number;
       pendingAmount: number;
+      totalCommission?: number;
+      netPendingWithCommission?: number;
       status: 'paid' | 'partial' | 'pending';
+      hasAttachedInvoice: boolean;
+      dbInvoiceId?: string;
+      dbInvoiceAmount: number | null;
+      difference: number;
+      isExactMatch: boolean;
+      isJustified: boolean;
+      justification: string;
+      approvedBy: string;
+      approvedAt: string;
+      fileUrl: string;
+      fileName: string;
       validation: {
+        hasAttachedInvoice: boolean;
+        isCaremedCotejado: boolean;
+        isExactMatch: boolean;
+        isJustified: boolean;
+        hasDifference: boolean;
+        difference: number;
+        dbInvoiceAmount: number | null;
         isCotejado: boolean;
         isValid: boolean;
         discrepancies: {
@@ -1610,16 +1839,40 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
     }> = {};
 
     insurances.forEach(ins => {
-      const invKey = (ins.InvoiceCaremed || 'Sin Invoice / No Facturado').trim();
+      if (!ins.InvoiceCaremed) return;
+      const invKey = ins.InvoiceCaremed.trim();
+      if (!invKey) return;
+
       if (!groups[invKey]) {
         groups[invKey] = {
           invoiceNumber: invKey,
+          invoiceDate: '',
+          exportDate: '',
           insurances: [],
           totalCost: 0,
+          totalCommission: 0,
+          netPendingWithCommission: 0,
           paidAmount: 0,
           pendingAmount: 0,
           status: 'pending',
+          hasAttachedInvoice: false,
+          dbInvoiceAmount: null,
+          difference: 0,
+          isExactMatch: false,
+          isJustified: false,
+          justification: '',
+          approvedBy: '',
+          approvedAt: '',
+          fileUrl: '',
+          fileName: '',
           validation: {
+            hasAttachedInvoice: false,
+            isCaremedCotejado: false,
+            isExactMatch: false,
+            isJustified: false,
+            hasDifference: false,
+            difference: 0,
+            dbInvoiceAmount: null,
             isCotejado: false,
             isValid: false,
             discrepancies: [],
@@ -1631,124 +1884,229 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
       const group = groups[invKey];
       group.insurances.push(ins);
       
-      const mul = ins.actionType?.toUpperCase() === 'CAN' ? -1 : 1;
-      const currentCost = (ins.totalCost || 0) * mul;
+      const currentCost = getPolicyEffectiveCost(ins);
       group.totalCost += currentCost;
 
       let providerPaid = providerPaymentsMap.get(ins.id || '') || 0;
       if (ins.providerPaymentStatus === 'paid') {
-        providerPaid = (ins.totalCost || 0) * mul;
+        providerPaid = currentCost;
       }
       group.paidAmount += providerPaid;
     });
 
     return Object.values(groups).map(g => {
-      const pending = g.totalCost - g.paidAmount;
-      g.pendingAmount = pending > 0.01 ? pending : 0;
-      if (g.pendingAmount === 0 && g.totalCost > 0) {
+      const dbInv = caremedInvoices.find(
+        d => (d.invoiceNumber || '').toLowerCase().trim() === g.invoiceNumber.toLowerCase().trim()
+      );
+      
+      const hasAttachedInvoice = !!dbInv;
+      const dbInvoiceAmount = dbInv ? (typeof dbInv.amount === 'number' ? dbInv.amount : parseFloat(dbInv.amount) || 0) : null;
+      const difference = hasAttachedInvoice && dbInvoiceAmount !== null ? (dbInvoiceAmount - g.totalCost) : 0;
+      const isExactMatch = hasAttachedInvoice && Math.abs(difference) < 0.05;
+      const isJustified = !!dbInv?.differenceJustified || !!dbInv?.approved;
+      const hasDifference = hasAttachedInvoice && !isExactMatch;
+      const isCaremedValid = hasAttachedInvoice && (isExactMatch || isJustified);
+
+      g.hasAttachedInvoice = hasAttachedInvoice;
+      g.dbInvoiceId = dbInv?.id;
+      g.dbInvoiceAmount = dbInvoiceAmount;
+      g.difference = difference;
+      g.isExactMatch = isExactMatch;
+      g.isJustified = isJustified;
+      g.justification = dbInv?.justification || '';
+      g.approvedBy = dbInv?.approvedBy || '';
+      g.approvedAt = dbInv?.approvedAt || '';
+      g.fileUrl = dbInv?.fileUrl || dbInv?.documentUrl || '';
+      g.fileName = dbInv?.fileName || '';
+
+      // Most recent export date from linked policies
+      const sortedInsurances = [...g.insurances].sort((a, b) => (b.Caremed || '').localeCompare(a.Caremed || ''));
+      g.exportDate = sortedInsurances[0]?.Caremed ? sortedInsurances[0].Caremed.substring(0, 10) : '';
+
+      // Invoice date: prioritize attached CareMed invoice in DB, fallback to export date
+      const rawInvoiceDate = dbInv?.invoiceDate || '';
+      g.invoiceDate = rawInvoiceDate ? rawInvoiceDate.substring(0, 10) : (g.exportDate || '');
+
+      // Accurate pending and paid status calculation (including negative/credit invoices)
+      const allPoliciesPaid = g.insurances.length > 0 && g.insurances.every(ins => ins.providerPaymentStatus === 'paid');
+      const rawPending = g.totalCost - g.paidAmount;
+
+      if (allPoliciesPaid || (Math.abs(rawPending) <= 0.01 && (g.paidAmount !== 0 || g.totalCost === 0))) {
+        g.pendingAmount = 0;
         g.status = 'paid';
-      } else if (g.paidAmount > 0.01) {
-        g.status = 'partial';
       } else {
-        g.status = 'pending';
+        g.pendingAmount = rawPending;
+        if (Math.abs(g.paidAmount) > 0.01) {
+          g.status = 'partial';
+        } else {
+          g.status = 'pending';
+        }
       }
 
-      // Live policy validation
-      const isCotejado = !g.invoiceNumber.startsWith('Sin Invoice');
-      const discrepancies: {
-        insuranceId: string;
-        insuredName: string;
-        policyId: string;
-        policyName: string;
-        actualCost: number;
-        expectedCost: number;
-        difference: number;
-        reason: 'policy_not_found' | 'cost_mismatch';
-      }[] = [];
-
-      let totalExpected = 0;
-
-      if (isCotejado) {
-        g.insurances.forEach(ins => {
-          const matchedPolicy = policiesMap.get(ins.policyId || '');
-          const mul = ins.actionType?.toUpperCase() === 'CAN' ? -1 : 1;
-          const actualCost = (ins.totalCost || 0) * mul;
-
-          if (!matchedPolicy) {
-            discrepancies.push({
-              insuranceId: ins.id || '',
-              insuredName: `${ins.firstName} ${ins.lastName}`,
-              policyId: ins.policyId || 'N/A',
-              policyName: ins.policyName || 'N/A',
-              actualCost,
-              expectedCost: 0,
-              difference: actualCost,
-              reason: 'policy_not_found'
-            });
-          } else {
-            let expectedCostUnit = 0;
-            const days = ins.days || 0;
-            if (days <= 39) {
-              expectedCostUnit = (matchedPolicy.costPerDay || 0) * days;
-            } else {
-              const months = Math.ceil(days / 30.4);
-              expectedCostUnit = ((matchedPolicy.costPerDay || 0) * 30) * months;
-            }
-            const expectedCost = expectedCostUnit * mul;
-            totalExpected += expectedCost;
-
-            const diff = actualCost - expectedCost;
-            if (Math.abs(diff) > 0.05) {
-              discrepancies.push({
-                insuranceId: ins.id || '',
-                insuredName: `${ins.firstName} ${ins.lastName}`,
-                policyId: ins.policyId,
-                policyName: matchedPolicy.name || ins.policyName || 'N/A',
-                actualCost,
-                expectedCost,
-                difference: diff,
-                reason: 'cost_mismatch'
-              });
-            }
-          }
-        });
-      }
+      const totalCommission = g.insurances.reduce((sum, ins) => sum + (ins.agentCommission || ins.comision || 0), 0);
+      g.totalCommission = totalCommission;
+      g.netPendingWithCommission = Math.max(0, g.pendingAmount - totalCommission);
 
       g.validation = {
-        isCotejado,
-        isValid: isCotejado && discrepancies.length === 0,
-        discrepancies,
-        totalExpectedCost: isCotejado ? totalExpected : g.totalCost
+        hasAttachedInvoice,
+        isCaremedCotejado: hasAttachedInvoice,
+        isExactMatch,
+        isJustified,
+        hasDifference,
+        difference,
+        dbInvoiceAmount,
+        isValid: isCaremedValid,
+        isCotejado: hasAttachedInvoice,
+        discrepancies: [],
+        totalExpectedCost: hasAttachedInvoice && dbInvoiceAmount !== null ? dbInvoiceAmount : g.totalCost
       };
 
       return g;
     }).sort((a, b) => {
-      if (a.invoiceNumber.startsWith('Sin Invoice')) return 1;
-      if (b.invoiceNumber.startsWith('Sin Invoice')) return -1;
-      return b.invoiceNumber.localeCompare(a.invoiceNumber);
+      return b.invoiceNumber.localeCompare(a.invoiceNumber, undefined, { numeric: true, sensitivity: 'base' });
     });
-  }, [insurances, providerPaymentsMap, policiesMap]);
+  }, [insurances, providerPaymentsMap, policiesMap, caremedInvoices]);
 
-  const totalPayableInvoices = useMemo(() => {
-    return invoiceGroups.reduce((sum, g) => sum + g.pendingAmount, 0);
-  }, [invoiceGroups]);
-
-  const filteredInvoiceGroups = useMemo(() => {
+  // Groups filtered by date range and search term (active temporal and search scope)
+  const baseDateAndSearchFilteredGroups = useMemo(() => {
     let result = invoiceGroups;
+
+    if (payableSearchTerm.trim()) {
+      const term = payableSearchTerm.toLowerCase().trim();
+      result = result.filter(g => {
+        const matchNumber = g.invoiceNumber.toLowerCase().includes(term);
+        const matchInsured = g.insurances.some(i => `${i.firstName} ${i.lastName}`.toLowerCase().includes(term) || (i.policyName || '').toLowerCase().includes(term));
+        return matchNumber || matchInsured;
+      });
+    }
+
+    const start = payableDateRange.start ? payableDateRange.start.trim() : '';
+    const end = payableDateRange.end ? payableDateRange.end.trim() : '';
+
+    if (start || end) {
+      result = result.filter(g => {
+        const invDate = (g.invoiceDate || g.exportDate || '').substring(0, 10);
+        if (!invDate) return false;
+        if (start && invDate < start) return false;
+        if (end && invDate > end) return false;
+        return true;
+      });
+    }
+
+    return result;
+  }, [invoiceGroups, payableSearchTerm, payableDateRange]);
+
+  // Dynamic metrics calculated over the active date & search scope
+  const payableMetrics = useMemo(() => {
+    let validCount = 0;
+    let invalidCount = 0;
+    let noInvoiceCount = 0;
+    let pendingCount = 0;
+    let totalPendingAmount = 0;
+
+    baseDateAndSearchFilteredGroups.forEach(g => {
+      if (g.status !== 'paid' || Math.abs(g.pendingAmount) > 0.01) {
+        pendingCount++;
+        totalPendingAmount += g.pendingAmount;
+      }
+
+      if (!g.hasAttachedInvoice) {
+        noInvoiceCount++;
+      } else {
+        const isValid = g.isExactMatch || g.isJustified;
+        if (isValid) {
+          validCount++;
+        } else {
+          invalidCount++;
+        }
+      }
+    });
+
+    return {
+      total: baseDateAndSearchFilteredGroups.length,
+      pendingCount,
+      validCount,
+      invalidCount,
+      noInvoiceCount,
+      totalPendingAmount
+    };
+  }, [baseDateAndSearchFilteredGroups]);
+
+  // Final filtered list applying validation, status, and sorting
+  const filteredInvoiceGroups = useMemo(() => {
+    let result = [...baseDateAndSearchFilteredGroups];
     if (payableFilter === 'pending') {
-      result = result.filter(g => g.pendingAmount > 0.01);
+      result = result.filter(g => g.status !== 'paid' || Math.abs(g.pendingAmount) > 0.01);
     }
     
     if (payableValidationFilter === 'valid') {
-      result = result.filter(g => g.validation.isCotejado && g.validation.isValid);
+      result = result.filter(g => g.hasAttachedInvoice && (g.isExactMatch || g.isJustified));
     } else if (payableValidationFilter === 'invalid') {
-      result = result.filter(g => g.validation.isCotejado && !g.validation.isValid);
+      result = result.filter(g => g.hasAttachedInvoice && !g.isExactMatch && !g.isJustified);
     } else if (payableValidationFilter === 'uncotejado') {
-      result = result.filter(g => !g.validation.isCotejado);
+      result = result.filter(g => !g.hasAttachedInvoice);
     }
-    
+
+    result.sort((a, b) => {
+      let comparison = 0;
+      if (payableSortField === 'invoiceNumber') {
+        const numA = (a.invoiceNumber || '').trim();
+        const numB = (b.invoiceNumber || '').trim();
+        comparison = numA.localeCompare(numB, undefined, { numeric: true, sensitivity: 'base' });
+      } else if (payableSortField === 'date') {
+        const dateA = (a.invoiceDate || '').trim();
+        const dateB = (b.invoiceDate || '').trim();
+        if (!dateA && !dateB) comparison = 0;
+        else if (!dateA) comparison = 1;
+        else if (!dateB) comparison = -1;
+        else comparison = dateA.localeCompare(dateB);
+      } else if (payableSortField === 'pendingAmount') {
+        comparison = (a.pendingAmount || 0) - (b.pendingAmount || 0);
+      } else if (payableSortField === 'systemCost') {
+        comparison = (a.totalCost || 0) - (b.totalCost || 0);
+      }
+
+      if (comparison === 0) {
+        // secondary tie-breaker by invoice number
+        comparison = (a.invoiceNumber || '').localeCompare(b.invoiceNumber || '', undefined, { numeric: true });
+      }
+
+      return payableSortOrder === 'asc' ? comparison : -comparison;
+    });
+
     return result;
-  }, [invoiceGroups, payableFilter, payableValidationFilter]);
+  }, [baseDateAndSearchFilteredGroups, payableFilter, payableValidationFilter, payableSortField, payableSortOrder]);
+
+  // Total por pagar dynamically reflects the currently filtered invoice set
+  const totalPayableInvoices = useMemo(() => {
+    return filteredInvoiceGroups.reduce((sum, g) => sum + g.pendingAmount, 0);
+  }, [filteredInvoiceGroups]);
+
+  // Accounts Payable: Selection summaries and commission deduction computations
+  const selectedInvoiceGroups = useMemo(() => {
+    return invoiceGroups.filter(g => selectedInvoiceKeys.includes(g.invoiceNumber));
+  }, [invoiceGroups, selectedInvoiceKeys]);
+
+  const selectedGrossPending = useMemo(() => {
+    return selectedInvoiceGroups.reduce((sum, g) => sum + g.pendingAmount, 0);
+  }, [selectedInvoiceGroups]);
+
+  const selectedTotalCommission = useMemo(() => {
+    return selectedInvoiceGroups.reduce((sum, g) => sum + (g.totalCommission || 0), 0);
+  }, [selectedInvoiceGroups]);
+
+  const selectedEffectiveCommissionDeduction = useMemo(() => {
+    if (!deductCommission) return 0;
+    if (customCommissionDeduction !== '') {
+      const parsed = parseFloat(customCommissionDeduction);
+      return isNaN(parsed) ? 0 : Math.max(0, parsed);
+    }
+    return selectedTotalCommission;
+  }, [deductCommission, customCommissionDeduction, selectedTotalCommission]);
+
+  const selectedNetFinalPayment = useMemo(() => {
+    return Math.max(0, selectedGrossPending - selectedEffectiveCommissionDeduction);
+  }, [selectedGrossPending, selectedEffectiveCommissionDeduction]);
 
   const handleToggleInvoiceSelection = (invKey: string) => {
     setSelectedInvoiceKeys(prev => 
@@ -1757,11 +2115,11 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
   };
 
   const handleSelectAllInvoices = () => {
-    const pendingKeys = invoiceGroups
-      .filter(g => g.pendingAmount > 0.01)
+    const pendingKeys = filteredInvoiceGroups
+      .filter(g => g.status !== 'paid' || Math.abs(g.pendingAmount) > 0.01)
       .map(g => g.invoiceNumber);
 
-    if (selectedInvoiceKeys.length === pendingKeys.length) {
+    if (selectedInvoiceKeys.length === pendingKeys.length && pendingKeys.length > 0) {
       setSelectedInvoiceKeys([]);
     } else {
       setSelectedInvoiceKeys(pendingKeys);
@@ -1773,6 +2131,9 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
     setSubmitting(true);
     try {
       const batch = writeBatch(db);
+      const grossPending = selectedGrossPending;
+      const commDeduction = deductCommission ? selectedEffectiveCommissionDeduction : 0;
+
       for (const invNum of selectedInvoiceKeys) {
         const group = invoiceGroups.find(g => g.invoiceNumber === invNum);
         if (!group) continue;
@@ -1783,10 +2144,10 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
             .filter(p => p.insuranceId === ins.id && p.type === 'provider_payment')
             .reduce((sum, p) => sum + p.amount, 0);
           
-          const mul = ins.actionType?.toUpperCase() === 'CAN' ? -1 : 1;
-          const remaining = (ins.totalCost * mul) - providerPaid;
+          const effCost = getPolicyEffectiveCost(ins);
+          const remaining = effCost - providerPaid;
 
-          if (remaining > 0.01) {
+          if (Math.abs(remaining) > 0.01) {
             totalInvoiceAmount += remaining;
           }
 
@@ -1794,16 +2155,26 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
           const insRef = doc(db, 'insurances', ins.id);
           batch.update(insRef, {
             providerPaymentStatus: 'paid',
-            providerPaymentMethod: 'Pagado CareMed',
+            providerPaymentMethod: invoicePaymentMethod || 'Pagado CareMed',
             providerPaymentDate: invoicePaymentDate || new Date().toISOString().split('T')[0]
           });
         }
 
-        // En Gastos USD se coloca solo el número del Invoice
-        if (totalInvoiceAmount > 0.01) {
+        // Proportional commission deduction for this invoice
+        const groupDeduction = grossPending > 0
+          ? Number(((totalInvoiceAmount / grossPending) * commDeduction).toFixed(2))
+          : 0;
+        const netPaymentForGroup = Math.max(0, Number((totalInvoiceAmount - groupDeduction).toFixed(2)));
+
+        // En Gastos USD se coloca el registro correspondiente
+        if (Math.abs(netPaymentForGroup) > 0.01 || (totalInvoiceAmount > 0.01 && commDeduction > 0)) {
           const paymentRef = doc(collection(db, 'payments'));
+          const notesStr = commDeduction > 0
+            ? `${invNum} (Bruto: $${totalInvoiceAmount.toFixed(2)} - Com. desc: $${groupDeduction.toFixed(2)} = Neto: $${netPaymentForGroup.toFixed(2)} USD)`
+            : invNum;
+
           batch.set(paymentRef, {
-            amount: totalInvoiceAmount,
+            amount: netPaymentForGroup,
             currency: 'USD',
             type: 'provider_payment',
             status: 'completed',
@@ -1811,7 +2182,7 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
             paymentMethod: invoicePaymentMethod || 'N/A',
             depositAccount: invoiceDepositAccount || '',
             invoiceNumber: invNum === 'Sin Invoice / No Facturado' ? 'PENDING' : invNum,
-            notes: invNum, // Solo el numero del Invoice
+            notes: notesStr,
             createdAt: serverTimestamp()
           });
         }
@@ -1819,11 +2190,13 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
       await batch.commit();
       setSelectedInvoiceKeys([]);
       setShowInvoicePrompt(false);
+      setDeductCommission(false);
+      setCustomCommissionDeduction('');
       // Reset forms
       setInvoicePaymentDate(new Date().toISOString().split('T')[0]);
       setInvoicePaymentMethod('');
       setInvoiceDepositAccount('');
-      alert('Pagos de invoice confirmados correctamente.');
+      alert(`Pagos de invoice confirmados correctamente.${commDeduction > 0 ? ` Se descontó $${commDeduction.toFixed(2)} USD de comisión del pago final.` : ''}`);
     } catch (error) {
       console.error(error);
       alert('Error al registrar pagos.');
@@ -1855,7 +2228,7 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
         return;
       }
 
-      // En Gastos USD se coloca solo el número del Invoice
+      // En Gastos USD se coloca el número del Invoice
       const paymentRef = doc(collection(db, 'payments'));
       batch.set(paymentRef, {
         amount: totalAmountToPay,
@@ -1875,7 +2248,7 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
         const insRef = doc(db, 'insurances', ins.id);
         batch.update(insRef, {
           providerPaymentStatus: 'paid',
-          providerPaymentMethod: 'Pagado CareMed',
+          providerPaymentMethod: invoicePaymentMethod || 'Pagado CareMed',
           providerPaymentDate: invoicePaymentDate || new Date().toISOString().split('T')[0]
         });
       }
@@ -1897,8 +2270,8 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
   };
 
   const handleDeleteInvoice = async (invoiceNumber: string) => {
-    if (!isSuperAdmin) {
-      alert("Solo el super administrador puede realizar esta acción.");
+    if (!isSuperAdmin && !canManageClosedState) {
+      alert("Solo administradores pueden realizar esta acción.");
       return;
     }
 
@@ -1907,28 +2280,54 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
 
     confirmAction(
       "Borrar Invoice",
-      `¿Estás seguro de eliminar el invoice "${invoiceNumber}"? Esto desvinculará sus ${group.insurances.length} pólizas y eliminará todos los pagos asociados a este invoice.`,
+      `¿Estás seguro de eliminar el invoice "${invoiceNumber}"? Esto desvinculará sus ${group.insurances.length} pólizas y eliminará todos los pagos y facturas digitales asociadas a este invoice.`,
       async () => {
         setSubmitting(true);
         try {
           const batch = writeBatch(db);
 
-          // 1. Set InvoiceCaremed to null for all insurances in this invoice group
+          // 1. Set InvoiceCaremed to null for all insurances in this invoice group and reset provider payment state
           group.insurances.forEach(ins => {
-            batch.update(doc(db, 'insurances', ins.id!), { InvoiceCaremed: null });
+            batch.update(doc(db, 'insurances', ins.id!), { 
+              InvoiceCaremed: null,
+              providerPaymentStatus: 'pending',
+              providerPaymentMethod: null,
+              providerPaymentDate: null,
+              providerPaymentReceipt: null
+            });
           });
 
           // 2. Find and delete provider payments associated with this invoiceNumber
           const paymentsToDelete = payments.filter(p => 
             p.type === 'provider_payment' && 
-            (p.invoiceNumber === invoiceNumber || (p.insuranceId && group.insurances.some(ins => ins.id === p.insuranceId)))
+            ((p.invoiceNumber && p.invoiceNumber.trim().toLowerCase() === invoiceNumber.trim().toLowerCase()) ||
+             (p.notes && p.notes.trim().toLowerCase() === invoiceNumber.trim().toLowerCase()) ||
+             (p.insuranceId && group.insurances.some(ins => ins.id === p.insuranceId)))
           );
 
           paymentsToDelete.forEach(p => {
             batch.delete(doc(db, 'payments', p.id));
           });
 
+          // 3. Delete any attached CareMed invoice in caremedInvoices collection
+          const attachedInvs = caremedInvoices.filter(i => (i.invoiceNumber || '').toLowerCase().trim() === invoiceNumber.toLowerCase().trim());
+          attachedInvs.forEach(inv => {
+            batch.delete(doc(db, 'caremedInvoices', inv.id));
+          });
+
           await batch.commit();
+
+          try {
+            await logInsuranceActivity({
+              insuranceId: invoiceNumber,
+              type: 'delete_invoice_group',
+              description: `Se eliminó el invoice ${invoiceNumber} (desvinculadas ${group.insurances.length} pólizas, eliminados ${paymentsToDelete.length} pagos y ${attachedInvs.length} facturas adjuntas).`,
+              date: new Date(),
+              createdBy: auth.currentUser?.email || 'Admin'
+            });
+          } catch (logErr) {
+            console.warn("No se pudo registrar en bitácora:", logErr);
+          }
 
           // Clear selection if it was selected
           setSelectedInvoiceKeys(prev => prev.filter(k => k !== invoiceNumber));
@@ -1937,6 +2336,48 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
         } catch (error) {
           console.error("Error al borrar invoice:", error);
           alert("Error al intentar borrar el invoice.");
+        } finally {
+          setSubmitting(false);
+        }
+      }
+    );
+  };
+
+  const handleDeleteAttachedCaremedInvoice = async (invoiceNumber: string) => {
+    const attachedInvs = caremedInvoices.filter(i => (i.invoiceNumber || '').toLowerCase().trim() === invoiceNumber.toLowerCase().trim());
+    if (attachedInvs.length === 0) {
+      alert("No se encontró factura digital adjunta para este invoice.");
+      return;
+    }
+
+    confirmAction(
+      "Borrar Factura Digital Adjunta",
+      `¿Estás seguro de eliminar el comprobante digital adjunto del invoice "${invoiceNumber}"? El invoice y sus pólizas se mantendrán, pero se eliminará el archivo y el cotejo automático.`,
+      async () => {
+        setSubmitting(true);
+        try {
+          const batch = writeBatch(db);
+          attachedInvs.forEach(inv => {
+            batch.delete(doc(db, 'caremedInvoices', inv.id));
+          });
+          await batch.commit();
+
+          try {
+            await logInsuranceActivity({
+              insuranceId: invoiceNumber,
+              type: 'delete_attached_invoice',
+              description: `Se eliminó la factura digital adjunta para el invoice ${invoiceNumber}.`,
+              date: new Date(),
+              createdBy: auth.currentUser?.email || 'Admin'
+            });
+          } catch (logErr) {
+            console.warn("No se pudo registrar en bitácora:", logErr);
+          }
+
+          alert("Factura digital adjunta eliminada correctamente.");
+        } catch (error) {
+          console.error("Error al borrar factura adjunta:", error);
+          alert("Error al intentar borrar la factura digital.");
         } finally {
           setSubmitting(false);
         }
@@ -2167,20 +2608,24 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
     });
 
     const totalSales = filteredInsurances.reduce((sum, ins) => {
-      const mul = ins.actionType?.toUpperCase() === 'CAN' ? -1 : 1;
-      return sum + ((ins.totalFinal || ins.totalPrice || 0) * mul);
+      const isCan = ins.actionType?.toUpperCase() === 'CAN';
+      const val = ins.totalFinal || ins.totalPrice || 0;
+      return sum + (isCan ? -Math.abs(val) : Math.abs(val));
     }, 0);
     const totalPaid = filteredInsurances.reduce((sum, ins) => {
-      const mul = ins.actionType?.toUpperCase() === 'CAN' ? -1 : 1;
-      return sum + ((ins.totalPaid || 0) * mul);
+      const isCan = ins.actionType?.toUpperCase() === 'CAN';
+      const val = ins.totalPaid || 0;
+      return sum + (isCan ? -Math.abs(val) : Math.abs(val));
     }, 0);
     const totalCost = filteredInsurances.reduce((sum, ins) => {
-      const mul = ins.actionType?.toUpperCase() === 'CAN' ? -1 : 1;
-      return sum + ((ins.totalCost || 0) * mul);
+      const isCan = ins.actionType?.toUpperCase() === 'CAN';
+      const val = ins.totalCost || 0;
+      return sum + (isCan ? -Math.abs(val) : Math.abs(val));
     }, 0);
     const totalCommissions = filteredInsurances.reduce((sum, ins) => {
-      const mul = ins.actionType?.toUpperCase() === 'CAN' ? -1 : 1;
-      return sum + ((ins.agentCommission || 0) * mul);
+      const isCan = ins.actionType?.toUpperCase() === 'CAN';
+      const val = ins.agentCommission || 0;
+      return sum + (isCan ? -Math.abs(val) : Math.abs(val));
     }, 0);
     const netProfit = totalSales - totalCost - totalCommissions;
 
@@ -2190,19 +2635,22 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
     const salesOverTime: any = {};
 
     filteredInsurances.forEach(ins => {
-      const mul = ins.actionType?.toUpperCase() === 'CAN' ? -1 : 1;
+      const isCan = ins.actionType?.toUpperCase() === 'CAN';
+      const val = ins.totalFinal || ins.totalPrice || 0;
+      const contrib = isCan ? -Math.abs(val) : Math.abs(val);
+
       // Sales by Plan
       const planName = ins.plan || ins.policyName || 'Otros';
-      salesByPlan[planName] = (salesByPlan[planName] || 0) + ((ins.totalFinal || ins.totalPrice || 0) * mul);
+      salesByPlan[planName] = (salesByPlan[planName] || 0) + contrib;
 
       // Sales by Client Type
       const clientType = ins.clientType || 'Individual';
-      salesByClientType[clientType] = (salesByClientType[clientType] || 0) + ((ins.totalFinal || ins.totalPrice || 0) * mul);
+      salesByClientType[clientType] = (salesByClientType[clientType] || 0) + contrib;
 
       // Sales Over Time
       const dateStr = ins.requestDate || (ins.createdAt?.toDate ? ins.createdAt.toDate().toISOString() : new Date(ins.createdAt).toISOString());
       const dateKey = format(parseISO(dateStr.split('T')[0]), 'yyyy-MM-dd');
-      salesOverTime[dateKey] = (salesOverTime[dateKey] || 0) + ((ins.totalFinal || ins.totalPrice || 0) * mul);
+      salesOverTime[dateKey] = (salesOverTime[dateKey] || 0) + contrib;
     });
 
     const planChartData = Object.keys(salesByPlan).map(name => ({ name, value: salesByPlan[name] }));
@@ -2434,7 +2882,7 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
         planFechas = `${pName}${startStr && endStr ? ` (${startStr} a ${endStr})` : ''}`;
       }
       
-      const tc = p.exchangeRate || exchangeRate || 17.5;
+      const tc = p.exchangeRate || exchangeRate || 17.55;
       const amountInUSD = p.currency === 'USD' ? p.amount : (p.amountMXP || 0) / tc;
       
       const ingreso = p.type === 'client_payment' ? amountInUSD : 0;
@@ -2539,6 +2987,67 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
     };
   }, [filteredOperations]);
 
+  // Selected Client object in Accounts Receivable
+  const selectedArClient = useMemo(() => {
+    if (accountsReceivableFilters.clientId === 'all') return null;
+    return clients.find(c => c.id === accountsReceivableFilters.clientId) || null;
+  }, [clients, accountsReceivableFilters.clientId]);
+
+  // Available Agent/Corporate clients for AR filter
+  const availableArClients = useMemo(() => {
+    return clients
+      .filter(c => {
+        if (accountsReceivableFilters.clientType === 'Agent') return c.type === 'Agent';
+        if (accountsReceivableFilters.clientType === 'Corporate') return c.type === 'Corporate';
+        if (accountsReceivableFilters.clientType === 'Individual') return false;
+        return c.type === 'Agent' || c.type === 'Corporate';
+      })
+      .sort((a, b) => {
+        const nameA = (a.commercialName || a.legalName || `${a.firstName || ''} ${a.lastName || ''}`).trim().toLowerCase();
+        const nameB = (b.commercialName || b.legalName || `${b.firstName || ''} ${b.lastName || ''}`).trim().toLowerCase();
+        return nameA.localeCompare(nameB, 'es', { sensitivity: 'base' });
+      });
+  }, [clients, accountsReceivableFilters.clientType]);
+
+  // Available Subagents for AR filter
+  const availableArSubAgents = useMemo(() => {
+    if (selectedArClient) {
+      return (selectedArClient.linkedAgents || []).map(la => ({
+        id: la.id || la.email,
+        email: la.email,
+        name: la.name,
+        parentName: selectedArClient.commercialName || selectedArClient.legalName || 'Agente/Corp'
+      }));
+    }
+
+    // If no specific client is selected, gather all subagents from all Agent/Corporate clients
+    const relevantClients = clients.filter(c => {
+      if (accountsReceivableFilters.clientType === 'Agent') return c.type === 'Agent';
+      if (accountsReceivableFilters.clientType === 'Corporate') return c.type === 'Corporate';
+      return c.type === 'Agent' || c.type === 'Corporate';
+    });
+
+    const allSubAgents: { id: string; email: string; name: string; parentName: string }[] = [];
+    const seenEmails = new Set<string>();
+
+    relevantClients.forEach(c => {
+      (c.linkedAgents || []).forEach(la => {
+        const emailKey = (la.email || la.id || '').toLowerCase().trim();
+        if (emailKey && !seenEmails.has(emailKey)) {
+          seenEmails.add(emailKey);
+          allSubAgents.push({
+            id: la.id || la.email,
+            email: la.email,
+            name: la.name,
+            parentName: c.commercialName || c.legalName || (c.type === 'Agent' ? 'Agente' : 'Corporativo')
+          });
+        }
+      });
+    });
+
+    return allSubAgents.sort((a, b) => a.name.localeCompare(b.name, 'es', { sensitivity: 'base' }));
+  }, [clients, selectedArClient, accountsReceivableFilters.clientType]);
+
   // Unique Agent Names specifically having active balances in Accounts Receivable
   const uniqueArAgentNames = useMemo(() => {
     const relevantInsurances = insurances.filter(item => {
@@ -2570,13 +3079,17 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
       // Must have some balance mismatch (debt or overpaid)
       if (Math.abs(item.balance) < 0.01) return false;
 
-      // Filter by search query (Client name, IDseg, or Policy ID)
+      // Filter by search query (Client name, IDseg, Policy ID, Email, Dates, Agent name, Subagent)
       if (accountsReceivableFilters.search) {
-        const queryStr = accountsReceivableFilters.search.toLowerCase();
-        const fullName = `${item.firstName} ${item.lastName}`.toLowerCase();
-        const policyId = (item.policyId || '').toLowerCase();
-        const IDseg = (item.IDseg || '').toLowerCase();
-        if (!fullName.includes(queryStr) && !policyId.includes(queryStr) && !IDseg.includes(queryStr)) {
+        const fullName = `${item.firstName || ''} ${item.lastName || ''}`.trim();
+        const reqDateNorm = getNormalizedYYYYMMDD(item.requestDate) || getNormalizedYYYYMMDD(item.createdAt);
+        const reqDateDisp = formatDisplayDate(item.requestDate || item.createdAt);
+        const client = clients.find(c => c.id === item.clientId);
+        const clientNameInfo = client ? `${client.commercialName || ''} ${client.legalName || ''}` : '';
+        const subAgentInfo = client?.linkedAgents?.find((la: any) => la.email === item.linkedAgentId || la.id === item.linkedAgentId)?.name || item.linkedAgentId || '';
+        const searchTarget = `${fullName} ${item.firstName || ''} ${item.lastName || ''} ${item.email || ''} ${item.policyId || ''} ${item.IDseg || ''} ${item.requestDate || ''} ${reqDateNorm} ${reqDateDisp} ${clientNameInfo} ${subAgentInfo}`.toLowerCase();
+        const searchTokens = accountsReceivableFilters.search.toLowerCase().trim().split(/\s+/);
+        if (!searchTokens.every(token => searchTarget.includes(token))) {
           return false;
         }
       }
@@ -2609,12 +3122,46 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
       }
 
       // Filter by request date range (Fecha de Solicitud de/hasta)
-      const itemReqDate = item.requestDate || (item.createdAt?.toDate ? format(item.createdAt.toDate(), 'yyyy-MM-dd') : (item.createdAt ? format(new Date(item.createdAt), 'yyyy-MM-dd') : ''));
+      const itemReqDate = getNormalizedYYYYMMDD(item.requestDate) || getNormalizedYYYYMMDD(item.createdAt);
       if (accountsReceivableFilters.requestDateStart) {
         if (itemReqDate < accountsReceivableFilters.requestDateStart) return false;
       }
       if (accountsReceivableFilters.requestDateEnd) {
         if (itemReqDate > accountsReceivableFilters.requestDateEnd) return false;
+      }
+
+      // Filter by Client Type (Individual, Agent, Corporate)
+      if (accountsReceivableFilters.clientType !== 'all') {
+        if (accountsReceivableFilters.clientType === 'Individual') {
+          const isIndividual = item.clientType === 'Individual' || (!item.clientType && (!item.clientId || item.clientId === 'Individual'));
+          if (!isIndividual) return false;
+        } else if (accountsReceivableFilters.clientType === 'Agent') {
+          const isAgent = item.clientType === 'Agent' || (!item.clientType && clients.find(c => c.id === item.clientId)?.type === 'Agent');
+          if (!isAgent) return false;
+        } else if (accountsReceivableFilters.clientType === 'Corporate') {
+          const isCorp = item.clientType === 'Corporate' || (!item.clientType && clients.find(c => c.id === item.clientId)?.type === 'Corporate');
+          if (!isCorp) return false;
+        }
+      }
+
+      // Filter by Specific Agente / Corporativo (clientId)
+      if (accountsReceivableFilters.clientId !== 'all') {
+        if (item.clientId !== accountsReceivableFilters.clientId) return false;
+      }
+
+      // Filter by Subagente (linkedAgentId or agentId)
+      if (accountsReceivableFilters.subAgentId !== 'all') {
+        const itemSubAgent = (item.linkedAgentId || item.agentId || '').toLowerCase().trim();
+        const filterSubAgent = accountsReceivableFilters.subAgentId.toLowerCase().trim();
+        if (itemSubAgent !== filterSubAgent) {
+          const subAgentObj = availableArSubAgents.find(sa => (sa.id?.toLowerCase() === filterSubAgent || sa.email?.toLowerCase() === filterSubAgent));
+          if (subAgentObj) {
+            const matchesIdOrEmail = itemSubAgent === subAgentObj.id?.toLowerCase() || itemSubAgent === subAgentObj.email?.toLowerCase();
+            if (!matchesIdOrEmail) return false;
+          } else {
+            return false;
+          }
+        }
       }
 
       // Filter by Agent Name
@@ -2630,7 +3177,7 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
     items.sort((a, b) => {
       const getCompareValue = (item: any, field: string) => {
         if (field === 'requestDate') {
-          return item.requestDate || (item.createdAt?.toDate ? format(item.createdAt.toDate(), 'yyyy-MM-dd') : (item.createdAt ? format(new Date(item.createdAt), 'yyyy-MM-dd') : ''));
+          return getNormalizedYYYYMMDD(item.requestDate) || getNormalizedYYYYMMDD(item.createdAt);
         } else if (field === 'createdAt') {
           return item.createdAt?.toDate ? item.createdAt.toDate().getTime() : (item.createdAt ? new Date(item.createdAt).getTime() : 0);
         } else if (field === 'name') {
@@ -2707,6 +3254,287 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
 
   const totalARPages = Math.ceil(accountsReceivableData.items.length / accountsReceivablePageSize);
 
+  const selectedArPolicies = useMemo(() => {
+    return accountsReceivableData.items.filter(item => selectedArIds.includes(item.id!));
+  }, [accountsReceivableData.items, selectedArIds]);
+
+  const totalSelectedArDebt = useMemo(() => {
+    return selectedArPolicies.reduce((sum, item) => {
+      return sum + (item.balance > 0 ? item.balance : 0);
+    }, 0);
+  }, [selectedArPolicies]);
+
+  // Mass Adjustments & Discounts Engine (Accounts Payable & Accounts Receivable)
+  const targetBulkInsurances = useMemo(() => {
+    if (bulkAdjustSource === 'accounts_receivable') {
+      if (bulkAdjustScope === 'selected' && selectedArIds.length > 0) {
+        return insurances.filter(item => selectedArIds.includes(item.id!));
+      }
+      return accountsReceivableData.items;
+    }
+
+    // Default: accounts_payable
+    if (bulkAdjustScope === 'selected' && selectedInvoiceKeys.length > 0) {
+      return invoiceGroups
+        .filter(g => selectedInvoiceKeys.includes(g.invoiceNumber))
+        .flatMap(g => g.insurances);
+    }
+    return filteredInvoiceGroups.flatMap(g => g.insurances);
+  }, [bulkAdjustSource, bulkAdjustScope, selectedArIds, insurances, accountsReceivableData.items, selectedInvoiceKeys, invoiceGroups, filteredInvoiceGroups]);
+
+  const bulkAdjustCalculations = useMemo(() => {
+    const rawVal = parseFloat(bulkAdjustValue) || 0;
+    const count = targetBulkInsurances.length;
+    if (count === 0) return [];
+
+    let totalBaseSum = 0;
+    targetBulkInsurances.forEach(ins => {
+      let b = 0;
+      if (bulkAdjustTarget === 'totalCost') b = getPolicyEffectiveCost(ins);
+      else if (bulkAdjustTarget === 'discount') b = ins.discount || 0;
+      else if (bulkAdjustTarget === 'adjustment') b = ins.adjustment || 0;
+      else if (bulkAdjustTarget === 'totalPrice') b = ins.totalPrice || 0;
+      else if (bulkAdjustTarget === 'balance_clear') {
+        const tf = ins.totalFinal !== undefined && ins.totalFinal !== null ? ins.totalFinal : ((ins.totalPrice || 0) - (ins.discount || 0) - (ins.adjustment || 0));
+        b = tf - (ins.totalPaid || 0);
+      }
+      totalBaseSum += Math.abs(b);
+    });
+
+    return targetBulkInsurances.map(ins => {
+      const originalTotalPrice = ins.totalPrice || 0;
+      const originalDiscount = ins.discount || 0;
+      const originalAdjustment = ins.adjustment || 0;
+      const totalPaid = ins.totalPaid || 0;
+      const originalTotalFinal = ins.totalFinal !== undefined && ins.totalFinal !== null
+        ? ins.totalFinal
+        : (originalTotalPrice - originalDiscount - originalAdjustment);
+      const originalBalance = Number((originalTotalFinal - totalPaid).toFixed(2));
+      const originalCommission = ins.agentCommission || 0;
+
+      let currentVal = 0;
+      if (bulkAdjustTarget === 'totalCost') currentVal = ins.totalCost !== undefined ? ins.totalCost : 0;
+      else if (bulkAdjustTarget === 'discount') currentVal = originalDiscount;
+      else if (bulkAdjustTarget === 'adjustment') currentVal = originalAdjustment;
+      else if (bulkAdjustTarget === 'totalPrice') currentVal = originalTotalPrice;
+      else if (bulkAdjustTarget === 'balance_clear') currentVal = originalBalance;
+
+      let delta = 0;
+      let newVal = currentVal;
+      let newTotalFinal = originalTotalFinal;
+      let newCommission = originalCommission;
+      let newBalance = originalBalance;
+
+      if (bulkAdjustTarget === 'balance_clear') {
+        // Auto balance to 0.00: new adjustment covers the remaining balance
+        delta = originalBalance;
+        newVal = Number(((originalAdjustment || 0) + originalBalance).toFixed(2));
+        newTotalFinal = totalPaid;
+        newBalance = 0;
+        if (originalTotalFinal > 0 && originalCommission > 0) {
+          const commissionRate = originalCommission / originalTotalFinal;
+          newCommission = Math.round((newTotalFinal * commissionRate) * 100) / 100;
+        }
+      } else {
+        if (bulkAdjustType === 'percentage') {
+          const baseForPercent = (bulkAdjustTarget === 'discount' || bulkAdjustTarget === 'adjustment')
+            ? (originalTotalPrice || currentVal || 0)
+            : currentVal;
+          delta = Number(((Math.abs(baseForPercent) * rawVal) / 100).toFixed(2));
+        } else if (bulkAdjustType === 'fixed_per_policy') {
+          delta = rawVal;
+        } else if (bulkAdjustType === 'fixed_total_distributed') {
+          if (totalBaseSum > 0) {
+            delta = Number(((Math.abs(currentVal) / totalBaseSum) * rawVal).toFixed(2));
+          } else {
+            delta = Number((rawVal / count).toFixed(2));
+          }
+        }
+
+        if (bulkAdjustMode === 'subtract') {
+          newVal = Number(Math.max(0, currentVal - delta).toFixed(2));
+        } else if (bulkAdjustMode === 'add') {
+          newVal = Number((currentVal + delta).toFixed(2));
+        } else if (bulkAdjustMode === 'set') {
+          newVal = rawVal;
+          delta = Number(Math.abs(newVal - currentVal).toFixed(2));
+        }
+
+        // Calculate resulting financials based on target field
+        if (bulkAdjustTarget === 'discount') {
+          newTotalFinal = Number(Math.max(0, originalTotalPrice - newVal - originalAdjustment).toFixed(2));
+          newBalance = Number((newTotalFinal - totalPaid).toFixed(2));
+          if (originalTotalFinal > 0 && originalCommission > 0) {
+            const commissionRate = originalCommission / originalTotalFinal;
+            newCommission = Math.round((newTotalFinal * commissionRate) * 100) / 100;
+          }
+        } else if (bulkAdjustTarget === 'adjustment') {
+          newTotalFinal = Number(Math.max(0, originalTotalPrice - originalDiscount - newVal).toFixed(2));
+          newBalance = Number((newTotalFinal - totalPaid).toFixed(2));
+          if (originalTotalFinal > 0 && originalCommission > 0) {
+            const commissionRate = originalCommission / originalTotalFinal;
+            newCommission = Math.round((newTotalFinal * commissionRate) * 100) / 100;
+          }
+        } else if (bulkAdjustTarget === 'totalPrice') {
+          newTotalFinal = Number(Math.max(0, newVal - originalDiscount - originalAdjustment).toFixed(2));
+          newBalance = Number((newTotalFinal - totalPaid).toFixed(2));
+          if (originalTotalFinal > 0 && originalCommission > 0) {
+            const commissionRate = originalCommission / originalTotalFinal;
+            newCommission = Math.round((newTotalFinal * commissionRate) * 100) / 100;
+          }
+        }
+      }
+
+      const insuredName = `${ins.firstName || ''} ${ins.lastName || ''}`.trim() || 'Asegurado sin nombre';
+
+      return {
+        insurance: ins,
+        currentVal,
+        delta,
+        newVal,
+        newTotalFinal,
+        newCommission,
+        newBalance,
+        invoiceNumber: ins.InvoiceCaremed || 'Sin Invoice',
+        policyId: ins.policyId || 'S/N',
+        idSeg: ins.IDseg || '',
+        insuredName
+      };
+    });
+  }, [targetBulkInsurances, bulkAdjustTarget, bulkAdjustType, bulkAdjustMode, bulkAdjustValue]);
+
+  const bulkAdjustSummary = useMemo(() => {
+    const totalOriginal = bulkAdjustCalculations.reduce((sum, item) => sum + item.currentVal, 0);
+    const totalNew = bulkAdjustCalculations.reduce((sum, item) => sum + item.newVal, 0);
+    const totalDelta = bulkAdjustCalculations.reduce((sum, item) => sum + item.delta, 0);
+    const uniqueInvoices = new Set(bulkAdjustCalculations.map(c => c.invoiceNumber)).size;
+    return {
+      totalOriginal,
+      totalNew,
+      totalDelta,
+      uniqueInvoices,
+      count: bulkAdjustCalculations.length
+    };
+  }, [bulkAdjustCalculations]);
+
+  const handleApplyBulkAdjustments = async () => {
+    if (bulkAdjustCalculations.length === 0) return;
+    setIsBulkSavingAr(true);
+    setSubmitting(true);
+    let successCount = 0;
+    try {
+      const chunkSize = 300;
+      for (let i = 0; i < bulkAdjustCalculations.length; i += chunkSize) {
+        const chunk = bulkAdjustCalculations.slice(i, i + chunkSize);
+        const batch = writeBatch(db);
+
+        for (const item of chunk) {
+          const ins = item.insurance;
+          if (!ins || !ins.id) continue;
+          const insRef = doc(db, 'insurances', ins.id);
+          const updateData: any = {};
+
+          if (bulkAdjustTarget === 'totalCost') {
+            updateData.totalCost = item.newVal;
+          } else if (bulkAdjustTarget === 'discount') {
+            updateData.discount = item.newVal;
+            updateData.totalFinal = item.newTotalFinal;
+            updateData.agentCommission = item.newCommission;
+
+            const paid = ins.totalPaid || 0;
+            if (paid >= item.newTotalFinal && item.newTotalFinal > 0) {
+              updateData.status = 'paid';
+            } else if (paid > 0) {
+              updateData.status = 'partially_paid';
+            }
+          } else if (bulkAdjustTarget === 'adjustment' || bulkAdjustTarget === 'balance_clear') {
+            updateData.adjustment = item.newVal;
+            updateData.totalFinal = item.newTotalFinal;
+            updateData.agentCommission = item.newCommission;
+
+            const paid = ins.totalPaid || 0;
+            const newBal = item.newTotalFinal - paid;
+            if (Math.abs(newBal) < 5) {
+              updateData.closed = true;
+            }
+            if (paid >= item.newTotalFinal && item.newTotalFinal > 0) {
+              updateData.status = 'paid';
+            } else if (paid > 0) {
+              updateData.status = 'partially_paid';
+            } else if (item.newTotalFinal === 0) {
+              updateData.status = 'paid';
+              updateData.closed = true;
+            }
+          } else if (bulkAdjustTarget === 'totalPrice') {
+            updateData.totalPrice = item.newVal;
+            updateData.totalFinal = item.newTotalFinal;
+            updateData.agentCommission = item.newCommission;
+
+            const paid = ins.totalPaid || 0;
+            if (paid >= item.newTotalFinal && item.newTotalFinal > 0) {
+              updateData.status = 'paid';
+            } else if (paid > 0) {
+              updateData.status = 'partially_paid';
+            }
+          }
+
+          // Build audit note
+          const todayStr = format(new Date(), 'dd/MM/yyyy HH:mm');
+          const targetLabels: Record<string, string> = {
+            totalCost: 'Costo Proveedor',
+            discount: 'Descuento',
+            adjustment: 'Ajuste',
+            totalPrice: 'Precio Venta',
+            balance_clear: 'Cuadre de Saldo'
+          };
+          const label = targetLabels[bulkAdjustTarget] || bulkAdjustTarget;
+          const userReason = bulkAdjustReason.trim() ? bulkAdjustReason.trim() : 'Ajuste masivo administrativo';
+          const noteEntry = `[Ajuste Masivo ${todayStr}]: ${userReason} (${label}: $${item.currentVal} -> $${item.newVal} USD | Nuevo Total: $${item.newTotalFinal} USD)`;
+          updateData.notes = ins.notes ? `${ins.notes}\n${noteEntry}` : noteEntry;
+
+          batch.update(insRef, updateData);
+          successCount++;
+        }
+
+        await batch.commit();
+
+        // Also update pending agent commission payments if applicable
+        for (const item of chunk) {
+          const ins = item.insurance;
+          if (!ins || !ins.id) continue;
+          if (item.newCommission !== undefined && item.newCommission !== (ins.agentCommission || 0)) {
+            const pendingCommissionPayment = payments.find(p => 
+              p.insuranceId === ins.id && 
+              p.type === 'agent_commission' && 
+              p.status === 'pending'
+            );
+            if (pendingCommissionPayment && pendingCommissionPayment.id) {
+              try {
+                await updateDoc(doc(db, 'payments', pendingCommissionPayment.id), {
+                  amount: item.newCommission
+                });
+              } catch (commErr) {
+                console.warn('Could not update pending commission payment:', commErr);
+              }
+            }
+          }
+        }
+      }
+
+      setShowBulkAdjustModal(false);
+      setBulkAdjustReason('');
+      setSelectedArIds([]);
+      setSelectedInvoiceKeys([]);
+      alert(`Ajuste masivo aplicado exitosamente a ${successCount} pólizas.`);
+    } catch (err) {
+      console.error('Error applying bulk adjustment:', err);
+      alert('Ocurrió un error al aplicar el ajuste masivo: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      setIsBulkSavingAr(false);
+      setSubmitting(false);
+    }
+  };
+
   // Compute unique accounts from operations
   const uniqueAccountsList = useMemo(() => {
     const list = payments.map(p => p.depositAccount?.trim()).filter(Boolean);
@@ -2763,6 +3591,69 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
           </button>
         )}
       </header>
+
+      {quotaExceeded && (
+        <div className="bg-gradient-to-r from-red-50 to-rose-50 border-l-4 border-red-500 p-5 rounded-r-2xl shadow-md flex flex-col md:flex-row justify-between items-start md:items-center gap-4 animate-in fade-in slide-in-from-top-4 duration-500">
+          <div className="flex gap-4">
+            <div className="p-3 bg-red-100 text-red-700 rounded-xl shrink-0 h-fit">
+              <AlertTriangle className="w-6 h-6 animate-bounce" />
+            </div>
+            <div>
+              <p className="text-base font-bold text-red-950">
+                Límite de Consultas de Firestore Superado (Modo Caché Local Activo)
+              </p>
+              <p className="text-sm text-red-800 mt-1 max-w-3xl leading-relaxed">
+                Se ha alcanzado el límite gratuito diario de <strong>50,000 lecturas</strong> en el plan Spark de Firebase. 
+                Para optimizar tu experiencia y evitar interrupciones, hemos activado el <strong>Modo Sin Conexión</strong> automáticamente, permitiéndote navegar con los datos guardados en caché. Las actualizaciones en tiempo real se restablecerán automáticamente mañana.
+              </p>
+              <p className="text-xs text-red-700 mt-2 font-medium">
+                Si eres el administrador y deseas ampliar la cuota de inmediato, puedes habilitar el plan Blaze (de pago por uso, con una amplia capa gratuita) desde la consola de tu proyecto.
+              </p>
+            </div>
+          </div>
+          <div className="flex flex-col sm:flex-row gap-2 w-full md:w-auto shrink-0 mt-2 md:mt-0">
+            <a
+              href="https://console.firebase.google.com/project/velvety-implement-qkm1r/firestore/databases/ai-studio-msiadminplatform-aafdf6c5-a449-4ecd-ad08-755db11e4987/data?openUpgradeDialog=true"
+              target="_blank"
+              referrerPolicy="no-referrer"
+              className="text-center text-xs bg-red-600 hover:bg-red-700 text-white font-bold px-5 py-3 rounded-xl shadow-sm hover:shadow-md transition-all whitespace-nowrap flex items-center justify-center gap-2"
+            >
+              <span>Ampliar Plan en Firebase</span>
+              <ArrowRightLeft className="w-3 h-3" />
+            </a>
+            <button
+              onClick={() => setQuotaExceeded(false)}
+              className="text-center text-xs bg-white hover:bg-gray-50 border border-gray-200 text-gray-700 font-semibold px-4 py-3 rounded-xl transition-all"
+            >
+              Ignorar Aviso
+            </button>
+          </div>
+        </div>
+      )}
+
+      {limitToCurrentMonth && (
+        <div className="bg-gradient-to-r from-amber-50 to-orange-50 border-l-4 border-amber-500 p-4 rounded-r-2xl shadow-sm flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 animate-in fade-in duration-500">
+          <div className="flex gap-3">
+            <div className="p-2 bg-amber-100 text-amber-700 rounded-xl">
+              <Clock className="w-5 h-5 animate-pulse" />
+            </div>
+            <div>
+              <p className="text-sm font-semibold text-amber-950">
+                Visualizando Mes Actual Solamente
+              </p>
+              <p className="text-xs text-amber-700">
+                Para optimizar la velocidad y el consumo de base de datos, solo se han cargado los datos del mes en curso. Si deseas ver comparativas de periodos anteriores o un análisis de flujo histórico completo, activa el historial completo.
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={() => setLimitToCurrentMonth(false)}
+            className="text-xs bg-amber-600 hover:bg-amber-700 text-white font-bold px-4 py-2 rounded-xl shadow-sm hover:shadow transition-all whitespace-nowrap"
+          >
+            Activar Historial Completo
+          </button>
+        </div>
+      )}
 
       {/* Tabs Menu Capsule with single-line horizontal styling that hides the scrollbar */}
       <div className="bg-slate-50 border border-slate-100 p-1 rounded-2xl shadow-sm overflow-x-auto [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden">
@@ -3303,7 +4194,7 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
                       : 'text-gray-500 hover:text-gray-900'
                    }`}
                 >
-                  Por Procesar ({invoiceGroups.filter(g => g.pendingAmount > 0.01).length})
+                  Por Procesar ({payableMetrics.pendingCount})
                 </button>
                 <button
                   onClick={() => setPayableFilter('all')}
@@ -3313,19 +4204,36 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
                       : 'text-gray-500 hover:text-gray-900'
                    }`}
                 >
-                  Todos ({invoiceGroups.length})
+                  Todos ({payableMetrics.total})
                 </button>
               </div>
 
+              {/* Botón de Ajustes Masivos Global */}
+              <button
+                onClick={() => {
+                  setBulkAdjustScope(selectedInvoiceKeys.length > 0 ? 'selected' : 'all_visible');
+                  setShowBulkAdjustModal(true);
+                }}
+                className="bg-purple-50 text-purple-700 hover:bg-purple-100 border border-purple-200 px-3.5 py-2 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 shadow-xs"
+                title="Realizar descuentos o ajustes masivos (fijo o porcentaje)"
+              >
+                <Sliders className="w-3.5 h-3.5 text-purple-600" />
+                Descuento / Ajuste Masivo
+                {selectedInvoiceKeys.length > 0 && (
+                  <span className="bg-purple-200/80 text-purple-800 text-[10px] px-1.5 py-0.5 rounded-full font-black">
+                    {selectedInvoiceKeys.length}
+                  </span>
+                )}
+              </button>
+
               {selectedInvoiceKeys.length > 0 && (
-                <div className="flex items-center gap-4 bg-blue-50 px-4 py-2 rounded-xl border border-blue-100">
+                <div className="flex items-center gap-3 bg-blue-50 px-4 py-2 rounded-xl border border-blue-200 shadow-xs">
                   <div className="text-right">
-                    <p className="text-[10px] font-bold text-blue-600 uppercase">Seleccionados ({selectedInvoiceKeys.length})</p>
-                    <p className="text-lg font-black text-blue-700">
-                      ${invoiceGroups
-                        .filter(g => selectedInvoiceKeys.includes(g.invoiceNumber))
-                        .reduce((sum, g) => sum + g.pendingAmount, 0)
-                        .toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD
+                    <p className="text-[10px] font-bold text-blue-600 uppercase">
+                      Seleccionados ({selectedInvoiceKeys.length}) • Bruto: ${selectedGrossPending.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                    </p>
+                    <p className="text-xs font-bold text-emerald-700">
+                      Comisión: ${selectedTotalCommission.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD
                     </p>
                   </div>
                   <button
@@ -3333,7 +4241,7 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
                     className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-bold hover:bg-blue-700 transition-all shadow-md flex items-center gap-2 font-sans"
                   >
                     <CheckCircle className="w-4 h-4" />
-                    Confirmar Pago
+                    Pagar / Descontar
                   </button>
                 </div>
               )}
@@ -3361,14 +4269,14 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
               <div className="flex items-center justify-between">
                 <span className="text-[10px] font-bold text-gray-500 uppercase tracking-wider">Todos los Invoices</span>
                 <span className="text-[10px] bg-gray-100 text-gray-700 font-black px-2 py-0.5 rounded-full">
-                  {invoiceGroups.length}
+                  {payableMetrics.total}
                 </span>
               </div>
               <p className="text-2xl font-black text-gray-900 mt-2">
-                {invoiceGroups.length}
+                {payableMetrics.total}
               </p>
               <p className="text-[10px] text-gray-400 mt-1 font-sans">
-                Total de registros consolidados
+                Total de invoices consolidados
               </p>
             </button>
 
@@ -3384,15 +4292,15 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
               <div className="flex items-center justify-between">
                 <span className="text-[10px] font-bold text-emerald-700 uppercase tracking-wider">Cotejo Correcto</span>
                 <span className="text-[10px] bg-emerald-100 text-emerald-800 font-black px-2 py-0.5 rounded-full">
-                  {invoiceGroups.filter(g => g.validation.isCotejado && g.validation.isValid).length}
+                  {payableMetrics.validCount}
                 </span>
               </div>
               <p className="text-2xl font-black text-emerald-600 mt-2 flex items-center gap-1.5">
                 <CheckCircle className="w-5 h-5 text-emerald-500 shrink-0" />
-                {invoiceGroups.filter(g => g.validation.isCotejado && g.validation.isValid).length}
+                {payableMetrics.validCount}
               </p>
               <p className="text-[10px] text-emerald-600/80 mt-1 font-sans">
-                Sin discrepancias vs tarifa catálogo
+                Sin diferencias vs Factura CareMed / Catálogo
               </p>
             </button>
 
@@ -3406,17 +4314,17 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
               }`}
             >
               <div className="flex items-center justify-between">
-                <span className="text-[10px] font-bold text-amber-700 uppercase tracking-wider">Con Discrepancia</span>
+                <span className="text-[10px] font-bold text-amber-700 uppercase tracking-wider">Con Diferencia</span>
                 <span className="text-[10px] bg-amber-100 text-amber-800 font-black px-2 py-0.5 rounded-full">
-                  {invoiceGroups.filter(g => g.validation.isCotejado && !g.validation.isValid).length}
+                  {payableMetrics.invalidCount}
                 </span>
               </div>
               <p className="text-2xl font-black text-amber-600 mt-2 flex items-center gap-1.5">
                 <AlertTriangle className="w-5 h-5 text-amber-500 shrink-0" />
-                {invoiceGroups.filter(g => g.validation.isCotejado && !g.validation.isValid).length}
+                {payableMetrics.invalidCount}
               </p>
               <p className="text-[10px] text-amber-600/80 mt-1 font-sans">
-                Diferencias de costo detectadas
+                Diferencias detectadas con CareMed
               </p>
             </button>
 
@@ -3430,48 +4338,218 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
               }`}
             >
               <div className="flex items-center justify-between">
-                <span className="text-[10px] font-bold text-purple-700 uppercase tracking-wider font-sans">Sin Facturar / Cotejar</span>
+                <span className="text-[10px] font-bold text-purple-700 uppercase tracking-wider font-sans">Sin Factura Adjunta</span>
                 <span className="text-[10px] bg-purple-100 text-purple-800 font-black px-2 py-0.5 rounded-full">
-                  {invoiceGroups.filter(g => !g.validation.isCotejado).length}
+                  {payableMetrics.noInvoiceCount}
                 </span>
               </div>
               <p className="text-2xl font-black text-purple-600 mt-2">
-                {invoiceGroups.filter(g => !g.validation.isCotejado).length}
+                {payableMetrics.noInvoiceCount}
               </p>
               <p className="text-[10px] text-purple-500 mt-1 font-sans">
-                Pólizas sin invoice CareMed asignado
+                Invoices sin documento CareMed digital
               </p>
             </button>
+          </div>
+
+          {/* Search, Date Filter & Sorting Bar */}
+          <div className="bg-white p-4 rounded-2xl shadow-sm border border-gray-100 flex flex-col md:flex-row items-stretch md:items-center justify-between gap-4">
+            <div className="flex flex-wrap items-center gap-3 flex-1">
+              {/* Buscador */}
+              <div className="relative flex-1 min-w-[200px]">
+                <Search className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  placeholder="Buscar No. Invoice o Asegurado..."
+                  value={payableSearchTerm}
+                  onChange={(e) => setPayableSearchTerm(e.target.value)}
+                  className="w-full pl-9 pr-3 py-2 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none text-xs text-gray-800 font-semibold"
+                />
+              </div>
+
+              {/* Filtro Fecha Desde */}
+              <div className="flex items-center gap-2 bg-gray-50 px-3 py-1.5 border border-gray-200 rounded-xl">
+                <Calendar className="w-4 h-4 text-blue-500 shrink-0" />
+                <span className="text-[10px] font-bold text-gray-500 uppercase whitespace-nowrap">Desde:</span>
+                <input
+                  type="date"
+                  value={payableDateRange.start}
+                  onChange={(e) => setPayableDateRange(prev => ({ ...prev, start: e.target.value }))}
+                  className="bg-transparent text-xs font-bold text-gray-800 outline-none"
+                />
+              </div>
+
+              {/* Filtro Fecha Hasta */}
+              <div className="flex items-center gap-2 bg-gray-50 px-3 py-1.5 border border-gray-200 rounded-xl">
+                <Calendar className="w-4 h-4 text-blue-500 shrink-0" />
+                <span className="text-[10px] font-bold text-gray-500 uppercase whitespace-nowrap">Hasta:</span>
+                <input
+                  type="date"
+                  value={payableDateRange.end}
+                  onChange={(e) => setPayableDateRange(prev => ({ ...prev, end: e.target.value }))}
+                  className="bg-transparent text-xs font-bold text-gray-800 outline-none"
+                />
+              </div>
+
+              {/* Selector de Ordenamiento */}
+              <div className="flex items-center gap-1.5 bg-gray-50 px-3 py-1.5 border border-gray-200 rounded-xl">
+                <ArrowUpDown className="w-4 h-4 text-blue-600 shrink-0" />
+                <span className="text-[10px] font-bold text-gray-500 uppercase whitespace-nowrap">Ordenar:</span>
+                <select
+                  value={`${payableSortField}-${payableSortOrder}`}
+                  onChange={(e) => {
+                    const [field, order] = e.target.value.split('-');
+                    setPayableSortField(field as any);
+                    setPayableSortOrder(order as any);
+                  }}
+                  className="bg-transparent text-xs font-bold text-gray-800 outline-none cursor-pointer"
+                >
+                  <option value="date-desc">Fecha (Más reciente)</option>
+                  <option value="date-asc">Fecha (Más antiguo)</option>
+                  <option value="invoiceNumber-asc">No. Invoice (A - Z)</option>
+                  <option value="invoiceNumber-desc">No. Invoice (Z - A)</option>
+                  <option value="pendingAmount-desc">Por Pagar (Mayor a menor)</option>
+                  <option value="pendingAmount-asc">Por Pagar (Menor a mayor)</option>
+                  <option value="systemCost-desc">Costo Sistema (Mayor a menor)</option>
+                  <option value="systemCost-asc">Costo Sistema (Menor a mayor)</option>
+                </select>
+              </div>
+
+              {/* Botón Reset */}
+              {(payableDateRange.start || payableDateRange.end || payableSearchTerm) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPayableDateRange({ start: '', end: '' });
+                    setPayableSearchTerm('');
+                  }}
+                  className="px-3 py-2 bg-gray-100 hover:bg-gray-200 text-gray-600 text-xs font-bold rounded-xl transition-colors flex items-center gap-1.5"
+                >
+                  <X className="w-3.5 h-3.5" />
+                  Limpiar Filtros
+                </button>
+              )}
+            </div>
+            
+            <div className="text-xs text-gray-500 font-medium whitespace-nowrap">
+              Mostrando <span className="font-bold text-gray-900">{filteredInvoiceGroups.length}</span> de <span className="font-bold text-gray-900">{invoiceGroups.length}</span> invoices
+            </div>
           </div>
 
           <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
             <div className="overflow-x-auto">
               <table className="w-full text-left">
-                <thead className="bg-gray-50 text-gray-500 text-xs uppercase tracking-wider">
+                <thead className="bg-gray-50 text-gray-500 text-xs uppercase tracking-wider select-none">
                   <tr>
                     <th className="px-4 py-4 w-12 text-center">Detalle</th>
                     <th className="px-6 py-4 w-10">
                       <button onClick={handleSelectAllInvoices} className="p-1 hover:bg-gray-200 rounded transition-colors">
-                        {selectedInvoiceKeys.length === invoiceGroups.filter(g => g.pendingAmount > 0.01).length && invoiceGroups.filter(g => g.pendingAmount > 0.01).length > 0 ? (
+                        {selectedInvoiceKeys.length === filteredInvoiceGroups.filter(g => g.pendingAmount > 0.01).length && filteredInvoiceGroups.filter(g => g.pendingAmount > 0.01).length > 0 ? (
                           <CheckSquare className="w-4 h-4 text-blue-600" />
                         ) : (
                           <Square className="w-4 h-4" />
                         )}
                       </button>
                     </th>
-                    <th className="px-6 py-4 font-medium">Número de Invoice</th>
-                    <th className="px-6 py-4 font-medium text-center">Validación</th>
+                    {/* Header No. Invoice */}
+                    <th
+                      onClick={() => {
+                        if (payableSortField === 'invoiceNumber') {
+                          setPayableSortOrder(prev => prev === 'asc' ? 'desc' : 'asc');
+                        } else {
+                          setPayableSortField('invoiceNumber');
+                          setPayableSortOrder('asc');
+                        }
+                      }}
+                      className="px-6 py-4 font-medium cursor-pointer hover:bg-gray-100 transition-colors"
+                      title="Ordenar por Número de Invoice"
+                    >
+                      <div className="flex items-center gap-1.5">
+                        <span className={payableSortField === 'invoiceNumber' ? 'text-blue-600 font-black' : ''}>Número de Invoice</span>
+                        {payableSortField === 'invoiceNumber' ? (
+                          payableSortOrder === 'asc' ? <ArrowUp className="w-3.5 h-3.5 text-blue-600" /> : <ArrowDown className="w-3.5 h-3.5 text-blue-600" />
+                        ) : (
+                          <ArrowUpDown className="w-3.5 h-3.5 text-gray-400 opacity-60" />
+                        )}
+                      </div>
+                    </th>
+                    {/* Header Fecha Invoice */}
+                    <th
+                      onClick={() => {
+                        if (payableSortField === 'date') {
+                          setPayableSortOrder(prev => prev === 'asc' ? 'desc' : 'asc');
+                        } else {
+                          setPayableSortField('date');
+                          setPayableSortOrder('desc');
+                        }
+                      }}
+                      className="px-6 py-4 font-medium text-center cursor-pointer hover:bg-gray-100 transition-colors"
+                      title="Ordenar por Fecha de Invoice"
+                    >
+                      <div className="flex items-center justify-center gap-1.5">
+                        <span className={payableSortField === 'date' ? 'text-blue-600 font-black' : ''}>Fecha Invoice</span>
+                        {payableSortField === 'date' ? (
+                          payableSortOrder === 'asc' ? <ArrowUp className="w-3.5 h-3.5 text-blue-600" /> : <ArrowDown className="w-3.5 h-3.5 text-blue-600" />
+                        ) : (
+                          <ArrowUpDown className="w-3.5 h-3.5 text-gray-400 opacity-60" />
+                        )}
+                      </div>
+                    </th>
+                    <th className="px-6 py-4 font-medium text-right text-gray-700 font-sans">Factura CareMed</th>
+                    {/* Header Costo Sistema */}
+                    <th
+                      onClick={() => {
+                        if (payableSortField === 'systemCost') {
+                          setPayableSortOrder(prev => prev === 'asc' ? 'desc' : 'asc');
+                        } else {
+                          setPayableSortField('systemCost');
+                          setPayableSortOrder('desc');
+                        }
+                      }}
+                      className="px-6 py-4 font-medium text-right text-gray-900 font-semibold font-sans cursor-pointer hover:bg-gray-100 transition-colors"
+                      title="Ordenar por Costo Sistema"
+                    >
+                      <div className="flex items-center justify-end gap-1.5">
+                        <span className={payableSortField === 'systemCost' ? 'text-blue-600 font-black' : ''}>Costo Sistema</span>
+                        {payableSortField === 'systemCost' ? (
+                          payableSortOrder === 'asc' ? <ArrowUp className="w-3.5 h-3.5 text-blue-600" /> : <ArrowDown className="w-3.5 h-3.5 text-blue-600" />
+                        ) : (
+                          <ArrowUpDown className="w-3.5 h-3.5 text-gray-400 opacity-60" />
+                        )}
+                      </div>
+                    </th>
+                    <th className="px-6 py-4 font-medium text-center">Cotejo / Validación</th>
                     <th className="px-6 py-4 font-medium text-center">Pólizas</th>
-                    <th className="px-6 py-4 font-medium text-right font-semibold font-sans">Costo Total</th>
                     <th className="px-6 py-4 font-medium text-right text-green-600 font-sans">Pagado Proveedor</th>
-                    <th className="px-6 py-4 font-medium text-right text-blue-600 font-sans">Monto Por Pagar</th>
+                    {/* Header Monto Por Pagar */}
+                    <th
+                      onClick={() => {
+                        if (payableSortField === 'pendingAmount') {
+                          setPayableSortOrder(prev => prev === 'asc' ? 'desc' : 'asc');
+                        } else {
+                          setPayableSortField('pendingAmount');
+                          setPayableSortOrder('desc');
+                        }
+                      }}
+                      className="px-6 py-4 font-medium text-right text-blue-600 font-sans cursor-pointer hover:bg-gray-100 transition-colors"
+                      title="Ordenar por Monto Por Pagar"
+                    >
+                      <div className="flex items-center justify-end gap-1.5">
+                        <span className={payableSortField === 'pendingAmount' ? 'text-blue-600 font-black' : ''}>Monto Por Pagar</span>
+                        {payableSortField === 'pendingAmount' ? (
+                          payableSortOrder === 'asc' ? <ArrowUp className="w-3.5 h-3.5 text-blue-600" /> : <ArrowDown className="w-3.5 h-3.5 text-blue-600" />
+                        ) : (
+                          <ArrowUpDown className="w-3.5 h-3.5 text-gray-400 opacity-60" />
+                        )}
+                      </div>
+                    </th>
                     <th className="px-6 py-4 font-medium text-center">Estado Pago</th>
                     <th className="px-6 py-4 font-medium text-right">Acciones</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
                   {filteredInvoiceGroups.map((group) => {
-                    const isFullyPaid = group.pendingAmount <= 0.01;
+                    const isFullyPaid = group.status === 'paid' && Math.abs(group.pendingAmount) <= 0.01;
                     const isExpanded = !!expandedInvoices[group.invoiceNumber];
                     return (
                       <React.Fragment key={group.invoiceNumber}>
@@ -3501,33 +4579,53 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
                             )}
                           </td>
                           <td className="px-6 py-4">
-                            <span className={`text-sm font-bold ${group.invoiceNumber.startsWith('Sin Invoice') ? 'text-gray-400 italic' : 'text-gray-900 font-mono'}`}>
-                              {group.invoiceNumber}
+                            <div className="flex items-center gap-2">
+                              <span className={`text-sm font-bold ${group.invoiceNumber.startsWith('Sin Invoice') ? 'text-gray-400 italic' : 'text-gray-900 font-mono'}`}>
+                                {group.invoiceNumber}
+                              </span>
+                              {group.fileUrl && (
+                                <a 
+                                  href={group.fileUrl} 
+                                  target="_blank" 
+                                  rel="noopener noreferrer" 
+                                  className="text-blue-600 hover:text-blue-800 p-1 hover:bg-blue-50 rounded transition-colors"
+                                  title="Ver factura PDF adjunta"
+                                >
+                                  <FileText className="w-3.5 h-3.5" />
+                                </a>
+                              )}
+                            </div>
+                          </td>
+                          <td className="px-6 py-4 text-center whitespace-nowrap">
+                            <span className="text-xs font-semibold text-gray-700 inline-flex items-center gap-1.5 bg-gray-50 px-2.5 py-1 rounded-lg border border-gray-150">
+                              <Calendar className="w-3.5 h-3.5 text-blue-500 shrink-0" />
+                              {group.invoiceDate ? formatDisplayDate(group.invoiceDate) : '-'}
                             </span>
                           </td>
+                          <td className="px-6 py-4 text-right whitespace-nowrap">
+                            {group.dbInvoiceAmount !== null ? (
+                              <span className="text-sm font-mono font-bold text-gray-800">
+                                ${group.dbInvoiceAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                              </span>
+                            ) : (
+                              <span className="text-xs text-gray-400 italic">Sin adjunto</span>
+                            )}
+                          </td>
+                          <td className="px-6 py-4 text-right whitespace-nowrap">
+                            <span className="text-sm font-bold text-gray-900">${group.totalCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                          </td>
                           <td className="px-6 py-4 text-center relative group">
-                            {group.validation.isCotejado ? (
-                              group.validation.isValid ? (
-                                <>
-                                  <div className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-emerald-50 text-emerald-700 rounded-full border border-emerald-100 cursor-help hover:bg-emerald-100 transition-colors">
-                                    <CheckCircle className="w-4 h-4 text-emerald-500" />
-                                    <span className="text-xs font-bold">Validado</span>
-                                  </div>
-                                  {/* Tooltip detail */}
-                                  <div className="absolute left-1/2 -translate-x-1/2 bottom-full mb-2 hidden group-hover:block z-50 w-80 bg-slate-900 text-white text-xs rounded-xl p-4 shadow-xl border border-slate-800 pointer-events-none text-left">
-                                    <div className="font-bold text-emerald-400 mb-1 flex items-center gap-1.5">
-                                      <CheckCircle className="w-4 h-4" />
-                                      Cotejo Exitoso
-                                    </div>
-                                    <p className="text-slate-300 leading-relaxed text-[11px] font-sans">
-                                      Todas las pólizas vinculadas a este invoice coinciden perfectamente con las tarifas registradas en el catálogo maestro.
-                                    </p>
-                                    <div className="mt-3 pt-2 border-t border-slate-800 text-[10px] text-slate-400 font-sans flex justify-between">
-                                      <span>Monto Esperado:</span>
-                                      <span className="font-bold text-white">${group.validation.totalExpectedCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD</span>
-                                    </div>
-                                  </div>
-                                </>
+                            {group.hasAttachedInvoice ? (
+                              group.isExactMatch ? (
+                                <div className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-emerald-50 text-emerald-700 rounded-full border border-emerald-100 cursor-help hover:bg-emerald-100 transition-colors">
+                                  <CheckCircle className="w-4 h-4 text-emerald-500" />
+                                  <span className="text-xs font-bold">Cotejado (100%)</span>
+                                </div>
+                              ) : group.isJustified ? (
+                                <div className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-blue-50 text-blue-700 rounded-full border border-blue-100 cursor-help hover:bg-blue-100 transition-colors">
+                                  <Shield className="w-4 h-4 text-blue-500" />
+                                  <span className="text-xs font-bold">Justificado (OK)</span>
+                                </div>
                               ) : (
                                 <>
                                   <button
@@ -3546,54 +4644,41 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
                                     title="Click para resolver diferencia y registrar/modificar pago"
                                   >
                                     <AlertTriangle className="w-4 h-4 text-amber-500" />
-                                    <span className="text-xs font-bold">Diferencia ({group.validation.discrepancies.length})</span>
+                                    <span className="text-xs font-bold">
+                                      Dif: ${Math.abs(group.difference).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                    </span>
                                   </button>
                                   {/* Tooltip detail */}
-                                  <div className="absolute left-1/2 -translate-x-1/2 bottom-full mb-2 hidden group-hover:block z-50 w-96 bg-slate-900 text-white text-xs rounded-xl p-4 shadow-xl border border-slate-800 pointer-events-none text-left">
+                                  <div className="absolute left-1/2 -translate-x-1/2 bottom-full mb-2 hidden group-hover:block z-50 w-80 bg-slate-900 text-white text-xs rounded-xl p-4 shadow-xl border border-slate-800 pointer-events-none text-left">
                                     <div className="font-bold text-amber-400 mb-1.5 flex items-center gap-1.5">
                                       <AlertTriangle className="w-4 h-4" />
-                                      Diferencias Detectadas ({group.validation.discrepancies.length})
+                                      Diferencia vs Factura CareMed
                                     </div>
-                                    <p className="text-slate-300 mb-3 text-[11px] leading-tight font-sans">
-                                      Se identificaron discrepancias de costo respecto al catálogo de planes del sistema:
-                                    </p>
-                                    <div className="space-y-2 max-h-48 overflow-y-auto pr-1">
-                                      {group.validation.discrepancies.map((d, index) => (
-                                        <div key={index} className="p-2 bg-slate-800/85 rounded-lg border border-slate-750 text-[11px]">
-                                          <div className="flex justify-between font-bold text-slate-200">
-                                            <span className="truncate max-w-[180px]">{d.insuredName}</span>
-                                            <span className="text-amber-300 font-mono font-semibold">
-                                              Diff: ${d.difference.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                                            </span>
-                                          </div>
-                                          <div className="text-[10px] text-slate-400 mt-1 flex justify-between font-sans">
-                                            <span>Póliza: {d.policyId}</span>
-                                            <span>
-                                              Reg: ${d.actualCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} vs Esp: ${d.expectedCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                                            </span>
-                                          </div>
-                                          <p className="text-[9px] text-amber-400/90 font-medium italic mt-1 font-sans">
-                                            Motivo: {d.reason === 'policy_not_found' ? 'Plan no registrado en catálogo' : 'Costo diario no coincide con el plan maestro'}
-                                          </p>
-                                        </div>
-                                      ))}
-                                    </div>
-                                    <div className="mt-3 pt-2 border-t border-slate-800 text-[10px] text-slate-400 flex justify-between font-sans">
-                                      <span>Total Registrado: <strong className="text-slate-200">${group.totalCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong></span>
-                                      <span>Total Esperado: <strong className="text-slate-200">${group.validation.totalExpectedCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</strong></span>
+                                    <div className="space-y-1 text-slate-300 text-[11px] font-sans">
+                                      <div className="flex justify-between">
+                                        <span>Factura CareMed:</span>
+                                        <strong className="text-white">${(group.dbInvoiceAmount || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD</strong>
+                                      </div>
+                                      <div className="flex justify-between">
+                                        <span>Costo en Sistema:</span>
+                                        <strong className="text-white">${group.totalCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD</strong>
+                                      </div>
+                                      <div className="flex justify-between border-t border-slate-700 pt-1 text-amber-300 font-bold">
+                                        <span>Diferencia Neta:</span>
+                                        <span>${group.difference.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD</span>
+                                      </div>
                                     </div>
                                   </div>
                                 </>
                               )
                             ) : (
-                              <span className="text-[11px] text-gray-400 italic">No aplica (Sin Facturar)</span>
+                              <span className="inline-flex items-center gap-1 px-2.5 py-1 bg-purple-50 text-purple-700 rounded-full border border-purple-200 text-xs font-semibold">
+                                Sin Factura Adjunta
+                              </span>
                             )}
                           </td>
                           <td className="px-6 py-4 text-center">
                             <span className="text-sm font-medium bg-gray-100 text-gray-800 px-2.5 py-1 rounded-full">{group.insurances.length}</span>
-                          </td>
-                          <td className="px-6 py-4 text-right">
-                            <span className="text-sm font-bold text-gray-900">${group.totalCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                           </td>
                           <td className="px-6 py-4 text-right">
                             <span className="text-sm text-green-600">${group.paidAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
@@ -3606,7 +4691,7 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
                               <span className="px-2 py-1 rounded-full text-[10px] font-black bg-green-100 text-green-700 border border-green-200">
                                 PAGADO
                               </span>
-                            ) : group.paidAmount > 0.01 ? (
+                            ) : Math.abs(group.paidAmount) > 0.01 ? (
                               <span className="px-2 py-1 rounded-full text-[10px] font-black bg-orange-100 text-orange-700 border border-orange-200">
                                 PARCIAL
                               </span>
@@ -3628,6 +4713,28 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
                               >
                                 Pagar
                               </button>
+                              <button
+                                onClick={() => {
+                                  setSelectedInvoiceKeys([group.invoiceNumber]);
+                                  setBulkAdjustScope('selected');
+                                  setShowBulkAdjustModal(true);
+                                }}
+                                className="bg-purple-50 text-purple-700 border border-purple-200 px-2.5 py-1.5 rounded-lg text-xs font-bold hover:bg-purple-100 transition-all flex items-center gap-1"
+                                title="Descuentos o Ajustes Masivos en este Invoice"
+                              >
+                                <Percent className="w-3.5 h-3.5" />
+                                Ajustar
+                              </button>
+                              {(group.paidAmount > 0.01 || payments.some(p => p.type === 'provider_payment' && ((p.invoiceNumber && p.invoiceNumber.trim().toLowerCase() === group.invoiceNumber.trim().toLowerCase()) || (p.notes && p.notes.trim().toLowerCase() === group.invoiceNumber.trim().toLowerCase()) || (p.insuranceId && group.insurances.some(ins => ins.id === p.insuranceId))))) && (
+                                <button
+                                  onClick={() => handleRevertInvoicePayments(group)}
+                                  className="bg-amber-50 text-amber-800 border border-amber-200 px-2.5 py-1.5 rounded-lg text-xs font-bold hover:bg-amber-100 transition-all flex items-center gap-1"
+                                  title="Borrar pago(s) a proveedor de este invoice"
+                                >
+                                  <RefreshCw className="w-3.5 h-3.5" />
+                                  Borrar Pagos
+                                </button>
+                              )}
                               {isSuperAdmin && !group.invoiceNumber.startsWith('Sin Invoice') && (
                                 <button
                                   onClick={() => handleDeleteInvoice(group.invoiceNumber)}
@@ -3642,99 +4749,231 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
                           </td>
                         </tr>
 
-                        {/* Collapsible details for insureds/policies */}
-                        {isExpanded && (
-                          <tr className="bg-gray-50/30">
-                            <td colSpan={10} className="px-6 py-4 bg-gray-50/30 border-t border-b border-gray-100">
-                              <div className="bg-white rounded-xl border border-gray-200 shadow-xs overflow-hidden animate-in fade-in slide-in-from-top-1 duration-200">
-                                <div className="bg-gray-50 px-4 py-3 border-b border-gray-100 flex justify-between items-center">
-                                  <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">
-                                    Detalle del Invoice: {group.invoiceNumber} ({group.insurances.length} pólizas)
-                                  </span>
-                                  <span className="text-[10px] text-gray-400 font-medium font-sans italic">
-                                    Lista de Asegurados Vinculados
-                                  </span>
-                                </div>
-                                <div className="overflow-x-auto">
-                                  <table className="w-full text-left text-xs text-gray-600">
-                                    <thead className="bg-gray-50 text-gray-400 text-[10px] uppercase font-bold tracking-wider border-b border-gray-100">
-                                      <tr>
-                                        <th className="px-4 py-2.5 font-bold">Asegurado / Titular</th>
-                                        <th className="px-4 py-2.5 font-bold">ID Seg</th>
-                                        <th className="px-4 py-2.5 font-bold">Póliza / Plan</th>
-                                        <th className="px-4 py-2.5 font-bold text-center">Vigencia</th>
-                                        <th className="px-4 py-2.5 font-bold text-center">Días</th>
-                                        <th className="px-4 py-2.5 font-bold text-right font-sans">Costo Total</th>
-                                        <th className="px-4 py-2.5 font-bold text-right text-green-600 font-sans">Pagado</th>
-                                        <th className="px-4 py-2.5 font-bold text-right text-blue-600 font-sans">Pendiente</th>
-                                        <th className="px-4 py-2.5 font-bold text-center">Estado</th>
-                                      </tr>
-                                    </thead>
-                                    <tbody className="divide-y divide-gray-100">
-                                      {group.insurances.map((ins, idx) => {
-                                        let providerPaid = providerPaymentsMap.get(ins.id || '') || 0;
-                                        const mul = ins.actionType?.toUpperCase() === 'CAN' ? -1 : 1;
-                                        if (ins.providerPaymentStatus === 'paid') {
-                                          providerPaid = (ins.totalCost || 0) * mul;
-                                        }
-                                        const exactCost = (ins.totalCost || 0) * mul;
-                                        const exactPending = exactCost - providerPaid;
-                                        const isInsPaid = exactPending <= 0.01;
+                        {/* Collapsible details for insureds/policies and provider payments */}
+                        {isExpanded && (() => {
+                          const relatedGroupPayments = payments.filter(p =>
+                            p.type === 'provider_payment' && (
+                              (p.invoiceNumber && p.invoiceNumber.trim().toLowerCase() === group.invoiceNumber.trim().toLowerCase()) ||
+                              (p.notes && p.notes.trim().toLowerCase() === group.invoiceNumber.trim().toLowerCase()) ||
+                              (p.insuranceId && group.insurances.some(ins => ins.id === p.insuranceId))
+                            )
+                          );
 
-                                        return (
-                                          <tr key={ins.id || idx} className="hover:bg-gray-50/50 transition-colors">
-                                            <td className="px-4 py-3 font-bold text-gray-900">
-                                              {ins.firstName} {ins.lastName}
-                                            </td>
-                                            <td className="px-4 py-3 font-mono font-medium text-gray-500">
-                                              {ins.IDseg || 'N/A'}
-                                            </td>
-                                            <td className="px-4 py-3 font-mono">
-                                              <div className="flex flex-col">
-                                                <span className="text-gray-700 font-bold">{ins.policyId || 'N/A'}</span>
-                                                {ins.policyName && <span className="text-[10px] text-gray-400 font-sans">{ins.policyName}</span>}
-                                              </div>
-                                            </td>
-                                            <td className="px-4 py-3 text-center text-gray-500 font-medium">
-                                              {ins.startDate} al {ins.endDate}
-                                            </td>
-                                            <td className="px-4 py-3 text-center text-gray-500 font-mono">
-                                              {ins.days || 0}d
-                                            </td>
-                                            <td className="px-4 py-3 text-right font-semibold text-gray-900">
-                                              ${exactCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                                            </td>
-                                            <td className="px-4 py-3 text-right font-medium text-green-600">
-                                              ${providerPaid.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                                            </td>
-                                            <td className="px-4 py-3 text-right font-black text-blue-600 font-sans">
-                                              ${exactPending.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                                            </td>
-                                            <td className="px-4 py-3 text-center">
-                                              {isInsPaid ? (
-                                                <span className="px-2 py-0.5 rounded-full text-[9px] font-bold bg-green-50 text-green-600 border border-green-100 uppercase">
-                                                  Pagada
-                                                </span>
-                                              ) : providerPaid > 0.01 ? (
-                                                <span className="px-2 py-0.5 rounded-full text-[9px] font-bold bg-orange-50 text-orange-600 border border-orange-100 uppercase">
-                                                  Parcial
-                                                </span>
-                                              ) : (
-                                                <span className="px-2 py-0.5 rounded-full text-[9px] font-bold bg-red-50 text-red-600 border border-red-100 uppercase">
-                                                  Pendiente
-                                                </span>
-                                              )}
-                                            </td>
+                          return (
+                            <tr className="bg-gray-50/30">
+                              <td colSpan={12} className="px-6 py-4 bg-gray-50/30 border-t border-b border-gray-100">
+                                <div className="space-y-4 animate-in fade-in slide-in-from-top-1 duration-200">
+                                  {/* Sección: Historial de Pagos a Proveedor */}
+                                  <div className="bg-white rounded-xl border border-gray-200 shadow-xs overflow-hidden">
+                                    <div className="bg-slate-50 px-4 py-3 border-b border-gray-200 flex justify-between items-center">
+                                      <div className="flex items-center gap-2">
+                                        <Receipt className="w-4 h-4 text-indigo-600" />
+                                        <span className="text-xs font-bold text-gray-700 uppercase tracking-wider">
+                                          Historial de Pagos a Proveedor ({relatedGroupPayments.length})
+                                        </span>
+                                        {group.paidAmount > 0 && (
+                                          <span className="text-xs font-black text-emerald-600 bg-emerald-50 border border-emerald-100 px-2.5 py-0.5 rounded-full">
+                                            Total Pagado: ${group.paidAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD
+                                          </span>
+                                        )}
+                                      </div>
+                                      {(group.paidAmount > 0.01 || relatedGroupPayments.length > 0) && (
+                                        <button
+                                          onClick={() => handleRevertInvoicePayments(group)}
+                                          className="text-xs text-rose-600 hover:text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 px-2.5 py-1 rounded-lg font-bold transition-colors flex items-center gap-1.5"
+                                          title="Borrar todos los pagos registrados para este invoice"
+                                        >
+                                          <Trash2 className="w-3.5 h-3.5" />
+                                          Borrar Todos los Pagos del Invoice
+                                        </button>
+                                      )}
+                                    </div>
+
+                                    {relatedGroupPayments.length > 0 ? (
+                                      <div className="overflow-x-auto">
+                                        <table className="w-full text-left text-xs text-gray-600">
+                                          <thead className="bg-gray-50 text-gray-500 text-[10px] uppercase font-bold tracking-wider border-b border-gray-100">
+                                            <tr>
+                                              <th className="px-4 py-2.5 font-bold">Fecha de Pago</th>
+                                              <th className="px-4 py-2.5 font-bold">Concepto / Ref</th>
+                                              <th className="px-4 py-2.5 font-bold">Método de Pago</th>
+                                              <th className="px-4 py-2.5 font-bold">Cuenta de Origen</th>
+                                              <th className="px-4 py-2.5 font-bold text-right font-sans">Monto</th>
+                                              <th className="px-4 py-2.5 font-bold text-center">Estado</th>
+                                              <th className="px-4 py-2.5 font-bold text-right">Acción</th>
+                                            </tr>
+                                          </thead>
+                                          <tbody className="divide-y divide-gray-100">
+                                            {relatedGroupPayments.map((p) => {
+                                              let paymentDateFormatted = 'N/A';
+                                              if (p.date) {
+                                                if (typeof p.date.toDate === 'function') {
+                                                  paymentDateFormatted = format(p.date.toDate(), 'dd/MM/yyyy');
+                                                } else {
+                                                  paymentDateFormatted = format(new Date(p.date), 'dd/MM/yyyy');
+                                                }
+                                              }
+
+                                              return (
+                                                <tr key={p.id} className="hover:bg-gray-50/50 transition-colors">
+                                                  <td className="px-4 py-3 font-semibold text-gray-900">
+                                                    {paymentDateFormatted}
+                                                  </td>
+                                                  <td className="px-4 py-3">
+                                                    <span className="font-mono text-gray-700">{p.invoiceNumber || p.notes || group.invoiceNumber}</span>
+                                                  </td>
+                                                  <td className="px-4 py-3">
+                                                    <span className="inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-medium bg-blue-50 text-blue-700 border border-blue-100">
+                                                      {p.paymentMethod || 'Pagado CareMed'}
+                                                    </span>
+                                                  </td>
+                                                  <td className="px-4 py-3 text-gray-600 font-medium">
+                                                    {p.depositAccount || 'Sin Especificar'}
+                                                  </td>
+                                                  <td className="px-4 py-3 text-right font-black text-emerald-600 font-sans">
+                                                    ${p.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD
+                                                  </td>
+                                                  <td className="px-4 py-3 text-center">
+                                                    <span className="px-2 py-0.5 rounded-full text-[9px] font-bold bg-green-50 text-green-700 border border-green-200 uppercase">
+                                                      {p.status === 'completed' ? 'Completado' : p.status}
+                                                    </span>
+                                                  </td>
+                                                  <td className="px-4 py-3 text-right">
+                                                    <button
+                                                      onClick={() => confirmAction(
+                                                        'Eliminar Pago a Proveedor',
+                                                        `¿Estás seguro de eliminar este pago a proveedor por $${p.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD registrado el ${paymentDateFormatted}? Esta acción revertirá el saldo del invoice.`,
+                                                        () => handleDeletePayment(p.id!)
+                                                      )}
+                                                      className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-bold text-rose-600 hover:text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-lg transition-colors cursor-pointer"
+                                                      title="Eliminar este pago individual"
+                                                    >
+                                                      <Trash2 className="w-3.5 h-3.5" />
+                                                      Borrar Pago
+                                                    </button>
+                                                  </td>
+                                                </tr>
+                                              );
+                                            })}
+                                          </tbody>
+                                        </table>
+                                      </div>
+                                    ) : group.paidAmount > 0.01 ? (
+                                      <div className="p-4 bg-amber-50/50 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3">
+                                        <p className="text-xs text-amber-800 font-medium">
+                                          Las pólizas de este invoice fueron marcadas directamente como pagadas a CareMed (${group.paidAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD). Puedes revertir su estado a pendiente si fue un error.
+                                        </p>
+                                        <button
+                                          onClick={() => handleRevertInvoicePayments(group)}
+                                          className="px-3 py-1.5 text-xs font-bold text-amber-800 bg-amber-100 hover:bg-amber-200 border border-amber-300 rounded-lg transition-colors shrink-0 flex items-center gap-1.5 cursor-pointer"
+                                        >
+                                          <RefreshCw className="w-3.5 h-3.5" />
+                                          Revertir Estado a Pendiente
+                                        </button>
+                                      </div>
+                                    ) : (
+                                      <div className="p-4 text-center text-xs text-gray-400 italic">
+                                        No se han registrado pagos a proveedor para este invoice.
+                                      </div>
+                                    )}
+                                  </div>
+
+                                  {/* Sección: Lista de Asegurados Vinculados */}
+                                  <div className="bg-white rounded-xl border border-gray-200 shadow-xs overflow-hidden">
+                                    <div className="bg-gray-50 px-4 py-3 border-b border-gray-100 flex justify-between items-center">
+                                      <span className="text-xs font-bold text-gray-500 uppercase tracking-wider">
+                                        Detalle del Invoice: {group.invoiceNumber} ({group.insurances.length} pólizas)
+                                      </span>
+                                      <span className="text-[10px] text-gray-400 font-medium font-sans italic">
+                                        Lista de Asegurados Vinculados
+                                      </span>
+                                    </div>
+                                    <div className="overflow-x-auto">
+                                      <table className="w-full text-left text-xs text-gray-600">
+                                        <thead className="bg-gray-50 text-gray-400 text-[10px] uppercase font-bold tracking-wider border-b border-gray-100">
+                                          <tr>
+                                            <th className="px-4 py-2.5 font-bold">Asegurado / Titular</th>
+                                            <th className="px-4 py-2.5 font-bold">ID Seg</th>
+                                            <th className="px-4 py-2.5 font-bold">Póliza / Plan</th>
+                                            <th className="px-4 py-2.5 font-bold text-center">Vigencia</th>
+                                            <th className="px-4 py-2.5 font-bold text-center">Días</th>
+                                            <th className="px-4 py-2.5 font-bold text-right font-sans">Costo Total</th>
+                                            <th className="px-4 py-2.5 font-bold text-right text-emerald-600 font-sans">Comisión Agente</th>
+                                            <th className="px-4 py-2.5 font-bold text-right text-green-600 font-sans">Pagado</th>
+                                            <th className="px-4 py-2.5 font-bold text-right text-blue-600 font-sans">Pendiente</th>
+                                            <th className="px-4 py-2.5 font-bold text-center">Estado</th>
                                           </tr>
-                                        );
-                                      })}
-                                    </tbody>
-                                  </table>
+                                        </thead>
+                                        <tbody className="divide-y divide-gray-100">
+                                          {group.insurances.map((ins, idx) => {
+                                            let providerPaid = providerPaymentsMap.get(ins.id || '') || 0;
+                                            const exactCost = getPolicyEffectiveCost(ins);
+                                            const policyComm = ins.agentCommission || ins.comision || 0;
+                                            if (ins.providerPaymentStatus === 'paid') {
+                                              providerPaid = exactCost;
+                                            }
+                                            const exactPending = exactCost - providerPaid;
+                                            const isInsPaid = exactPending <= 0.01;
+
+                                            return (
+                                              <tr key={ins.id || idx} className="hover:bg-gray-50/50 transition-colors">
+                                                <td className="px-4 py-3 font-bold text-gray-900">
+                                                  {ins.firstName} {ins.lastName}
+                                                </td>
+                                                <td className="px-4 py-3 font-mono font-medium text-gray-500">
+                                                  {ins.IDseg || 'N/A'}
+                                                </td>
+                                                <td className="px-4 py-3 font-mono">
+                                                  <div className="flex flex-col">
+                                                    <span className="text-gray-700 font-bold">{ins.policyId || 'N/A'}</span>
+                                                    {ins.policyName && <span className="text-[10px] text-gray-400 font-sans">{ins.policyName}</span>}
+                                                  </div>
+                                                </td>
+                                                <td className="px-4 py-3 text-center text-gray-500 font-medium">
+                                                  {ins.startDate} al {ins.endDate}
+                                                </td>
+                                                <td className="px-4 py-3 text-center text-gray-500 font-mono">
+                                                  {ins.days || 0}d
+                                                </td>
+                                                <td className="px-4 py-3 text-right font-semibold text-gray-900">
+                                                  ${exactCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                                </td>
+                                                <td className="px-4 py-3 text-right font-medium text-emerald-600 font-sans">
+                                                  ${policyComm.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                                </td>
+                                                <td className="px-4 py-3 text-right font-medium text-green-600">
+                                                  ${providerPaid.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                                </td>
+                                                <td className="px-4 py-3 text-right font-black text-blue-600 font-sans">
+                                                  ${exactPending.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                                </td>
+                                                <td className="px-4 py-3 text-center">
+                                                  {isInsPaid ? (
+                                                    <span className="px-2 py-0.5 rounded-full text-[9px] font-bold bg-green-50 text-green-600 border border-green-100 uppercase">
+                                                      Pagada
+                                                    </span>
+                                                  ) : providerPaid > 0.01 ? (
+                                                    <span className="px-2 py-0.5 rounded-full text-[9px] font-bold bg-orange-50 text-orange-600 border border-orange-100 uppercase">
+                                                      Parcial
+                                                    </span>
+                                                  ) : (
+                                                    <span className="px-2 py-0.5 rounded-full text-[9px] font-bold bg-red-50 text-red-600 border border-red-100 uppercase">
+                                                      Pendiente
+                                                    </span>
+                                                  )}
+                                                </td>
+                                              </tr>
+                                            );
+                                          })}
+                                        </tbody>
+                                      </table>
+                                    </div>
+                                  </div>
                                 </div>
-                              </div>
-                            </td>
-                          </tr>
-                        )}
+                              </td>
+                            </tr>
+                          );
+                        })()}
                       </React.Fragment>
                     );
                   })}
@@ -3834,17 +5073,38 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
                 <Filter className="w-4 h-4 text-gray-500" />
                 <span className="text-sm font-bold text-gray-700">Filtros y Consultas</span>
               </div>
-              <button
-                type="button"
-                onClick={handleDownloadARReportPDF}
-                className="flex items-center gap-1.5 px-3.5 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 rounded-xl text-xs font-bold transition-all border border-rose-200 self-start sm:self-center"
-              >
-                <Download className="w-3.5 h-3.5" />
-                Exportar Reporte (PDF)
-              </button>
+              <div className="flex items-center gap-2 flex-wrap self-start sm:self-center">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setBulkAdjustSource('accounts_receivable');
+                    setBulkAdjustTarget('adjustment');
+                    setBulkAdjustScope(selectedArIds.length > 0 ? 'selected' : 'all_visible');
+                    setShowBulkAdjustModal(true);
+                  }}
+                  className="flex items-center gap-1.5 px-3.5 py-1.5 bg-purple-50 hover:bg-purple-100 text-purple-700 rounded-xl text-xs font-bold transition-all border border-purple-200 shadow-xs cursor-pointer"
+                  title="Aplicar descuentos o ajustes masivos (fijo o porcentaje)"
+                >
+                  <Sliders className="w-3.5 h-3.5 text-purple-600" />
+                  Descuento / Ajuste Masivo
+                  {selectedArIds.length > 0 && (
+                    <span className="bg-purple-200 text-purple-800 text-[10px] px-1.5 py-0.2 rounded-full font-black">
+                      {selectedArIds.length}
+                    </span>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleDownloadARReportPDF}
+                  className="flex items-center gap-1.5 px-3.5 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 rounded-xl text-xs font-bold transition-all border border-rose-200"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  Exportar Reporte (PDF)
+                </button>
+              </div>
             </div>
 
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3">
               {/* Search field */}
               <div className="flex flex-col gap-1 col-span-1 sm:col-span-2">
                 <label className="text-[10px] uppercase font-bold text-gray-400">Buscar Asegurado / Folio</label>
@@ -3918,20 +5178,83 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
                 </select>
               </div>
 
-              {/* Agent selector */}
+              {/* Client Type Filter */}
               <div className="flex flex-col gap-1 col-span-1">
-                <label className="text-[10px] uppercase font-bold text-gray-400">Agente</label>
+                <label className="text-[10px] uppercase font-bold text-gray-400">Tipo de Cliente</label>
                 <select
-                  value={accountsReceivableFilters.agentName}
+                  value={accountsReceivableFilters.clientType}
                   onChange={(e) => {
-                    setAccountsReceivableFilters(prev => ({ ...prev, agentName: e.target.value }));
+                    setAccountsReceivableFilters(prev => ({
+                      ...prev,
+                      clientType: e.target.value as any,
+                      clientId: 'all',
+                      subAgentId: 'all'
+                    }));
                     setAccountsReceivablePage(1);
                   }}
                   className="px-2.5 py-1.5 bg-white border border-slate-200 rounded-xl text-xs font-medium text-gray-700 focus:outline-none focus:ring-1 focus:ring-indigo-500"
                 >
-                  <option value="all">Todos los Agentes</option>
-                  {uniqueArAgentNames.map((name) => (
-                    <option key={name} value={name}>{name}</option>
+                  <option value="all">Todos los Tipos</option>
+                  <option value="Individual">Individual</option>
+                  <option value="Agent">Agentes</option>
+                  <option value="Corporate">Corporativos</option>
+                </select>
+              </div>
+
+              {/* Agent / Corporate Filter */}
+              <div className="flex flex-col gap-1 col-span-1">
+                <label className="text-[10px] uppercase font-bold text-gray-400">Agente / Corporativo</label>
+                <select
+                  value={accountsReceivableFilters.clientId}
+                  onChange={(e) => {
+                    setAccountsReceivableFilters(prev => ({
+                      ...prev,
+                      clientId: e.target.value,
+                      subAgentId: 'all'
+                    }));
+                    setAccountsReceivablePage(1);
+                  }}
+                  disabled={accountsReceivableFilters.clientType === 'Individual'}
+                  className="px-2.5 py-1.5 bg-white border border-slate-200 rounded-xl text-xs font-medium text-gray-700 focus:outline-none focus:ring-1 focus:ring-indigo-500 disabled:bg-slate-100 disabled:text-gray-400"
+                >
+                  <option value="all">
+                    {accountsReceivableFilters.clientType === 'Agent'
+                      ? 'Todos los Agentes'
+                      : accountsReceivableFilters.clientType === 'Corporate'
+                      ? 'Todos los Corporativos'
+                      : 'Todos los Agentes / Corporativos'}
+                  </option>
+                  {availableArClients.map((client) => {
+                    const displayName = client.commercialName || client.legalName || `${client.firstName || ''} ${client.lastName || ''}`.trim() || client.id;
+                    const typeLabel = client.type === 'Agent' ? 'Agente' : client.type === 'Corporate' ? 'Corporativo' : '';
+                    return (
+                      <option key={client.id} value={client.id}>
+                        {displayName} {accountsReceivableFilters.clientType === 'all' && typeLabel ? `(${typeLabel})` : ''}
+                      </option>
+                    );
+                  })}
+                </select>
+              </div>
+
+              {/* Subagent Filter */}
+              <div className="flex flex-col gap-1 col-span-1">
+                <label className="text-[10px] uppercase font-bold text-gray-400">Subagente</label>
+                <select
+                  value={accountsReceivableFilters.subAgentId}
+                  onChange={(e) => {
+                    setAccountsReceivableFilters(prev => ({ ...prev, subAgentId: e.target.value }));
+                    setAccountsReceivablePage(1);
+                  }}
+                  disabled={accountsReceivableFilters.clientType === 'Individual' || availableArSubAgents.length === 0}
+                  className="px-2.5 py-1.5 bg-white border border-slate-200 rounded-xl text-xs font-medium text-gray-700 focus:outline-none focus:ring-1 focus:ring-indigo-500 disabled:bg-slate-100 disabled:text-gray-400"
+                >
+                  <option value="all">
+                    {availableArSubAgents.length === 0 ? 'Sin subagentes disponibles' : 'Todos los Subagentes'}
+                  </option>
+                  {availableArSubAgents.map((sa) => (
+                    <option key={`${sa.id}-${sa.email}`} value={sa.email || sa.id}>
+                      {sa.name} {sa.email ? `(${sa.email})` : ''} {!selectedArClient && sa.parentName ? `— ${sa.parentName}` : ''}
+                    </option>
                   ))}
                 </select>
               </div>
@@ -3966,7 +5289,16 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
 
               {/* Clear filters button */}
               <div className="flex items-end justify-end col-span-1">
-                {(accountsReceivableFilters.search || accountsReceivableFilters.type !== 'all' || accountsReceivableFilters.policyId !== 'all' || accountsReceivableFilters.status !== 'all' || accountsReceivableFilters.requestDateStart || accountsReceivableFilters.requestDateEnd || accountsReceivableFilters.agentName !== 'all') && (
+                {(accountsReceivableFilters.search ||
+                  accountsReceivableFilters.type !== 'all' ||
+                  accountsReceivableFilters.policyId !== 'all' ||
+                  accountsReceivableFilters.status !== 'all' ||
+                  accountsReceivableFilters.requestDateStart ||
+                  accountsReceivableFilters.requestDateEnd ||
+                  accountsReceivableFilters.clientType !== 'all' ||
+                  accountsReceivableFilters.clientId !== 'all' ||
+                  accountsReceivableFilters.subAgentId !== 'all' ||
+                  accountsReceivableFilters.agentName !== 'all') && (
                   <button
                     type="button"
                     onClick={() => {
@@ -3977,6 +5309,9 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
                         status: 'all',
                         requestDateStart: '',
                         requestDateEnd: '',
+                        clientType: 'all',
+                        clientId: 'all',
+                        subAgentId: 'all',
                         agentName: 'all'
                       });
                       setAccountsReceivablePage(1);
@@ -4047,13 +5382,16 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
 
           {selectedArIds.length > 0 && (
             <div className="bg-indigo-50 border border-indigo-150 p-4 rounded-2xl flex flex-col sm:flex-row justify-between items-center gap-3 animate-in fade-in duration-300">
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center gap-2">
                 <CheckSquare className="w-5 h-5 text-indigo-600" />
                 <span className="text-sm font-bold text-indigo-900">
                   {selectedArIds.length} {selectedArIds.length === 1 ? 'póliza seleccionada' : 'pólizas seleccionadas'}
                 </span>
+                <span className="text-xs bg-indigo-100 text-indigo-800 font-bold px-2.5 py-1 rounded-lg border border-indigo-200">
+                  Saldo deudor: ${totalSelectedArDebt.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD
+                </span>
               </div>
-              <div className="flex gap-2 w-full sm:w-auto">
+              <div className="flex flex-wrap gap-2 w-full sm:w-auto">
                 <button
                   type="button"
                   onClick={() => setSelectedArIds([])}
@@ -4063,8 +5401,40 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
                 </button>
                 <button
                   type="button"
+                  onClick={() => {
+                    setBulkPaymentArData({
+                      date: format(new Date(), 'yyyy-MM-dd'),
+                      paymentMethod: '',
+                      receiptNumber: '',
+                      depositAccount: '',
+                      notes: ''
+                    });
+                    setShowBulkPaymentArModal(true);
+                  }}
+                  disabled={isBulkSavingAr || isBulkPayingAr}
+                  className="flex-1 sm:flex-none px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 shadow-sm disabled:opacity-50"
+                >
+                  <CreditCard className="w-4 h-4" />
+                  Pago Masivo ({selectedArIds.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setBulkAdjustSource('accounts_receivable');
+                    setBulkAdjustTarget('adjustment');
+                    setBulkAdjustScope('selected');
+                    setShowBulkAdjustModal(true);
+                  }}
+                  disabled={isBulkSavingAr || isBulkPayingAr}
+                  className="flex-1 sm:flex-none px-4 py-2 bg-purple-600 hover:bg-purple-700 text-white rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 shadow-sm disabled:opacity-50"
+                >
+                  <Sliders className="w-4 h-4" />
+                  Descuento / Ajuste Masivo ({selectedArIds.length})
+                </button>
+                <button
+                  type="button"
                   onClick={handleBulkAutoAdjustBalance}
-                  disabled={isBulkSavingAr}
+                  disabled={isBulkSavingAr || isBulkPayingAr}
                   className="flex-1 sm:flex-none px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-1.5 shadow-sm disabled:opacity-50"
                 >
                   {isBulkSavingAr ? (
@@ -4234,26 +5604,7 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
                           <td className="px-6 py-4 font-medium text-gray-600">
                             <div className="flex flex-col">
                               <span className="font-semibold text-gray-850">
-                                {item.requestDate ? (
-                                  (() => {
-                                    try {
-                                      return format(parseISO(item.requestDate), 'yyyy-MM-dd');
-                                    } catch (err) {
-                                      return item.requestDate;
-                                    }
-                                  })()
-                                ) : item.createdAt ? (
-                                  (() => {
-                                    try {
-                                      const rawDate = item.createdAt.toDate ? item.createdAt.toDate() : new Date(item.createdAt);
-                                      return format(rawDate, 'yyyy-MM-dd');
-                                    } catch (err) {
-                                      return 'N/A';
-                                    }
-                                  })()
-                                ) : (
-                                  <span className="text-gray-400 font-mono text-[11px]">N/A</span>
-                                )}
+                                {formatDisplayDate(item.requestDate || item.createdAt)}
                               </span>
                             </div>
                           </td>
@@ -4268,10 +5619,19 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
                                   {item.policyName}
                                 </span>
                               )}
-                              <div className="flex items-center gap-1.5 mt-1">
-                                <span className="text-[9px] font-bold text-indigo-600 bg-indigo-55/10 border border-indigo-100 rounded px-1.5 py-0.5 uppercase tracking-wide">
-                                  Agente: {getAgentName(item)}
+                              <div className="flex items-center gap-1.5 mt-1 flex-wrap">
+                                <span className="text-[9px] font-bold text-indigo-600 bg-indigo-50 border border-indigo-100 rounded px-1.5 py-0.5 uppercase tracking-wide">
+                                  {item.clientType === 'Corporate' ? 'Corporativo' : 'Agente'}: {getAgentName(item)}
                                 </span>
+                                {item.linkedAgentId && (
+                                  <span className="text-[9px] font-medium text-slate-600 bg-slate-100 border border-slate-200 rounded px-1.5 py-0.5">
+                                    Subagente: {(() => {
+                                      const c = clients.find(cl => cl.id === item.clientId);
+                                      const sub = c?.linkedAgents?.find((sa: any) => sa.id === item.linkedAgentId || sa.email === item.linkedAgentId);
+                                      return sub ? sub.name : item.linkedAgentId;
+                                    })()}
+                                  </span>
+                                )}
                               </div>
                             </div>
                           </td>
@@ -4424,6 +5784,19 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
                                 title="Ingresar / Ver Pagos"
                               >
                                 <Receipt className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                onClick={() => {
+                                  setSelectedArIds([item.id!]);
+                                  setBulkAdjustSource('accounts_receivable');
+                                  setBulkAdjustTarget('adjustment');
+                                  setBulkAdjustScope('selected');
+                                  setShowBulkAdjustModal(true);
+                                }}
+                                className="p-1.5 text-gray-400 hover:text-purple-600 hover:bg-purple-50 rounded-lg transition-colors border border-transparent hover:border-purple-100"
+                                title="Descuento / Ajuste Personalizado"
+                              >
+                                <Percent className="w-3.5 h-3.5" />
                               </button>
                               <button
                                 onClick={() => {
@@ -6083,46 +7456,63 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
         </div>
       )}
 
-      {/* Bulk Invoice Prompt Modal */}
+      {/* Bulk Invoice Prompt Modal with Commission Deduction */}
       {showInvoicePrompt && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[60] p-4">
-          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full overflow-hidden animate-in fade-in zoom-in duration-200">
-            <div className="p-6 border-b border-gray-100">
-              <h3 className="text-xl font-bold text-gray-900">Confirmar Pago de Invoices</h3>
-              <p className="text-gray-500 text-sm mt-1">Se registrará el pago para los registros asociados.</p>
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[60] p-4 overflow-y-auto">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-lg w-full overflow-hidden animate-in fade-in zoom-in duration-200 my-8">
+            <div className="p-6 border-b border-gray-100 bg-gradient-to-r from-blue-50/50 to-indigo-50/30">
+              <div className="flex items-center justify-between">
+                <div>
+                  <h3 className="text-xl font-bold text-gray-900">Confirmar Pago de Invoices</h3>
+                  <p className="text-gray-500 text-xs mt-1">Registra el pago a proveedor con opción de descontar comisión.</p>
+                </div>
+                <button
+                  onClick={() => setShowInvoicePrompt(false)}
+                  className="text-gray-400 hover:text-gray-600 p-1.5 rounded-lg hover:bg-gray-100 transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
             </div>
-            <div className="p-6 space-y-4">
+
+            <div className="p-6 space-y-4 max-h-[75vh] overflow-y-auto">
               <div>
-                <label className="block text-xs font-bold text-gray-400 uppercase mb-1">Invoices Seleccionados</label>
-                <div className="text-sm font-semibold font-mono text-gray-800 bg-gray-50 p-3 rounded-xl border border-gray-200 break-all max-h-24 overflow-y-auto w-full">
+                <label className="block text-xs font-bold text-gray-400 uppercase mb-1">
+                  Invoices Seleccionados ({selectedInvoiceKeys.length})
+                </label>
+                <div className="text-xs font-semibold font-mono text-gray-800 bg-gray-50 p-3 rounded-xl border border-gray-200 break-all max-h-20 overflow-y-auto w-full">
                   {selectedInvoiceKeys.join(', ') || 'Ninguno'}
                 </div>
               </div>
-              <div>
-                <label className="block text-xs font-bold text-gray-400 uppercase mb-1">Fecha de Pago</label>
-                <input
-                  type="date"
-                  value={invoicePaymentDate}
-                  onChange={(e) => setInvoicePaymentDate(e.target.value)}
-                  className="w-full p-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none text-sm font-semibold text-gray-800"
-                />
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-gray-400 uppercase mb-1">Fecha de Pago</label>
+                  <input
+                    type="date"
+                    value={invoicePaymentDate}
+                    onChange={(e) => setInvoicePaymentDate(e.target.value)}
+                    className="w-full p-2.5 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none text-sm font-semibold text-gray-800"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-gray-400 uppercase mb-1">Forma de Pago</label>
+                  <select
+                    value={invoicePaymentMethod}
+                    onChange={(e) => setInvoicePaymentMethod(e.target.value)}
+                    className="w-full p-2.5 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none text-sm font-bold text-gray-800"
+                  >
+                    <option value="">Seleccionar método...</option>
+                    {paymentMethods
+                      .filter(m => m.status === 'active')
+                      .sort((a, b) => a.name.localeCompare(b.name))
+                      .map(m => (
+                        <option key={m.id} value={m.name}>{m.name}</option>
+                      ))}
+                  </select>
+                </div>
               </div>
-              <div>
-                <label className="block text-xs font-bold text-gray-400 uppercase mb-1">Forma de Pago</label>
-                <select
-                  value={invoicePaymentMethod}
-                  onChange={(e) => setInvoicePaymentMethod(e.target.value)}
-                  className="w-full p-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none text-sm font-bold text-gray-800"
-                >
-                  <option value="">Seleccionar método...</option>
-                  {paymentMethods
-                    .filter(m => m.status === 'active')
-                    .sort((a, b) => a.name.localeCompare(b.name))
-                    .map(m => (
-                      <option key={m.id} value={m.name}>{m.name}</option>
-                    ))}
-                </select>
-              </div>
+
               <div>
                 <label className="block text-xs font-bold text-gray-400 uppercase mb-1">Cuenta de Pago / Depósito</label>
                 <input
@@ -6130,32 +7520,509 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
                   placeholder="Ej. Banco de origen / cuenta corporativa"
                   value={invoiceDepositAccount}
                   onChange={(e) => setInvoiceDepositAccount(e.target.value)}
-                  className="w-full p-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none text-sm font-semibold text-gray-800"
+                  className="w-full p-2.5 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none text-sm font-semibold text-gray-800"
                 />
               </div>
-              <div className="bg-blue-50 p-4 rounded-xl border border-blue-100">
-                <p className="text-xs text-blue-700 font-bold uppercase">Total a Pagar</p>
-                <p className="text-xl font-black text-blue-800">
-                  ${invoiceGroups
-                    .filter(g => selectedInvoiceKeys.includes(g.invoiceNumber))
-                    .reduce((sum, g) => sum + g.pendingAmount, 0)
-                    .toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD
-                </p>
+
+              {/* Deducción de Comisión del Pago Final */}
+              <div className="bg-gradient-to-br from-indigo-50/80 to-purple-50/60 p-4 rounded-xl border border-indigo-100 space-y-3">
+                <div className="flex items-center justify-between">
+                  <label className="flex items-center gap-2 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={deductCommission}
+                      onChange={(e) => {
+                        setDeductCommission(e.target.checked);
+                        if (!e.target.checked) setCustomCommissionDeduction('');
+                      }}
+                      className="w-4 h-4 text-indigo-600 rounded border-gray-300 focus:ring-indigo-500 cursor-pointer"
+                    />
+                    <span className="text-xs font-bold text-indigo-950 flex items-center gap-1.5">
+                      <Percent className="w-3.5 h-3.5 text-indigo-600" />
+                      Descontar comisión del pago final
+                    </span>
+                  </label>
+                  <span className="text-[10px] font-bold text-indigo-600 bg-indigo-100/70 px-2 py-0.5 rounded-full">
+                    Comisión Detectada: ${selectedTotalCommission.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD
+                  </span>
+                </div>
+
+                {deductCommission && (
+                  <div className="pt-2 border-t border-indigo-200/60 space-y-2.5 animate-in fade-in slide-in-from-top-1 duration-200">
+                    <div className="flex items-center justify-between gap-2">
+                      <label className="text-[11px] font-semibold text-gray-600">
+                        Monto de comisión a deducir (USD):
+                      </label>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => setCustomCommissionDeduction('')}
+                          className={`text-[10px] px-2 py-1 rounded-md font-bold transition-all ${
+                            customCommissionDeduction === ''
+                              ? 'bg-indigo-600 text-white shadow-xs'
+                              : 'bg-white text-indigo-700 border border-indigo-200 hover:bg-indigo-50'
+                          }`}
+                        >
+                          100% (${selectedTotalCommission.toFixed(2)})
+                        </button>
+                        {selectedTotalCommission > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => setCustomCommissionDeduction((selectedTotalCommission * 0.5).toFixed(2))}
+                            className={`text-[10px] px-2 py-1 rounded-md font-bold transition-all ${
+                              customCommissionDeduction === (selectedTotalCommission * 0.5).toFixed(2)
+                                ? 'bg-indigo-600 text-white shadow-xs'
+                                : 'bg-white text-indigo-700 border border-indigo-200 hover:bg-indigo-50'
+                            }`}
+                          >
+                            50% (${(selectedTotalCommission * 0.5).toFixed(2)})
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    <div className="relative">
+                      <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
+                        <span className="text-gray-400 text-xs font-bold">$</span>
+                      </div>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        max={selectedGrossPending}
+                        placeholder={selectedTotalCommission.toFixed(2)}
+                        value={customCommissionDeduction}
+                        onChange={(e) => setCustomCommissionDeduction(e.target.value)}
+                        className="w-full pl-7 pr-12 py-2 bg-white border border-indigo-200 rounded-lg text-xs font-bold text-gray-800 focus:ring-2 focus:ring-indigo-500 outline-none"
+                      />
+                      <div className="absolute inset-y-0 right-0 pr-3 flex items-center pointer-events-none">
+                        <span className="text-gray-400 text-[10px] font-bold">USD</span>
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Live Cost Breakdown */}
+              <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-2">
+                <div className="flex justify-between items-center text-xs">
+                  <span className="text-gray-500 font-medium">Monto Bruto Facturado:</span>
+                  <span className="font-bold text-gray-800 font-mono">
+                    ${selectedGrossPending.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD
+                  </span>
+                </div>
+
+                {deductCommission && (
+                  <div className="flex justify-between items-center text-xs text-indigo-700">
+                    <span className="font-medium flex items-center gap-1">
+                      <span>(-) Deducción de Comisión:</span>
+                    </span>
+                    <span className="font-bold font-mono">
+                      -${selectedEffectiveCommissionDeduction.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD
+                    </span>
+                  </div>
+                )}
+
+                <div className="pt-2 border-t border-slate-200 flex justify-between items-baseline">
+                  <div>
+                    <p className="text-xs font-black text-gray-900 uppercase">Total Neto Final a Pagar</p>
+                    <p className="text-[10px] text-gray-500">Monto real que saldrá de la cuenta</p>
+                  </div>
+                  <span className="text-2xl font-black text-blue-700 font-mono">
+                    ${selectedNetFinalPayment.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD
+                  </span>
+                </div>
               </div>
             </div>
-            <div className="p-6 bg-gray-50 flex gap-4">
+
+            <div className="p-6 bg-gray-50 flex gap-3 border-t border-gray-100">
               <button
+                type="button"
                 onClick={() => setShowInvoicePrompt(false)}
-                className="flex-1 py-3 bg-white text-gray-700 font-bold rounded-xl border border-gray-200 hover:bg-gray-100 transition-all"
+                className="flex-1 py-3 bg-white text-gray-700 font-bold rounded-xl border border-gray-200 hover:bg-gray-100 transition-all text-xs"
               >
                 Cancelar
               </button>
               <button
+                type="button"
                 onClick={processBulkInvoicesPayment}
                 disabled={selectedInvoiceKeys.length === 0 || !invoicePaymentMethod || submitting}
-                className="flex-1 py-3 bg-blue-600 text-white font-black rounded-xl hover:bg-blue-700 shadow-lg disabled:opacity-50 transition-all font-sans"
+                className="flex-1 py-3 bg-blue-600 text-white font-black rounded-xl hover:bg-blue-700 shadow-md disabled:opacity-50 transition-all text-xs flex items-center justify-center gap-2 cursor-pointer"
               >
-                {submitting ? 'Procesando...' : 'Confirmar Pago'}
+                <CheckCircle className="w-4 h-4" />
+                {submitting ? 'Procesando...' : 'Confirmar y Pagar'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Bulk Adjustments & Discounts Modal */}
+      {showBulkAdjustModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[60] p-4 overflow-y-auto">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-3xl w-full overflow-hidden animate-in fade-in zoom-in duration-200 my-8">
+            <div className="p-6 border-b border-gray-100 bg-gradient-to-r from-purple-50/70 to-indigo-50/40">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-3">
+                  <div className="p-2.5 bg-purple-600 text-white rounded-xl shadow-xs">
+                    <Sliders className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-xl font-black text-gray-900">
+                        {bulkAdjustSource === 'accounts_receivable'
+                          ? 'Descuentos y Ajustes Masivos (Cuentas por Cobrar)'
+                          : 'Descuentos y Ajustes Masivos (Cuentas por Pagar)'}
+                      </h3>
+                      <span className="px-2 py-0.5 rounded-full text-[9px] font-black uppercase tracking-wide bg-purple-150 text-purple-800 border border-purple-200">
+                        {bulkAdjustSource === 'accounts_receivable' ? 'Cobranza' : 'Cuentas por Pagar'}
+                      </span>
+                    </div>
+                    <p className="text-xs text-gray-500 mt-0.5">
+                      {bulkAdjustSource === 'accounts_receivable'
+                        ? 'Aplica ajustes o descuentos comerciales fijos o porcentuales sobre las pólizas y saldos deudores seleccionados.'
+                        : 'Aplica ajustes o descuentos fijos o porcentuales sobre las pólizas e invoices seleccionados.'}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setShowBulkAdjustModal(false)}
+                  className="text-gray-400 hover:text-gray-600 p-1.5 rounded-lg hover:bg-gray-100 transition-colors"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            <div className="p-6 space-y-5 max-h-[72vh] overflow-y-auto">
+              {/* Row 1: Scope & Target Field */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-bold text-gray-500 uppercase mb-1.5">
+                    1. Alcance del Ajuste
+                  </label>
+                  <div className="grid grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setBulkAdjustScope('selected')}
+                      disabled={bulkAdjustSource === 'accounts_receivable' ? selectedArIds.length === 0 : selectedInvoiceKeys.length === 0}
+                      className={`p-3 rounded-xl text-left border transition-all ${
+                        bulkAdjustScope === 'selected' && (bulkAdjustSource === 'accounts_receivable' ? selectedArIds.length > 0 : selectedInvoiceKeys.length > 0)
+                          ? 'bg-purple-50 border-purple-300 ring-2 ring-purple-500/20 text-purple-900 font-bold'
+                          : 'bg-gray-50 border-gray-200 text-gray-600 disabled:opacity-40'
+                      }`}
+                    >
+                      <p className="text-xs font-black">
+                        {bulkAdjustSource === 'accounts_receivable' ? 'Pólizas Seleccionadas' : 'Invoices Seleccionados'}
+                      </p>
+                      <p className="text-[10px] text-gray-500 mt-0.5">
+                        {bulkAdjustSource === 'accounts_receivable'
+                          ? `${selectedArIds.length} pólizas seleccionadas`
+                          : `${selectedInvoiceKeys.length} Invoices (${targetBulkInsurances.length} pólizas)`}
+                      </p>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setBulkAdjustScope('all_visible')}
+                      className={`p-3 rounded-xl text-left border transition-all ${
+                        bulkAdjustScope === 'all_visible' || (bulkAdjustSource === 'accounts_receivable' ? selectedArIds.length === 0 : selectedInvoiceKeys.length === 0)
+                          ? 'bg-purple-50 border-purple-300 ring-2 ring-purple-500/20 text-purple-900 font-bold'
+                          : 'bg-gray-50 border-gray-200 text-gray-600'
+                      }`}
+                    >
+                      <p className="text-xs font-black">Todos los Visibles</p>
+                      <p className="text-[10px] text-gray-500 mt-0.5">
+                        {bulkAdjustSource === 'accounts_receivable'
+                          ? `${accountsReceivableData.items.length} pólizas filtradas`
+                          : `${filteredInvoiceGroups.length} Invoices (${filteredInvoiceGroups.flatMap(g => g.insurances).length} pólizas)`}
+                      </p>
+                    </button>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-xs font-bold text-gray-500 uppercase mb-1.5">
+                    2. Campo / Tipo de Operación
+                  </label>
+                  <select
+                    value={bulkAdjustTarget}
+                    onChange={(e) => setBulkAdjustTarget(e.target.value as any)}
+                    className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-purple-500 outline-none text-xs font-bold text-gray-800"
+                  >
+                    {bulkAdjustSource === 'accounts_receivable' ? (
+                      <>
+                        <option value="adjustment">Ajuste de la Póliza (Adjustment) - Aplicar ajuste o descuento</option>
+                        <option value="balance_clear">⚡ Auto-Cuadrar Saldo a Cero ($0.00) - Eliminar deuda de las pólizas</option>
+                        <option value="discount">Descuento Comercial (Discount) - Bonificación</option>
+                        <option value="totalPrice">Precio Venta (Total Price) - Recalcular tarifa</option>
+                        <option value="totalCost">Costo Proveedor (Total Cost) - Costo aseguradora</option>
+                      </>
+                    ) : (
+                      <>
+                        <option value="totalCost">Costo Proveedor (Total Cost) - Cuentas por Pagar</option>
+                        <option value="discount">Descuento de la Póliza (Discount)</option>
+                        <option value="adjustment">Ajuste de la Póliza (Adjustment)</option>
+                        <option value="totalPrice">Precio Venta (Total Price)</option>
+                      </>
+                    )}
+                  </select>
+                  <p className="text-[10px] text-gray-400 mt-1">
+                    {bulkAdjustTarget === 'balance_clear' && 'Calcula el ajuste exacto para llevar a $0.00 el saldo deudor de cada póliza seleccionada.'}
+                    {bulkAdjustTarget === 'adjustment' && 'Ajusta el valor de cobro final de las pólizas.'}
+                    {bulkAdjustTarget === 'discount' && 'Aplica un descuento comercial directo a la póliza del cliente.'}
+                    {bulkAdjustTarget === 'totalPrice' && 'Modifica la base de precio total de venta del seguro.'}
+                    {bulkAdjustTarget === 'totalCost' && 'Modifica el costo a pagar al proveedor de seguros (CareMed).'}
+                  </p>
+                </div>
+              </div>
+
+              {/* Row 2: Type, Mode, and Value */}
+              {bulkAdjustTarget === 'balance_clear' ? (
+                <div className="bg-emerald-50 border border-emerald-200 p-4 rounded-xl flex items-center gap-3">
+                  <div className="p-2 bg-emerald-600 text-white rounded-lg">
+                    <Check className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <p className="text-xs font-black text-emerald-950">Auto-Cuadre Inteligente a $0.00</p>
+                    <p className="text-[11px] text-emerald-800">
+                      El sistema asignará el ajuste exacto correspondiente a cada póliza seleccionada para que su saldo deudor resultante sea exactamente $0.00 USD y su estado cambie a liquidado/cerrado.
+                    </p>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4 bg-gray-50/70 p-4 rounded-xl border border-gray-200/80">
+                    <div>
+                      <label className="block text-xs font-bold text-gray-500 uppercase mb-1.5">
+                        3. Tipo de Valor
+                      </label>
+                      <select
+                        value={bulkAdjustType}
+                        onChange={(e) => setBulkAdjustType(e.target.value as any)}
+                        className="w-full p-2.5 bg-white border border-gray-200 rounded-lg text-xs font-bold text-gray-800 focus:ring-2 focus:ring-purple-500 outline-none"
+                      >
+                        <option value="fixed_per_policy">Cantidad fija por póliza ($ USD)</option>
+                        <option value="percentage">Porcentaje (%)</option>
+                        <option value="fixed_total_distributed">Monto total distribuido ($ USD)</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-bold text-gray-500 uppercase mb-1.5">
+                        4. Operación
+                      </label>
+                      <select
+                        value={bulkAdjustMode}
+                        onChange={(e) => setBulkAdjustMode(e.target.value as any)}
+                        className="w-full p-2.5 bg-white border border-gray-200 rounded-lg text-xs font-bold text-gray-800 focus:ring-2 focus:ring-purple-500 outline-none"
+                      >
+                        <option value="add">Aumentar / Aplicar (+)</option>
+                        <option value="subtract">Disminuir / Restar (-)</option>
+                        <option value="set">Fijar valor exacto (=)</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-bold text-gray-500 uppercase mb-1.5">
+                        5. Monto ({bulkAdjustType === 'percentage' ? '%' : 'USD'})
+                      </label>
+                      <div className="relative">
+                        <input
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          value={bulkAdjustValue}
+                          onChange={(e) => setBulkAdjustValue(e.target.value)}
+                          className="w-full p-2.5 bg-white border border-gray-200 rounded-lg text-xs font-black text-gray-900 focus:ring-2 focus:ring-purple-500 outline-none pr-8"
+                          placeholder="0.00"
+                        />
+                        <span className="absolute right-3 top-2.5 text-xs font-bold text-gray-400">
+                          {bulkAdjustType === 'percentage' ? '%' : '$'}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Quick Presets */}
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[10px] font-bold text-gray-400 uppercase">Valores rápidos:</span>
+                    {bulkAdjustType === 'percentage' ? (
+                      ['5', '10', '15', '20', '25', '50'].map(val => (
+                        <button
+                          key={val}
+                          type="button"
+                          onClick={() => setBulkAdjustValue(val)}
+                          className={`text-xs px-2.5 py-1 rounded-md font-bold transition-all ${
+                            bulkAdjustValue === val
+                              ? 'bg-purple-600 text-white shadow-xs'
+                              : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                          }`}
+                        >
+                          {val}%
+                        </button>
+                      ))
+                    ) : (
+                      ['5', '10', '20', '50', '100', '250'].map(val => (
+                        <button
+                          key={val}
+                          type="button"
+                          onClick={() => setBulkAdjustValue(val)}
+                          className={`text-xs px-2.5 py-1 rounded-md font-bold transition-all ${
+                            bulkAdjustValue === val
+                              ? 'bg-purple-600 text-white shadow-xs'
+                              : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                          }`}
+                        >
+                          ${val} USD
+                        </button>
+                      ))
+                    )}
+                  </div>
+                </>
+              )}
+
+              {/* Motivo o Justificación */}
+              <div>
+                <label className="block text-xs font-bold text-gray-500 uppercase mb-1.5">
+                  Motivo o Justificación del Ajuste (Se registrará en notas)
+                </label>
+                <input
+                  type="text"
+                  placeholder="Ej. Descuento comercial acordado con aseguradora / Ajuste de fin de mes / Redondeo"
+                  value={bulkAdjustReason}
+                  onChange={(e) => setBulkAdjustReason(e.target.value)}
+                  className="w-full p-2.5 bg-white border border-gray-200 rounded-lg text-xs text-gray-800 focus:ring-2 focus:ring-purple-500 outline-none"
+                />
+                <div className="flex flex-wrap gap-1.5 mt-1.5">
+                  {['Descuento por volumen', 'Acuerdo comercial', 'Ajuste fin de mes', 'Bonificación especial', 'Corrección de tarifa', 'Redondeo de saldo'].map(chip => (
+                    <button
+                      key={chip}
+                      type="button"
+                      onClick={() => setBulkAdjustReason(chip)}
+                      className="text-[10px] bg-gray-100 hover:bg-gray-200 text-gray-600 px-2 py-0.5 rounded-full transition-colors font-medium"
+                    >
+                      {chip}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Impact KPIs Summary */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-gradient-to-br from-purple-50 to-indigo-50/50 p-4 rounded-xl border border-purple-100">
+                <div>
+                  <span className="text-[10px] font-bold text-purple-700 uppercase">Pólizas Afectadas</span>
+                  <p className="text-lg font-black text-purple-950 mt-0.5">
+                    {bulkAdjustSummary.count} <span className="text-xs font-normal text-purple-700">
+                      {bulkAdjustSource === 'accounts_payable' ? `en ${bulkAdjustSummary.uniqueInvoices} inv.` : 'registros'}
+                    </span>
+                  </p>
+                </div>
+                <div>
+                  <span className="text-[10px] font-bold text-purple-700 uppercase">Total Original</span>
+                  <p className="text-lg font-black text-gray-900 mt-0.5 font-mono">
+                    ${bulkAdjustSummary.totalOriginal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </p>
+                </div>
+                <div>
+                  <span className="text-[10px] font-bold text-purple-700 uppercase">Impacto / Ajuste</span>
+                  <p className={`text-lg font-black mt-0.5 font-mono ${bulkAdjustMode === 'subtract' ? 'text-rose-600' : 'text-emerald-600'}`}>
+                    {bulkAdjustMode === 'subtract' ? '-' : '+'}${bulkAdjustSummary.totalDelta.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </p>
+                </div>
+                <div>
+                  <span className="text-[10px] font-bold text-purple-700 uppercase">Nuevo Total</span>
+                  <p className="text-lg font-black text-indigo-700 mt-0.5 font-mono">
+                    ${bulkAdjustSummary.totalNew.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </p>
+                </div>
+              </div>
+
+              {/* Preview Table */}
+              <div className="border border-gray-200 rounded-xl overflow-hidden">
+                <div className="bg-gray-50 px-4 py-2.5 border-b border-gray-200 flex justify-between items-center">
+                  <span className="text-xs font-bold text-gray-700 uppercase tracking-wider">
+                    Vista Previa de Pólizas ({bulkAdjustCalculations.length})
+                  </span>
+                  <div className="w-48">
+                    <input
+                      type="text"
+                      placeholder="Buscar en preview..."
+                      value={bulkAdjustPreviewSearch}
+                      onChange={(e) => setBulkAdjustPreviewSearch(e.target.value)}
+                      className="w-full px-2 py-1 text-[11px] bg-white border border-gray-200 rounded-md outline-none focus:ring-1 focus:ring-purple-500"
+                    />
+                  </div>
+                </div>
+                <div className="max-h-48 overflow-y-auto">
+                  <table className="w-full text-left text-xs">
+                    <thead className="bg-gray-50/80 text-[10px] font-bold text-gray-400 uppercase tracking-wider sticky top-0 border-b border-gray-200">
+                      <tr>
+                        <th className="px-3 py-2">Asegurado</th>
+                        <th className="px-3 py-2">
+                          {bulkAdjustSource === 'accounts_receivable' ? 'Folio / Póliza' : 'Invoice'}
+                        </th>
+                        <th className="px-3 py-2 text-right">Valor Actual</th>
+                        <th className="px-3 py-2 text-right">Ajuste</th>
+                        <th className="px-3 py-2 text-right">Nuevo Total</th>
+                        <th className="px-3 py-2 text-right">Saldo Final</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-100">
+                      {bulkAdjustCalculations
+                        .filter(item => {
+                          if (!bulkAdjustPreviewSearch.trim()) return true;
+                          const t = bulkAdjustPreviewSearch.toLowerCase().trim();
+                          const name = `${item.insurance.firstName} ${item.insurance.lastName}`.toLowerCase();
+                          return name.includes(t) || item.invoiceNumber.toLowerCase().includes(t) || item.policyId.toLowerCase().includes(t) || item.idSeg.toLowerCase().includes(t);
+                        })
+                        .slice(0, 50)
+                        .map((item, idx) => (
+                          <tr key={item.insurance.id || idx} className="hover:bg-purple-50/30">
+                            <td className="px-3 py-2 font-medium text-gray-900">
+                              {item.insurance.firstName} {item.insurance.lastName}
+                            </td>
+                            <td className="px-3 py-2 font-mono text-[11px] text-gray-500">
+                              {bulkAdjustSource === 'accounts_receivable'
+                                ? (item.idSeg || item.policyId || item.invoiceNumber)
+                                : item.invoiceNumber}
+                            </td>
+                            <td className="px-3 py-2 text-right font-mono text-gray-600">
+                              ${item.currentVal.toFixed(2)}
+                            </td>
+                            <td className="px-3 py-2 text-right font-mono font-bold text-purple-600">
+                              {bulkAdjustMode === 'subtract' ? '-' : '+'}${item.delta.toFixed(2)}
+                            </td>
+                            <td className="px-3 py-2 text-right font-mono font-black text-indigo-700">
+                              ${item.newTotalFinal.toFixed(2)}
+                            </td>
+                            <td className="px-3 py-2 text-right font-mono font-bold text-emerald-700">
+                              ${item.newBalance.toFixed(2)}
+                            </td>
+                          </tr>
+                        ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <div className="p-6 bg-gray-50 flex gap-3 border-t border-gray-100">
+              <button
+                type="button"
+                onClick={() => setShowBulkAdjustModal(false)}
+                className="flex-1 py-3 bg-white text-gray-700 font-bold rounded-xl border border-gray-200 hover:bg-gray-100 transition-all text-xs"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                onClick={handleApplyBulkAdjustments}
+                disabled={bulkAdjustCalculations.length === 0 || submitting}
+                className="flex-1 py-3 bg-purple-600 text-white font-black rounded-xl hover:bg-purple-700 shadow-md disabled:opacity-50 transition-all text-xs flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <Check className="w-4 h-4" />
+                {submitting ? 'Aplicando Ajustes...' : `Aplicar a ${bulkAdjustSummary.count} Pólizas`}
               </button>
             </div>
           </div>
@@ -6182,31 +8049,71 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
             </div>
             
             <div className="p-6 space-y-4 max-h-[60vh] overflow-y-auto">
-              {/* Discrepancies listing */}
-              <div>
-                <label className="block text-xs font-bold text-gray-400 uppercase mb-2">Pólizas con Discrepancias ({selectedDifferenceGroup.validation.discrepancies.length})</label>
-                <div className="space-y-2 max-h-40 overflow-y-auto pr-1">
-                  {selectedDifferenceGroup.validation.discrepancies.map((d: any, index: number) => (
-                    <div key={index} className="p-3 bg-slate-50 rounded-xl border border-gray-100 text-xs">
-                      <div className="flex justify-between font-bold text-gray-800 mb-1">
-                        <span>{d.insuredName}</span>
-                        <span className="text-amber-600 font-mono">
-                          Diff: ${d.difference.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                        </span>
-                      </div>
-                      <div className="text-gray-500 font-sans flex justify-between">
-                        <span>Póliza: {d.policyId}</span>
-                        <span>
-                          Reg: ${d.actualCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} vs Esp: ${d.expectedCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                        </span>
-                      </div>
-                      <p className="text-[10px] text-amber-700 font-medium italic mt-1 font-sans">
-                        Motivo: {d.reason === 'policy_not_found' ? 'Plan no registrado en catálogo' : 'Costo diario no coincide con el plan maestro'}
-                      </p>
+              {/* Factura CareMed summary if attached */}
+              {selectedDifferenceGroup.hasAttachedInvoice && (
+                <div className="p-3.5 bg-blue-50/70 rounded-xl border border-blue-200 text-xs">
+                  <div className="flex justify-between items-center mb-2">
+                    <span className="font-bold text-blue-900 flex items-center gap-1.5">
+                      <FileText className="w-4 h-4 text-blue-600" />
+                      Factura CareMed Adjunta
+                    </span>
+                    {selectedDifferenceGroup.fileUrl && (
+                      <a
+                        href={selectedDifferenceGroup.fileUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-blue-600 hover:text-blue-800 text-[11px] font-bold underline inline-flex items-center gap-1"
+                      >
+                        Ver Factura PDF &rarr;
+                      </a>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-3 gap-2 pt-1 text-center font-sans">
+                    <div className="bg-white p-2 rounded-lg border border-blue-100">
+                      <span className="text-[10px] text-gray-500 block">Monto Factura</span>
+                      <strong className="text-sm text-gray-900 font-mono">${(selectedDifferenceGroup.dbInvoiceAmount || 0).toFixed(2)}</strong>
                     </div>
-                  ))}
+                    <div className="bg-white p-2 rounded-lg border border-blue-100">
+                      <span className="text-[10px] text-gray-500 block">Costo Sistema</span>
+                      <strong className="text-sm text-gray-900 font-mono">${selectedDifferenceGroup.totalCost.toFixed(2)}</strong>
+                    </div>
+                    <div className="bg-white p-2 rounded-lg border border-amber-200">
+                      <span className="text-[10px] text-amber-700 block">Diferencia Neta</span>
+                      <strong className="text-sm text-amber-700 font-mono">${selectedDifferenceGroup.difference.toFixed(2)}</strong>
+                    </div>
+                  </div>
                 </div>
-              </div>
+              )}
+
+              {/* Discrepancies listing */}
+              {selectedDifferenceGroup.validation.discrepancies.length > 0 && (
+                <div>
+                  <label className="block text-xs font-bold text-gray-400 uppercase mb-2">
+                    Discrepancias en Tarifas vs Catálogo ({selectedDifferenceGroup.validation.discrepancies.length})
+                  </label>
+                  <div className="space-y-2 max-h-36 overflow-y-auto pr-1">
+                    {selectedDifferenceGroup.validation.discrepancies.map((d: any, index: number) => (
+                      <div key={index} className="p-3 bg-slate-50 rounded-xl border border-gray-100 text-xs">
+                        <div className="flex justify-between font-bold text-gray-800 mb-1">
+                          <span>{d.insuredName}</span>
+                          <span className="text-amber-600 font-mono">
+                            Diff: ${d.difference.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          </span>
+                        </div>
+                        <div className="text-gray-500 font-sans flex justify-between">
+                          <span>Póliza: {d.policyId}</span>
+                          <span>
+                            Reg: ${d.actualCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} vs Esp: ${d.expectedCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                          </span>
+                        </div>
+                        <p className="text-[10px] text-amber-700 font-medium italic mt-1 font-sans">
+                          Motivo: {d.reason === 'policy_not_found' ? 'Plan no registrado en catálogo' : 'Costo diario no coincide con el plan maestro'}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
 
               {/* Amount Selection */}
               <div className="space-y-3">
@@ -6232,27 +8139,53 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
                   </div>
                 </button>
 
-                {/* Expected Amount Option */}
-                <button
-                  type="button"
-                  onClick={() => setSelectedAmountType('expected')}
-                  className={`w-full p-4 rounded-xl border text-left transition-all flex items-center justify-between ${
-                    selectedAmountType === 'expected'
-                      ? 'bg-emerald-50/70 border-emerald-200 ring-2 ring-emerald-500/20'
-                      : 'bg-white border-gray-100 hover:bg-gray-50/50'
-                  }`}
-                >
-                  <div>
-                    <p className="text-sm font-bold text-gray-800">Monto Esperado (Catálogo de Planes)</p>
-                    <p className="text-xs text-gray-500 mt-1 font-sans">Monto calculado según tarifas vigentes del catálogo.</p>
-                  </div>
-                  <div className="text-right">
-                    <p className="text-lg font-black text-emerald-800">
-                      ${Math.max(0, selectedDifferenceGroup.validation.totalExpectedCost - selectedDifferenceGroup.paidAmount).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD
-                    </p>
-                    <span className="text-[10px] bg-emerald-100 text-emerald-700 font-bold px-2 py-0.5 rounded-full mt-1 inline-block">Costo Calculado</span>
-                  </div>
-                </button>
+                {/* Attached Invoice Amount Option (if available) */}
+                {selectedDifferenceGroup.hasAttachedInvoice && selectedDifferenceGroup.dbInvoiceAmount !== null && (
+                  <button
+                    type="button"
+                    onClick={() => setSelectedAmountType('expected')}
+                    className={`w-full p-4 rounded-xl border text-left transition-all flex items-center justify-between ${
+                      selectedAmountType === 'expected'
+                        ? 'bg-emerald-50/70 border-emerald-200 ring-2 ring-emerald-500/20'
+                        : 'bg-white border-gray-100 hover:bg-gray-50/50'
+                    }`}
+                  >
+                    <div>
+                      <p className="text-sm font-bold text-gray-800">Monto Factura CareMed</p>
+                      <p className="text-xs text-gray-500 mt-1 font-sans">Monto especificado en el documento de factura oficial.</p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-lg font-black text-emerald-800">
+                        ${Math.max(0, (selectedDifferenceGroup.dbInvoiceAmount || 0) - selectedDifferenceGroup.paidAmount).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD
+                      </p>
+                      <span className="text-[10px] bg-emerald-100 text-emerald-700 font-bold px-2 py-0.5 rounded-full mt-1 inline-block">Factura Digital</span>
+                    </div>
+                  </button>
+                )}
+
+                {/* Catalog Expected Amount Option (if no attached invoice) */}
+                {!selectedDifferenceGroup.hasAttachedInvoice && (
+                  <button
+                    type="button"
+                    onClick={() => setSelectedAmountType('expected')}
+                    className={`w-full p-4 rounded-xl border text-left transition-all flex items-center justify-between ${
+                      selectedAmountType === 'expected'
+                        ? 'bg-emerald-50/70 border-emerald-200 ring-2 ring-emerald-500/20'
+                        : 'bg-white border-gray-100 hover:bg-gray-50/50'
+                    }`}
+                  >
+                    <div>
+                      <p className="text-sm font-bold text-gray-800">Monto Esperado (Catálogo de Planes)</p>
+                      <p className="text-xs text-gray-500 mt-1 font-sans">Monto calculado según tarifas vigentes del catálogo.</p>
+                    </div>
+                    <div className="text-right">
+                      <p className="text-lg font-black text-emerald-800">
+                        ${Math.max(0, selectedDifferenceGroup.validation.totalExpectedCost - selectedDifferenceGroup.paidAmount).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD
+                      </p>
+                      <span className="text-[10px] bg-emerald-100 text-emerald-700 font-bold px-2 py-0.5 rounded-full mt-1 inline-block">Costo Calculado</span>
+                    </div>
+                  </button>
+                )}
 
                 {/* Custom Amount Option */}
                 <div className={`p-4 rounded-xl border transition-all space-y-3 ${
@@ -6927,7 +8860,17 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
                               </div>
                               <div className="space-y-1">
                                 <div className="flex justify-between text-sm">
-                                  <span className="text-gray-500">Total Póliza:</span>
+                                  <span className="text-gray-500">Costo / Precio Seguro:</span>
+                                  <span className="font-bold text-gray-900">${((selectedInsurance.totalPrice || 0) - (selectedInsurance.discount || 0) - (selectedInsurance.adjustment || 0)).toLocaleString()} USD</span>
+                                </div>
+                                {selectedInsurance.comision && selectedInsurance.comision > 0 ? (
+                                  <div className="flex justify-between text-sm text-amber-700">
+                                    <span>Comisión Tarjeta (4.5%):</span>
+                                    <span className="font-bold">+${selectedInsurance.comision.toLocaleString()} USD</span>
+                                  </div>
+                                ) : null}
+                                <div className="flex justify-between text-sm">
+                                  <span className="text-gray-500">Total a Cobrar:</span>
                                   <span className="font-bold text-gray-900">${(selectedInsurance.totalFinal || selectedInsurance.totalPrice).toLocaleString()} USD</span>
                                 </div>
                                 <div className="flex justify-between text-sm">
@@ -7240,7 +9183,7 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
                         </div>
                       </div>
 
-                      {selectedInsurance.commissionStatus !== 'confirmed' && selectedInsurance.commissionStatus !== 'paid' ? (
+                      {selectedInsurance.commissionStatus !== 'confirmed' && selectedInsurance.commissionStatus !== 'paid' && (selectedInsurance.agentCommission || 0) > 0 ? (
                         <div className="pt-6 border-t border-gray-200">
                           <p className="text-xs text-gray-400 mb-4 flex items-center gap-2">
                             <AlertCircle className="w-4 h-4" />
@@ -7291,139 +9234,150 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
       {/* Edit Payment Modal */}
       {editingPayment && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[60] p-4">
-          <div className="bg-white rounded-3xl shadow-2xl max-w-lg w-full overflow-hidden animate-in fade-in zoom-in duration-200">
-            <div className="bg-blue-600 p-6 text-white flex justify-between items-center">
+          <div className="bg-white rounded-3xl shadow-2xl max-w-2xl md:max-w-3xl w-full max-h-[90vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+            <div className="bg-blue-600 p-5 md:p-6 text-white flex justify-between items-center flex-shrink-0">
               <div className="flex items-center gap-3">
-                <Edit2 className="w-6 h-6" />
-                <h3 className="text-xl font-bold">Editar Pago</h3>
+                <div className="p-2 bg-white/15 rounded-xl">
+                  <Edit2 className="w-5 h-5 text-white" />
+                </div>
+                <h3 className="text-lg md:text-xl font-black tracking-tight">Editar Pago</h3>
               </div>
-              <button onClick={() => setEditingPayment(null)} className="p-2 hover:bg-blue-500 rounded-full transition-colors">
-                <X className="w-6 h-6" />
+              <button onClick={() => setEditingPayment(null)} className="p-2 hover:bg-white/10 rounded-xl transition-all cursor-pointer">
+                <X className="w-5 h-5" />
               </button>
             </div>
             
-            <form onSubmit={handleSaveEditedPayment} className="p-8 space-y-6">
-              <div className="grid grid-cols-1 gap-6">
-                <div>
-                  <label className="block text-xs font-bold text-gray-400 uppercase mb-2">Moneda</label>
-                  <div className="flex bg-gray-100 p-1 rounded-xl">
-                    {(['USD', 'MXP'] as const).map(curr => (
-                      <button
-                        key={curr}
-                        type="button"
-                        onClick={() => setEditingPayment({ ...editingPayment, currency: curr })}
-                        className={`flex-1 py-2 rounded-lg text-sm font-bold transition-all ${
-                          editingPayment.currency === curr ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500'
-                        }`}
-                      >
-                        {curr}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-gray-400 uppercase mb-2">Monto ({editingPayment.currency})</label>
-                  <input 
-                    type="number"
-                    step="0.01"
-                    value={editingPayment.currency === 'USD' ? editingPayment.amount : editingPayment.amountMXP}
-                    onChange={(e) => {
-                      const val = parseFloat(e.target.value) || 0;
-                      if (editingPayment.currency === 'USD') {
-                        setEditingPayment({ ...editingPayment, amount: val, amountMXP: val * (editingPayment.exchangeRate || exchangeRate) });
-                      } else {
-                        setEditingPayment({ ...editingPayment, amountMXP: val, amount: val / (editingPayment.exchangeRate || exchangeRate) });
-                      }
-                    }}
-                    className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none font-bold"
-                    required
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-gray-400 uppercase mb-2">Tipo de Cambio</label>
-                  <input 
-                    type="number"
-                    step="0.01"
-                    value={editingPayment.exchangeRate}
-                    onChange={(e) => {
-                      const rate = parseFloat(e.target.value) || 1;
-                      if (editingPayment.currency === 'USD') {
-                        setEditingPayment({ 
-                          ...editingPayment, 
-                          exchangeRate: rate,
-                          amountMXP: (editingPayment.amount || 0) * rate
-                        });
-                      } else {
-                        setEditingPayment({ 
-                          ...editingPayment, 
-                          exchangeRate: rate,
-                          amount: (editingPayment.amountMXP || 0) / rate
-                        });
-                      }
-                    }}
-                    className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
-                    required
-                  />
-                </div>
-                <div className="p-4 bg-blue-50 rounded-xl border border-blue-100 flex justify-between items-center">
-                  <span className="text-blue-700 font-bold">
-                    {editingPayment.currency === 'USD' ? 'Equivalente MXP:' : 'Equivalente USD:'}
-                  </span>
-                  <span className="text-xl font-black text-blue-800">
-                    {editingPayment.currency === 'USD' 
-                      ? `$${(editingPayment.amountMXP || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MXP`
-                      : `$${(editingPayment.amount || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD`
-                    }
-                  </span>
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-gray-400 uppercase mb-2">Fecha</label>
-                  <input 
-                    type="date"
-                    value={editingPayment.date as any}
-                    onChange={(e) => setEditingPayment({ ...editingPayment, date: e.target.value as any })}
-                    className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
-                    required
-                  />
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-gray-400 uppercase mb-2">Método de Pago</label>
-                  <select 
-                    value={editingPayment.paymentMethod}
-                    onChange={(e) => setEditingPayment({ ...editingPayment, paymentMethod: e.target.value })}
-                    className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none font-bold text-gray-800"
-                  >
-                    <option value="">Seleccionar método...</option>
-                    {paymentMethods
-                      .filter(m => m.status === 'active')
-                      .sort((a, b) => a.name.localeCompare(b.name))
-                      .map(m => (
-                        <option key={m.id} value={m.name}>{m.name}</option>
+            <form onSubmit={handleSaveEditedPayment} className="flex-1 flex flex-col overflow-hidden">
+              <div className="flex-1 overflow-y-auto p-6 md:p-8 space-y-6">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-5 md:gap-6">
+                  <div>
+                    <label className="block text-xs font-bold text-gray-500 uppercase mb-2 tracking-wider">Moneda</label>
+                    <div className="flex bg-gray-100 p-1 rounded-xl">
+                      {(['USD', 'MXP'] as const).map(curr => (
+                        <button
+                          key={curr}
+                          type="button"
+                          onClick={() => setEditingPayment({ ...editingPayment, currency: curr })}
+                          className={`flex-1 py-2 rounded-lg text-xs font-black transition-all cursor-pointer ${
+                            editingPayment.currency === curr ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+                          }`}
+                        >
+                          {curr}
+                        </button>
                       ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-xs font-bold text-gray-400 uppercase mb-2">Notas</label>
-                  <textarea 
-                    value={editingPayment.notes || ''}
-                    onChange={(e) => setEditingPayment({ ...editingPayment, notes: e.target.value })}
-                    className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none min-h-[100px]"
-                  />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-gray-500 uppercase mb-2 tracking-wider">Monto ({editingPayment.currency})</label>
+                    <input 
+                      type="number"
+                      step="0.01"
+                      value={editingPayment.currency === 'USD' ? editingPayment.amount : editingPayment.amountMXP}
+                      onChange={(e) => {
+                        const val = parseFloat(e.target.value) || 0;
+                        if (editingPayment.currency === 'USD') {
+                          setEditingPayment({ ...editingPayment, amount: val, amountMXP: val * (editingPayment.exchangeRate || exchangeRate) });
+                        } else {
+                          setEditingPayment({ ...editingPayment, amountMXP: val, amount: val / (editingPayment.exchangeRate || exchangeRate) });
+                        }
+                      }}
+                      className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 focus:bg-white outline-none font-bold text-sm transition-all"
+                      required
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-gray-500 uppercase mb-2 tracking-wider">Tipo de Cambio</label>
+                    <input 
+                      type="number"
+                      step="0.0001"
+                      value={editingPayment.exchangeRate}
+                      onChange={(e) => {
+                        const rate = parseFloat(e.target.value) || 1;
+                        if (editingPayment.currency === 'USD') {
+                          setEditingPayment({ 
+                            ...editingPayment, 
+                            exchangeRate: rate,
+                            amountMXP: (editingPayment.amount || 0) * rate
+                          });
+                        } else {
+                          setEditingPayment({ 
+                            ...editingPayment, 
+                            exchangeRate: rate,
+                            amount: (editingPayment.amountMXP || 0) / rate
+                          });
+                        }
+                      }}
+                      className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 focus:bg-white outline-none text-sm transition-all font-medium"
+                      required
+                    />
+                  </div>
+
+                  <div className="p-4 bg-blue-50/70 rounded-xl border border-blue-100 flex justify-between items-center shadow-sm">
+                    <span className="text-blue-700 font-bold text-xs uppercase tracking-wider">
+                      {editingPayment.currency === 'USD' ? 'Equivalente MXP' : 'Equivalente USD'}
+                    </span>
+                    <span className="text-lg md:text-xl font-black text-blue-800">
+                      {editingPayment.currency === 'USD' 
+                        ? `$${(editingPayment.amountMXP || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MXP`
+                        : `$${(editingPayment.amount || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD`
+                      }
+                    </span>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-gray-500 uppercase mb-2 tracking-wider">Fecha</label>
+                    <input 
+                      type="date"
+                      value={editingPayment.date as any}
+                      onChange={(e) => setEditingPayment({ ...editingPayment, date: e.target.value as any })}
+                      className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 focus:bg-white outline-none text-sm transition-all"
+                      required
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-bold text-gray-500 uppercase mb-2 tracking-wider">Método de Pago</label>
+                    <select 
+                      value={editingPayment.paymentMethod}
+                      onChange={(e) => setEditingPayment({ ...editingPayment, paymentMethod: e.target.value })}
+                      className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 focus:bg-white outline-none text-sm transition-all font-medium"
+                    >
+                      <option value="">Seleccionar método...</option>
+                      {paymentMethods
+                        .filter(m => m.status === 'active')
+                        .sort((a, b) => a.name.localeCompare(b.name))
+                        .map(m => (
+                          <option key={m.id} value={m.name}>{m.name}</option>
+                        ))}
+                    </select>
+                  </div>
+
+                  <div className="col-span-1 md:col-span-2">
+                    <label className="block text-xs font-bold text-gray-500 uppercase mb-2 tracking-wider">Notas</label>
+                    <textarea 
+                      value={editingPayment.notes || ''}
+                      onChange={(e) => setEditingPayment({ ...editingPayment, notes: e.target.value })}
+                      className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 focus:bg-white outline-none min-h-[80px] text-sm transition-all"
+                      placeholder="Notas opcionales del pago..."
+                    />
+                  </div>
                 </div>
               </div>
 
-              <div className="flex gap-3 pt-4">
+              <div className="flex gap-3 px-6 py-4 bg-gray-50 border-t border-gray-150 flex-shrink-0 justify-end">
                 <button
                   type="button"
                   onClick={() => setEditingPayment(null)}
-                  className="flex-1 px-6 py-3 border border-gray-200 text-gray-600 font-bold rounded-xl hover:bg-gray-50 transition-all"
+                  className="px-5 py-2.5 border border-gray-200 text-gray-600 font-bold text-xs rounded-xl hover:bg-gray-100 transition-all cursor-pointer"
                 >
                   Cancelar
                 </button>
                 <button
                   type="submit"
                   disabled={submitting}
-                  className="flex-1 px-6 py-3 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-700 transition-all shadow-lg shadow-blue-200 disabled:opacity-50"
+                  className="px-5 py-2.5 bg-blue-600 text-white font-black text-xs rounded-xl hover:bg-blue-700 transition-all shadow-md shadow-blue-200 disabled:opacity-50 cursor-pointer"
                 >
                   {submitting ? 'Guardando...' : 'Guardar Cambios'}
                 </button>
@@ -7546,6 +9500,196 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
                 </button>
               </div>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Bulk Payment Accounts Receivable Modal */}
+      {showBulkPaymentArModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[60] p-4">
+          <div className="bg-white rounded-3xl shadow-2xl max-w-xl w-full overflow-hidden animate-in fade-in zoom-in duration-200">
+            <div className="bg-emerald-600 p-6 text-white flex justify-between items-center">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 bg-white/15 rounded-2xl">
+                  <CreditCard className="w-6 h-6" />
+                </div>
+                <div>
+                  <h3 className="text-xl font-bold">Pago Masivo de Pólizas</h3>
+                  <p className="text-xs text-emerald-100 font-medium">
+                    Registrar pago para {selectedArIds.length} {selectedArIds.length === 1 ? 'póliza seleccionada' : 'pólizas seleccionadas'}
+                  </p>
+                </div>
+              </div>
+              <button 
+                type="button"
+                onClick={() => setShowBulkPaymentArModal(false)} 
+                disabled={isBulkPayingAr}
+                className="p-2 hover:bg-emerald-500 rounded-full transition-colors disabled:opacity-50"
+              >
+                <X className="w-6 h-6" />
+              </button>
+            </div>
+            
+            <form onSubmit={handleBulkPaymentArSave} className="p-6 md:p-8 space-y-5 max-h-[80vh] overflow-y-auto font-sans">
+              {/* Summary card */}
+              <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-4 flex items-center justify-between">
+                <div>
+                  <p className="text-xs font-bold text-emerald-800 uppercase tracking-wider">Total a Liquidar</p>
+                  <p className="text-2xl font-black text-emerald-950">
+                    ${totalSelectedArDebt.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} <span className="text-xs font-bold text-emerald-700">USD</span>
+                  </p>
+                </div>
+                <div className="text-right">
+                  <span className="inline-block px-3 py-1 bg-emerald-200/80 text-emerald-900 text-xs font-black rounded-lg border border-emerald-300">
+                    {selectedArIds.length} {selectedArIds.length === 1 ? 'Póliza' : 'Pólizas'}
+                  </span>
+                </div>
+              </div>
+
+              {/* Collapsible preview of selected policies */}
+              <div className="border border-gray-200 rounded-2xl p-3 bg-gray-50/50 max-h-36 overflow-y-auto space-y-1.5 text-xs">
+                <p className="font-bold text-gray-500 uppercase tracking-wider text-[10.5px] mb-1">Pólizas en este lote:</p>
+                {selectedArPolicies.map((p) => (
+                  <div key={p.id} className="flex justify-between items-center py-1.5 px-2.5 bg-white rounded-lg border border-gray-150">
+                    <span className="font-semibold text-gray-800 truncate max-w-[260px]">
+                      {p.firstName} {p.lastName} {p.policyId ? `(${p.policyId})` : ''}
+                    </span>
+                    <span className="font-bold text-rose-600 whitespace-nowrap">
+                      ${(p.balance || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD
+                    </span>
+                  </div>
+                ))}
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Fecha de Pago */}
+                <div>
+                  <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-1.5">
+                    Fecha de Pago <span className="text-rose-500">*</span>
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    value={bulkPaymentArData.date}
+                    onChange={(e) => setBulkPaymentArData({ ...bulkPaymentArData, date: e.target.value })}
+                    className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:bg-white outline-none font-semibold text-sm transition-all text-gray-900"
+                  />
+                </div>
+
+                {/* Forma de Pago */}
+                <div>
+                  <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-1.5">
+                    Forma de Pago <span className="text-rose-500">*</span>
+                  </label>
+                  <select
+                    required
+                    value={bulkPaymentArData.paymentMethod}
+                    onChange={(e) => setBulkPaymentArData({ ...bulkPaymentArData, paymentMethod: e.target.value })}
+                    className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:bg-white outline-none font-semibold text-sm text-gray-900 transition-all"
+                  >
+                    <option value="">Selecciona forma de pago...</option>
+                    {paymentMethods && paymentMethods.filter(m => m.status === 'active').length > 0 ? (
+                      paymentMethods
+                        .filter(m => m.status === 'active')
+                        .sort((a, b) => a.name.localeCompare(b.name))
+                        .map(m => (
+                          <option key={m.id} value={m.name}>{m.name}</option>
+                        ))
+                    ) : (
+                      <>
+                        <option value="Transferencia Bancaria">Transferencia Bancaria</option>
+                        <option value="Tarjeta de Crédito">Tarjeta de Crédito</option>
+                        <option value="Tarjeta de Débito">Tarjeta de Débito</option>
+                        <option value="Efectivo">Efectivo</option>
+                        <option value="Depósito">Depósito</option>
+                        <option value="Zelle">Zelle</option>
+                        <option value="Stripe">Stripe</option>
+                        <option value="Cheque">Cheque</option>
+                      </>
+                    )}
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {/* Recibo / Referencia */}
+                <div>
+                  <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-1.5">
+                    Recibo / Referencia <span className="text-rose-500">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="Ej. REC-2026-001 / TRANSF-8910"
+                    value={bulkPaymentArData.receiptNumber}
+                    onChange={(e) => setBulkPaymentArData({ ...bulkPaymentArData, receiptNumber: e.target.value })}
+                    className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:bg-white outline-none font-semibold text-sm transition-all text-gray-900"
+                  />
+                </div>
+
+                {/* Cuenta de Depósito (Opcional) */}
+                <div>
+                  <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-1.5">
+                    Cuenta de Depósito / Banco
+                  </label>
+                  <input
+                    type="text"
+                    list="depositAccountsListAr"
+                    placeholder="Ej. Banamex / Chase / Stripe"
+                    value={bulkPaymentArData.depositAccount}
+                    onChange={(e) => setBulkPaymentArData({ ...bulkPaymentArData, depositAccount: e.target.value })}
+                    className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:bg-white outline-none font-semibold text-sm transition-all text-gray-900"
+                  />
+                  <datalist id="depositAccountsListAr">
+                    {uniqueAccountsList.map((ac, idx) => (
+                      <option key={idx} value={ac} />
+                    ))}
+                  </datalist>
+                </div>
+              </div>
+
+              {/* Notas / Observaciones */}
+              <div>
+                <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-1.5">
+                  Notas / Observaciones (Opcional)
+                </label>
+                <textarea
+                  rows={2}
+                  placeholder="Detalles u observaciones del lote de pago masivo..."
+                  value={bulkPaymentArData.notes}
+                  onChange={(e) => setBulkPaymentArData({ ...bulkPaymentArData, notes: e.target.value })}
+                  className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-emerald-500 focus:bg-white outline-none font-medium text-sm transition-all resize-none text-gray-900"
+                />
+              </div>
+
+              <div className="flex gap-3 pt-3">
+                <button
+                  type="button"
+                  onClick={() => setShowBulkPaymentArModal(false)}
+                  disabled={isBulkPayingAr}
+                  className="flex-1 px-6 py-3 border border-gray-200 text-gray-700 font-bold rounded-xl hover:bg-gray-50 transition-all text-sm disabled:opacity-50"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={isBulkPayingAr || !bulkPaymentArData.paymentMethod || !bulkPaymentArData.date || !bulkPaymentArData.receiptNumber.trim()}
+                  className="flex-1 px-6 py-3 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl transition-all shadow-lg shadow-emerald-200 disabled:opacity-50 flex items-center justify-center gap-2 text-sm"
+                >
+                  {isBulkPayingAr ? (
+                    <>
+                      <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                      <span>Procesando ({selectedArIds.length})...</span>
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle className="w-4 h-4" />
+                      <span>Confirmar Pago Masivo</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

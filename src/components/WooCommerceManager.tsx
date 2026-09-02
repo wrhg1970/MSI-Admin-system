@@ -31,6 +31,7 @@ import {
   Info
 } from 'lucide-react';
 import ConfirmModal from './ConfirmModal';
+import { parseWooMetadata as parseWooCommerceMetadata } from '../services/woocommerce';
 
 interface WooConfig {
   storeUrl: string;
@@ -41,6 +42,7 @@ interface WooConfig {
   defaultDurationDays: number;
   autoSyncEnabled?: boolean;
   syncSchedules?: { time: string; enabled: boolean }[];
+  webhookSecret?: string;
 }
 
 export default function WooCommerceManager() {
@@ -56,7 +58,8 @@ export default function WooCommerceManager() {
     syncSchedules: [
       { time: '08:00', enabled: true },
       { time: '18:00', enabled: true }
-    ]
+    ],
+    webhookSecret: ''
   });
 
   const [syncTab, setSyncTab] = useState<'pending' | 'synced' | 'all'>('pending');
@@ -91,6 +94,7 @@ export default function WooCommerceManager() {
     firstName?: string;
     lastName?: string;
     email?: string;
+    phone?: string;
     birthDate?: string;
     destinationCountry?: string;
     gender?: 'M' | 'F' | string;
@@ -145,7 +149,8 @@ export default function WooCommerceManager() {
           syncSchedules: savedData.syncSchedules || [
             { time: '08:00', enabled: true },
             { time: '18:00', enabled: true }
-          ]
+          ],
+          webhookSecret: savedData.webhookSecret || ''
         }));
       }
 
@@ -280,43 +285,23 @@ export default function WooCommerceManager() {
 
   // Custom metadata parsing helper to auto-extract date and region fields
   const parseWooMetadata = (order: any, lineItem: any) => {
+    const parsed = parseWooCommerceMetadata(order, lineItem, {
+      storeUrl: config.storeUrl,
+      consumerKey: config.consumerKey,
+      consumerSecret: config.consumerSecret,
+      mappings: config.mappings,
+      defaultStartDate: config.defaultStartDate,
+      defaultDurationDays: config.defaultDurationDays
+    });
+
+    let gender = '';
     const combinedMetaData = [
       ...(order.meta_data || []),
       ...(lineItem.meta_data || [])
     ];
-
-    let extractedStartDate = '';
-    let extractedEndDate = '';
-    let extractedBirthDate = '';
-    let originCountry = '';
-    let destinationCountry = '';
-    let isExtreme = false;
-    let gender = '';
-    let city = '';
-
-    // Standard meta_data keys mapping helper
     combinedMetaData.forEach((meta: any) => {
       const key = String(meta.key || '').toLowerCase();
       const val = String(meta.value || '').trim();
-
-      if (key.includes('inicio') || key.includes('start_date') || key.includes('fecha_inicio')) {
-        extractedStartDate = val.split(' ')[0]; // clean possible time element
-      }
-      if (key.includes('fin') || key.includes('end_date') || key.includes('fecha_fin')) {
-        extractedEndDate = val.split(' ')[0];
-      }
-      if (key.includes('nacimiento') || key.includes('birth_date') || key.includes('fecha_nacimiento') || key.includes('birthdate')) {
-        extractedBirthDate = val.split(' ')[0];
-      }
-      if (key.includes('origen') || key.includes('origin')) {
-        originCountry = val;
-      }
-      if (key.includes('destino') || key.includes('destination')) {
-        destinationCountry = val;
-      }
-      if (key.includes('extremo') || key.includes('extreme')) {
-        isExtreme = val.toLowerCase() === 'yes' || val.toLowerCase() === 'si' || val === '1' || val.toLowerCase() === 'true';
-      }
       if (key.includes('genero') || key.includes('género') || key.includes('gender') || key.includes('sexo') || key.includes('sex')) {
         const lowerVal = val.toLowerCase();
         if (lowerVal.startsWith('m') || lowerVal.includes('masculino') || lowerVal.includes('male') || lowerVal === 'hombre') {
@@ -325,26 +310,11 @@ export default function WooCommerceManager() {
           gender = 'F';
         }
       }
-      if (key.includes('ciudad') || key.includes('city') || key.includes('location')) {
-        city = val;
-      }
     });
 
-    // Clean dates to check standard ISO YYYY-MM-DD
-    const isoDateReg = /^\d{4}-\d{2}-\d{2}$/;
-    if (!isoDateReg.test(extractedStartDate)) extractedStartDate = '';
-    if (!isoDateReg.test(extractedEndDate)) extractedEndDate = '';
-    if (!isoDateReg.test(extractedBirthDate)) extractedBirthDate = '';
-
     return {
-      startDate: extractedStartDate,
-      endDate: extractedEndDate,
-      birthDate: extractedBirthDate,
-      originCountry: originCountry || order.billing?.country || 'MX',
-      destinationCountry: destinationCountry || 'US',
-      isExtreme,
-      gender,
-      city: city || order.billing?.city || ''
+      ...parsed,
+      gender
     };
   };
 
@@ -421,16 +391,17 @@ export default function WooCommerceManager() {
           const extractedMeta = parseWooMetadata(order, item);
           const customValues = customOrderMappings[itemKey] || {};
 
-          // Resolve primary client fields (with fallback to order billing info)
-          const firstNameVal = (customValues.firstName || order.billing?.first_name || 'Woo').trim();
-          const lastNameVal = (customValues.lastName || order.billing?.last_name || 'Customer').trim();
-          const emailVal = (customValues.email || order.billing?.email || '').trim().toLowerCase();
+          // Resolve primary client fields (with fallback to parsed insured info, then billing info)
+          const firstNameVal = (customValues.firstName || extractedMeta.insuredFirstName || order.billing?.first_name || 'Woo').trim();
+          const lastNameVal = (customValues.lastName || extractedMeta.insuredLastName || order.billing?.last_name || 'Customer').trim();
+          const emailVal = (customValues.email || extractedMeta.insuredEmail || order.billing?.email || '').trim().toLowerCase();
           const birthDateVal = customValues.birthDate || extractedMeta.birthDate || config.defaultStartDate;
           const destinationVal = customValues.destinationCountry || extractedMeta.destinationCountry || 'US';
           const startDateVal = customValues.startDate || extractedMeta.startDate || config.defaultStartDate;
           let endDateVal = customValues.endDate || extractedMeta.endDate;
           const genderVal = customValues.gender || extractedMeta.gender || '';
           const cityVal = customValues.city || extractedMeta.city || order.billing?.city || '';
+          const phoneVal = (customValues.phone || extractedMeta.insuredPhone || order.billing?.phone || '').trim();
 
           if (!emailVal) {
             addLog(`❌ Error: El producto "${item.name}" en la orden #${order.id} no contiene correo de cliente. Se omite.`);
@@ -467,7 +438,7 @@ export default function WooCommerceManager() {
               firstName: firstNameVal,
               lastName: lastNameVal,
               email: emailVal,
-              phone: order.billing?.phone || '',
+              phone: phoneVal,
               address: order.billing?.address_1 || '',
               city: cityVal,
               state: order.billing?.state || '',
@@ -683,6 +654,20 @@ export default function WooCommerceManager() {
                           className="w-full px-4 py-3 rounded-xl border border-gray-200 font-mono text-xs focus:ring-2 focus:ring-blue-500 focus:outline-none transition-all"
                         />
                       </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-bold text-gray-700 uppercase tracking-wider mb-2">Secreto del Webhook WooCommerce (Recomendado para validación HMAC-SHA256)</label>
+                      <input 
+                        type="password" 
+                        placeholder="Ingresa la clave secreta del webhook definida en WordPress"
+                        value={config.webhookSecret || ''}
+                        onChange={e => setConfig({ ...config, webhookSecret: e.target.value })}
+                        className="w-full px-4 py-3 rounded-xl border border-gray-200 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none transition-all"
+                      />
+                      <p className="text-[10px] text-gray-400 mt-1">
+                        Si se proporciona, todas las notificaciones recibidas en el endpoint del webhook serán validadas usando firma HMAC-SHA256 para prevenir solicitudes no autorizadas.
+                      </p>
                     </div>
                   </div>
 
@@ -1188,9 +1173,9 @@ export default function WooCommerceManager() {
                             const customValues = customOrderMappings[itemKey] || {};
                             
                             // Resolve customized traveller parameters with default fallbacks
-                            const firstNameVal = customValues.firstName || order.billing?.first_name || 'Woo';
-                            const lastNameVal = customValues.lastName || order.billing?.last_name || 'Customer';
-                            const emailVal = customValues.email || order.billing?.email || '';
+                            const firstNameVal = customValues.firstName || pMetaData.insuredFirstName || order.billing?.first_name || 'Woo';
+                            const lastNameVal = customValues.lastName || pMetaData.insuredLastName || order.billing?.last_name || 'Customer';
+                            const emailVal = customValues.email || pMetaData.insuredEmail || order.billing?.email || '';
                             const birthDateVal = customValues.birthDate || pMetaData.birthDate || config.defaultStartDate;
                             const destinationVal = customValues.destinationCountry || pMetaData.destinationCountry || 'US';
                             const genderVal = customValues.gender || pMetaData.gender || '';

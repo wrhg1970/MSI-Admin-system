@@ -9,6 +9,13 @@ import ConfirmModal from './ConfirmModal';
 import GoogleContactsImportModal from './GoogleContactsImportModal';
 import { usePermissions } from '../hooks/usePermissions';
 import Papa from 'papaparse';
+import { useFirestoreData } from '../context/FirestoreDataContext';
+import jsPDF from 'jspdf';
+import autoTable from 'jspdf-autotable';
+import { format } from 'date-fns';
+import { useCompany } from '../App';
+import { loadLogoData } from '../lib/pdfGenerator';
+import { APP_LOGO } from '../constants';
 
 interface ClientsManagerProps {
   profile: UserProfile | null;
@@ -17,8 +24,8 @@ interface ClientsManagerProps {
 
 export default function ClientsManager({ profile, rolePermissions }: ClientsManagerProps) {
   const { hasPermission } = usePermissions(profile, rolePermissions);
-  const [clients, setClients] = useState<Client[]>([]);
-  const [countries, setCountries] = useState<Country[]>([]);
+  const { clients, countries } = useFirestoreData();
+  const { settings: companySettings } = useCompany();
   const [editingClient, setEditingClient] = useState<Client | null>(null);
   const [isAddingClient, setIsAddingClient] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
@@ -27,17 +34,23 @@ export default function ClientsManager({ profile, rolePermissions }: ClientsMana
   const [selectedClientForTransactions, setSelectedClientForTransactions] = useState<string | null>(null);
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
   const [selectedClientForDetail, setSelectedClientForDetail] = useState<Client | null>(null);
+  const [isExportingPDF, setIsExportingPDF] = useState(false);
   
   // Pagination
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
 
   // Duplicates State
-  const [activeView, setActiveView] = useState<'all' | 'duplicates'>('all');
+  const [activeView, setActiveView] = useState<'all' | 'duplicates' | 'subagents'>('all');
   const [matchCriterion, setMatchCriterion] = useState<'name' | 'email' | 'phone'>('name');
   const [selectedDuplicateIds, setSelectedDuplicateIds] = useState<string[]>([]);
   const [isDeletingDuplicates, setIsDeletingDuplicates] = useState(false);
   const [isImportingContacts, setIsImportingContacts] = useState(false);
+  const [subagentsSearch, setSubagentsSearch] = useState('');
+  const [editedClients, setEditedClients] = useState<{[clientId: string]: Client}>({});
+  const [subagentsTypeFilter, setSubagentsTypeFilter] = useState<'all' | 'Agent' | 'Corporate'>('all');
+  const [subagentsCommissionFilter, setSubagentsCommissionFilter] = useState<string>('');
+  const [subagentsSortBy, setSubagentsSortBy] = useState<'name-asc' | 'name-desc' | 'commission-asc' | 'commission-desc'>('name-asc');
 
   // Helper to format timestamps or date objects in the duplicates table
   const formatTimestamp = (ts: any) => {
@@ -55,6 +68,448 @@ export default function ClientsManager({ profile, rolePermissions }: ClientsMana
       hour: '2-digit',
       minute: '2-digit'
     });
+  };
+
+  const getClientData = (client: Client) => {
+    return editedClients[client.id!] || client;
+  };
+
+  const isParentCommissionModified = (client: Client) => {
+    const current = editedClients[client.id!];
+    if (!current) return false;
+    return (current.commission ?? 0) !== (client.commission ?? 0);
+  };
+
+  const isParentDiscountModified = (client: Client) => {
+    const current = editedClients[client.id!];
+    if (!current) return false;
+    return (current.discountPercentage ?? 0) !== (client.discountPercentage ?? 0);
+  };
+
+  const isSubagentCommissionModified = (client: Client, subagentId: string) => {
+    const current = editedClients[client.id!];
+    if (!current || !current.linkedAgents) return false;
+    const originalSa = client.linkedAgents?.find(sa => sa.id === subagentId);
+    const currentSa = current.linkedAgents.find(sa => sa.id === subagentId);
+    if (!currentSa) return false;
+    return (currentSa.commission ?? 0) !== (originalSa?.commission ?? 0);
+  };
+
+  const isSubagentDiscountModified = (client: Client, subagentId: string) => {
+    const current = editedClients[client.id!];
+    if (!current || !current.linkedAgents) return false;
+    const originalSa = client.linkedAgents?.find(sa => sa.id === subagentId);
+    const currentSa = current.linkedAgents.find(sa => sa.id === subagentId);
+    if (!currentSa) return false;
+    return (currentSa.discountPercentage ?? 0) !== (originalSa?.discountPercentage ?? 0);
+  };
+
+  const handleClientCommissionChange = (client: Client, val: number) => {
+    const current = getClientData(client);
+    setEditedClients(prev => ({
+      ...prev,
+      [client.id!]: {
+        ...current,
+        commission: isNaN(val) ? 0 : val
+      }
+    }));
+  };
+
+  const handleClientDiscountChange = (client: Client, val: number) => {
+    const current = getClientData(client);
+    setEditedClients(prev => ({
+      ...prev,
+      [client.id!]: {
+        ...current,
+        discountPercentage: isNaN(val) ? 0 : val
+      }
+    }));
+  };
+
+  const handleSubagentChange = (client: Client, subagentId: string, field: 'commission' | 'discountPercentage', val: number) => {
+    const current = getClientData(client);
+    const updatedLinkedAgents = (current.linkedAgents || []).map(sa => {
+      if (sa.id === subagentId) {
+        return {
+          ...sa,
+          [field]: isNaN(val) ? 0 : val
+        };
+      }
+      return sa;
+    });
+    setEditedClients(prev => ({
+      ...prev,
+      [client.id!]: {
+        ...current,
+        linkedAgents: updatedLinkedAgents
+      }
+    }));
+  };
+
+  const handleSaveQuickEdits = async (clientId: string) => {
+    const editedData = editedClients[clientId];
+    if (!editedData) return;
+
+    try {
+      const cleanData: any = {
+        commission: typeof editedData.commission === 'number' && !isNaN(editedData.commission) ? editedData.commission : 0,
+        discountPercentage: typeof editedData.discountPercentage === 'number' && !isNaN(editedData.discountPercentage) ? editedData.discountPercentage : 0,
+      };
+
+      if (editedData.linkedAgents) {
+        cleanData.linkedAgents = editedData.linkedAgents.map((agent: any) => ({
+          id: agent.id || Math.random().toString(36).substr(2, 9),
+          name: agent.name || '',
+          phone: agent.phone || '',
+          email: agent.email || '',
+          commission: typeof agent.commission === 'number' && !isNaN(agent.commission) ? agent.commission : 0,
+          discountPercentage: typeof agent.discountPercentage === 'number' && !isNaN(agent.discountPercentage) ? agent.discountPercentage : 0
+        }));
+      }
+
+      await updateDoc(doc(db, 'clients', clientId), cleanData);
+      
+      // Remove from editedClients to reset status
+      setEditedClients(prev => {
+        const copy = { ...prev };
+        delete copy[clientId];
+        return copy;
+      });
+    } catch (error) {
+      handleFirestoreError(error, OperationType.WRITE, `clients/${clientId}`);
+    }
+  };
+
+  const handleCancelQuickEdits = (clientId: string) => {
+    setEditedClients(prev => {
+      const copy = { ...prev };
+      delete copy[clientId];
+      return copy;
+    });
+  };
+
+  const filteredSubagentClients = useMemo(() => {
+    let list = clients.filter(c => c.type === 'Agent' || c.type === 'Corporate');
+
+    // 1. Filter by Client Type (Agent vs Corporate)
+    if (subagentsTypeFilter !== 'all') {
+      list = list.filter(c => c.type === subagentsTypeFilter);
+    }
+
+    // 2. Filter by Commission value (checks parent or subagents)
+    if (subagentsCommissionFilter.trim() !== '') {
+      const minComm = parseFloat(subagentsCommissionFilter);
+      if (!isNaN(minComm)) {
+        list = list.filter(c => {
+          const clientData = getClientData(c);
+          const parentComm = clientData.commission ?? 0;
+          const anySubagentComm = clientData.linkedAgents?.some(sa => (sa.commission ?? 0) >= minComm) ?? false;
+          return parentComm >= minComm || anySubagentComm;
+        });
+      }
+    }
+
+    // 3. Search Term (Name/Email/Subagent)
+    if (subagentsSearch.trim()) {
+      const searchLower = subagentsSearch.toLowerCase();
+      list = list.filter(c => {
+        const clientData = getClientData(c);
+        const name = (c.commercialName || c.legalName || '').toLowerCase();
+        const matchesMain = name.includes(searchLower) || c.email.toLowerCase().includes(searchLower);
+        
+        const matchesSubagent = clientData.linkedAgents?.some(sa => 
+          sa.name.toLowerCase().includes(searchLower) || sa.email.toLowerCase().includes(searchLower)
+        );
+        
+        return matchesMain || matchesSubagent;
+      });
+    }
+
+    // 4. Sort
+    list = [...list].sort((a, b) => {
+      const clientDataA = getClientData(a);
+      const clientDataB = getClientData(b);
+      const nameA = (a.commercialName || a.legalName || '').toLowerCase();
+      const nameB = (b.commercialName || b.legalName || '').toLowerCase();
+      const commA = clientDataA.commission ?? 0;
+      const commB = clientDataB.commission ?? 0;
+
+      if (subagentsSortBy === 'name-asc') {
+        return nameA.localeCompare(nameB);
+      } else if (subagentsSortBy === 'name-desc') {
+        return nameB.localeCompare(nameA);
+      } else if (subagentsSortBy === 'commission-asc') {
+        return commA - commB;
+      } else if (subagentsSortBy === 'commission-desc') {
+        return commB - commA;
+      }
+      return 0;
+    });
+
+    return list;
+  }, [clients, subagentsSearch, subagentsTypeFilter, subagentsCommissionFilter, subagentsSortBy, editedClients]);
+
+  const handleExportSubagentsPDF = async () => {
+    try {
+      setIsExportingPDF(true);
+      // Landscape Letter (279.4 x 215.9 mm)
+      const doc = new jsPDF({
+        orientation: 'l',
+        unit: 'mm',
+        format: 'letter'
+      });
+      const pageWidth = doc.internal.pageSize.getWidth();
+      const pageHeight = doc.internal.pageSize.getHeight();
+      const margin = 10;
+      const contentWidth = pageWidth - (margin * 2);
+
+      // 1. Top Header Bar (#1A2138)
+      const headerBarHeight = 18;
+      doc.setFillColor(26, 33, 56);
+      doc.rect(0, 0, pageWidth, headerBarHeight, 'F');
+
+      // Title
+      doc.setFont('helvetica', 'bold');
+      doc.setFontSize(14);
+      doc.setTextColor(255, 255, 255);
+      doc.text('REPORTE DE COMISIONES - AGENTES Y SUBAGENTES', margin, 8);
+
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(9.5);
+      doc.setTextColor(203, 213, 225); // slate-300
+      doc.text('Mi Seguro Internacional  |  Estructura Comercial y Tabulador de Comisiones', margin, 13.5);
+
+      // Add Company Logo
+      try {
+        const logoUrl = companySettings?.logoUrlDark || companySettings?.logoUrl || APP_LOGO;
+        const logoData = await loadLogoData(logoUrl);
+        if (logoData) {
+          const ratio = logoData.width / logoData.height;
+          let renderHeight = 11;
+          let renderWidth = renderHeight * ratio;
+          if (renderWidth > 45) {
+            renderWidth = 45;
+            renderHeight = renderWidth / ratio;
+          }
+          const logoY = (headerBarHeight - renderHeight) / 2;
+          doc.addImage(logoData.url, 'PNG', pageWidth - renderWidth - margin, logoY, renderWidth, renderHeight);
+        }
+      } catch (err) {
+        console.error('Error adding logo to subagents PDF report:', err);
+      }
+
+      // Calculate totals & stats
+      let totalAgents = 0;
+      let totalCorporates = 0;
+      let totalSubagents = 0;
+      let sumCommParents = 0;
+      let countCommParents = 0;
+      let sumCommSubagents = 0;
+      let countCommSubagents = 0;
+
+      const tableRows: any[] = [];
+
+      filteredSubagentClients.forEach(c => {
+        const clientData = getClientData(c);
+        const displayName = c.type === 'Individual' 
+          ? `${c.firstName} ${c.lastName}` 
+          : (c.commercialName || c.legalName || 'Sin nombre');
+        const typeLabel = c.type === 'Agent' ? 'Agente' : 'Corporativo';
+        if (c.type === 'Agent') totalAgents++;
+        if (c.type === 'Corporate') totalCorporates++;
+
+        const parentComm = clientData.commission ?? 0;
+        const parentDisc = clientData.discountPercentage ?? 0;
+        sumCommParents += parentComm;
+        countCommParents++;
+
+        // Parent row
+        tableRows.push({
+          isParent: true,
+          data: [
+            typeLabel,
+            displayName,
+            '— (Principal)',
+            c.email || '-',
+            c.phone || '-',
+            `${parentComm.toFixed(1)}%`,
+            `${parentDisc.toFixed(1)}%`
+          ]
+        });
+
+        // Subagents rows
+        if (clientData.linkedAgents && clientData.linkedAgents.length > 0) {
+          clientData.linkedAgents.forEach(sa => {
+            totalSubagents++;
+            const saComm = sa.commission ?? 0;
+            const saDisc = sa.discountPercentage ?? 0;
+            sumCommSubagents += saComm;
+            countCommSubagents++;
+
+            tableRows.push({
+              isParent: false,
+              data: [
+                'Subagente',
+                `   ↳ ${sa.name || 'Sin nombre'}`,
+                displayName,
+                sa.email || '-',
+                sa.phone || '-',
+                `${saComm.toFixed(1)}%`,
+                `${saDisc.toFixed(1)}%`
+              ]
+            });
+          });
+        }
+      });
+
+      const avgCommParent = countCommParents > 0 ? (sumCommParents / countCommParents).toFixed(1) : '0.0';
+      const avgCommSub = countCommSubagents > 0 ? (sumCommSubagents / countCommSubagents).toFixed(1) : '0.0';
+
+      // 2. Metadata / Summary Strip (Compact line)
+      const todayStr = format(new Date(), 'dd/MM/yyyy HH:mm');
+      doc.setTextColor(51, 65, 85); // slate-700
+      doc.setFontSize(9.5);
+      doc.setFont('helvetica', 'bold');
+      doc.text(`Emisión: ${todayStr}  |  Agentes: ${totalAgents}  |  Corp: ${totalCorporates}  |  Subagentes: ${totalSubagents}  |  Total: ${tableRows.length}`, margin, 22.5);
+
+      doc.setFont('helvetica', 'normal');
+      doc.setFontSize(9.0);
+      doc.setTextColor(100, 116, 139);
+      const rightSummaryText = `Prom. Agentes: ${avgCommParent}%  |  Prom. Subagentes: ${avgCommSub}%${subagentsTypeFilter !== 'all' ? `  |  Filtro: ${subagentsTypeFilter}` : ''}`;
+      doc.text(rightSummaryText, pageWidth - margin, 22.5, { align: 'right' });
+
+      // Dynamic sizing to guarantee exact 1-sheet fit (Letter Landscape)
+      const numRows = Math.max(tableRows.length, 1);
+      let dynamicFontSize = 9.5;
+      let dynamicPadding = 1.6;
+      let dynamicHeadFontSize = 9.8;
+      let dynamicHeadPadding = 2.0;
+
+      if (numRows > 18 && numRows <= 28) {
+        dynamicFontSize = 8.8;
+        dynamicPadding = 1.1;
+        dynamicHeadFontSize = 9.2;
+        dynamicHeadPadding = 1.4;
+      } else if (numRows > 28 && numRows <= 40) {
+        dynamicFontSize = 8.0;
+        dynamicPadding = 0.7;
+        dynamicHeadFontSize = 8.4;
+        dynamicHeadPadding = 1.0;
+      } else if (numRows > 40 && numRows <= 55) {
+        dynamicFontSize = 7.2;
+        dynamicPadding = 0.45;
+        dynamicHeadFontSize = 7.6;
+        dynamicHeadPadding = 0.7;
+      } else if (numRows > 55) {
+        dynamicFontSize = 6.5;
+        dynamicPadding = 0.25;
+        dynamicHeadFontSize = 7.0;
+        dynamicHeadPadding = 0.45;
+      }
+
+      // AutoTable
+      autoTable(doc, {
+        startY: 25,
+        margin: { left: margin, right: margin, top: 25, bottom: 8 },
+        pageBreak: 'avoid',
+        head: [[
+          'Tipo',
+          'Nombre / Razón Social',
+          'Agente Principal',
+          'Email',
+          'Teléfono',
+          'Comisión (%)',
+          'Descuento (%)'
+        ]],
+        body: tableRows.map(r => r.data),
+        theme: 'grid',
+        headStyles: {
+          fillColor: [26, 33, 56],
+          textColor: [255, 255, 255],
+          fontSize: dynamicHeadFontSize,
+          fontStyle: 'bold',
+          halign: 'center',
+          cellPadding: dynamicHeadPadding
+        },
+        styles: {
+          fontSize: dynamicFontSize,
+          cellPadding: dynamicPadding,
+          textColor: [30, 41, 59],
+          lineColor: [226, 232, 240],
+          lineWidth: 0.15,
+          overflow: 'ellipsize'
+        },
+        columnStyles: {
+          0: { halign: 'center', cellWidth: 24 }, // Tipo
+          1: { halign: 'left', cellWidth: 65 },   // Nombre
+          2: { halign: 'left', cellWidth: 52 },   // Agente Principal
+          3: { halign: 'left', cellWidth: 57 },   // Email
+          4: { halign: 'center', cellWidth: 29 }, // Telefono
+          5: { halign: 'right', cellWidth: 17 },  // Comision
+          6: { halign: 'right', cellWidth: 15.4 } // Descuento
+        },
+        didParseCell: (data) => {
+          if (data.section === 'body') {
+            const rowInfo = tableRows[data.row.index];
+            if (rowInfo) {
+              if (rowInfo.isParent) {
+                // Parent row style
+                if (data.column.index === 0) {
+                  data.cell.styles.fontStyle = 'bold';
+                  data.cell.styles.textColor = [79, 70, 229]; // indigo-600
+                }
+                if (data.column.index === 1) {
+                  data.cell.styles.fontStyle = 'bold';
+                  data.cell.styles.textColor = [15, 23, 42]; // slate-900
+                }
+                if (data.column.index === 5) {
+                  data.cell.styles.fontStyle = 'bold';
+                  data.cell.styles.textColor = [30, 41, 59];
+                }
+                if (data.column.index === 6) {
+                  data.cell.styles.fontStyle = 'bold';
+                  data.cell.styles.textColor = [22, 101, 52]; // green-800
+                }
+              } else {
+                // Subagent row style
+                data.cell.styles.fillColor = [248, 250, 252]; // slate-50
+                if (data.column.index === 0) {
+                  data.cell.styles.textColor = [100, 116, 139]; // slate-500
+                }
+                if (data.column.index === 1) {
+                  data.cell.styles.textColor = [51, 65, 85]; // slate-700
+                  data.cell.styles.fontStyle = 'normal';
+                }
+                if (data.column.index === 2) {
+                  data.cell.styles.textColor = [100, 116, 139];
+                  data.cell.styles.fontStyle = 'italic';
+                }
+                if (data.column.index === 5) {
+                  data.cell.styles.fontStyle = 'bold';
+                  data.cell.styles.textColor = [79, 70, 229]; // indigo-600
+                }
+                if (data.column.index === 6) {
+                  data.cell.styles.textColor = [22, 101, 52];
+                }
+              }
+            }
+          }
+        },
+        didDrawPage: () => {
+          doc.setFontSize(8.5);
+          doc.setFont('helvetica', 'normal');
+          doc.setTextColor(148, 163, 184); // slate-400
+          doc.text('Mi Seguro Internacional  •  Documento Confidencial de Comisiones y Descuentos  •  Página 1 de 1 (Carta)', pageWidth / 2, pageHeight - 4, { align: 'center' });
+        }
+      });
+
+      const dateFileStr = format(new Date(), 'yyyyMMdd_HHmm');
+      doc.save(`Reporte_Comisiones_Agentes_Subagentes_${dateFileStr}.pdf`);
+    } catch (err) {
+      console.error('Error generating Subagents Commissions PDF report:', err);
+    } finally {
+      setIsExportingPDF(false);
+    }
   };
 
   const duplicateGroups = useMemo(() => {
@@ -230,26 +685,23 @@ export default function ClientsManager({ profile, rolePermissions }: ClientsMana
     URL.revokeObjectURL(url);
   };
 
-  useEffect(() => {
-    if (!profile || !hasPermission('clients')) return;
+  const startEditingClient = (client: Client) => {
+    // Ensure all linked agents have an ID and correct types
+    const cleanedLinkedAgents = client.linkedAgents?.map((agent, idx) => ({
+      id: agent.id || Math.random().toString(36).substr(2, 9) || `la-${idx}`,
+      name: agent.name || '',
+      phone: agent.phone || '',
+      email: agent.email || '',
+      commission: typeof agent.commission === 'number' && !isNaN(agent.commission) ? agent.commission : 0,
+      discountPercentage: typeof agent.discountPercentage === 'number' && !isNaN(agent.discountPercentage) ? agent.discountPercentage : 0
+    }));
 
-    const unsubClients = onSnapshot(query(collection(db, 'clients'), orderBy('createdAt', 'desc')), (snap) => {
-      setClients(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Client)));
-    }, (error) => {
-      handleFirestoreError(error, OperationType.GET, 'clients');
+    setEditingClient({
+      ...client,
+      linkedAgents: cleanedLinkedAgents
     });
-
-    const unsubCountries = onSnapshot(query(collection(db, 'countries'), orderBy('name')), (snap) => {
-      setCountries(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Country)));
-    }, (error) => {
-      handleFirestoreError(error, OperationType.GET, 'countries');
-    });
-
-    return () => {
-      unsubClients();
-      unsubCountries();
-    };
-  }, []);
+    setActiveFormTab('general');
+  };
 
   const handleSaveClient = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -280,15 +732,14 @@ export default function ClientsManager({ profile, rolePermissions }: ClientsMana
       // Special handling for nested linkedAgents to clean them up
       if (cleanData.linkedAgents && Array.isArray(cleanData.linkedAgents)) {
         cleanData.linkedAgents = cleanData.linkedAgents.map((agent: any) => {
-          const cleanedAgent = { ...agent };
-          Object.keys(cleanedAgent).forEach(k => {
-            if (cleanedAgent[k] === undefined) {
-              cleanedAgent[k] = '';
-            } else if (typeof cleanedAgent[k] === 'number' && isNaN(cleanedAgent[k])) {
-              cleanedAgent[k] = 0;
-            }
-          });
-          return cleanedAgent;
+          return {
+            id: agent.id || Math.random().toString(36).substr(2, 9),
+            name: agent.name || '',
+            phone: agent.phone || '',
+            email: agent.email || '',
+            commission: typeof agent.commission === 'number' && !isNaN(agent.commission) ? agent.commission : 0,
+            discountPercentage: typeof agent.discountPercentage === 'number' && !isNaN(agent.discountPercentage) ? agent.discountPercentage : 0
+          };
         });
       }
 
@@ -452,10 +903,10 @@ export default function ClientsManager({ profile, rolePermissions }: ClientsMana
       </header>
 
       {/* View Selector Tabs */}
-      <div className="flex border-b border-gray-200 mt-4">
+      <div className="flex border-b border-gray-200 mt-4 overflow-x-auto scrollbar-thin">
         <button
           onClick={() => setActiveView('all')}
-          className={`py-3 px-6 text-sm font-black border-b-2 transition-all ${
+          className={`py-3 px-6 text-sm font-black border-b-2 transition-all whitespace-nowrap ${
             activeView === 'all'
               ? 'border-blue-600 text-blue-600'
               : 'border-transparent text-gray-500 hover:text-gray-700'
@@ -464,8 +915,19 @@ export default function ClientsManager({ profile, rolePermissions }: ClientsMana
           Todos los Clientes ({clients.length})
         </button>
         <button
+          onClick={() => setActiveView('subagents')}
+          className={`py-3 px-6 text-sm font-black border-b-2 transition-all flex items-center gap-2 whitespace-nowrap ${
+            activeView === 'subagents'
+              ? 'border-indigo-600 text-indigo-600'
+              : 'border-transparent text-gray-500 hover:text-indigo-600 hover:border-indigo-200'
+          }`}
+        >
+          <Users className="w-4 h-4 text-indigo-500" />
+          Comisiones de Agentes y Subagentes ({clients.filter(c => c.type === 'Agent' || c.type === 'Corporate').length})
+        </button>
+        <button
           onClick={() => setActiveView('duplicates')}
-          className={`py-3 px-6 text-sm font-black border-b-2 transition-all flex items-center gap-2 ${
+          className={`py-3 px-6 text-sm font-black border-b-2 transition-all flex items-center gap-2 whitespace-nowrap ${
             activeView === 'duplicates'
               ? 'border-red-650 text-red-650'
               : 'border-transparent text-gray-500 hover:text-red-500 hover:border-red-200'
@@ -476,7 +938,7 @@ export default function ClientsManager({ profile, rolePermissions }: ClientsMana
         </button>
       </div>
 
-      {activeView === 'all' ? (
+      {activeView === 'all' && (
         <>
           <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 flex flex-wrap gap-4 items-end">
             <div className="flex-1 min-w-[200px]">
@@ -551,7 +1013,7 @@ export default function ClientsManager({ profile, rolePermissions }: ClientsMana
                           <Receipt className="w-4 h-4" />
                         </button>
                         {hasPermission('clients', 'edit') && (
-                          <button onClick={() => setEditingClient(c)} className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded">
+                          <button onClick={() => startEditingClient(c)} className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded">
                             <Edit2 className="w-4 h-4" />
                           </button>
                         )}
@@ -679,7 +1141,7 @@ export default function ClientsManager({ profile, rolePermissions }: ClientsMana
                               <Receipt className="w-4 h-4" />
                             </button>
                             {hasPermission('clients', 'edit') && (
-                              <button onClick={() => setEditingClient(c)} className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded">
+                              <button onClick={() => startEditingClient(c)} className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded">
                                 <Edit2 className="w-4 h-4" />
                               </button>
                             )}
@@ -760,7 +1222,9 @@ export default function ClientsManager({ profile, rolePermissions }: ClientsMana
             </div>
           )}
         </>
-      ) : (
+      )}
+
+      {activeView === 'duplicates' && (
         <div className="space-y-6 animate-in fade-in duration-300">
           {/* Header Info Banner */}
           <div className="bg-amber-50 border border-amber-200 rounded-xl p-6 flex flex-col md:flex-row gap-4 items-start">
@@ -989,7 +1453,7 @@ export default function ClientsManager({ profile, rolePermissions }: ClientsMana
                             {/* Client card buttons */}
                             <div className="flex gap-2 self-end md:self-auto h-fit">
                               <button
-                                onClick={() => setEditingClient(client)}
+                                onClick={() => startEditingClient(client)}
                                 className="px-3.5 py-1.5 border border-gray-200 text-gray-700 font-bold hover:bg-gray-50 rounded-lg text-xs transition-all"
                               >
                                 Editar
@@ -1009,6 +1473,338 @@ export default function ClientsManager({ profile, rolePermissions }: ClientsMana
                 );
               })
             )}
+          </div>
+        </div>
+      )}
+
+      {activeView === 'subagents' && (
+        <div className="space-y-6 animate-in fade-in duration-300">
+          {/* Header Info Banner */}
+          <div className="bg-indigo-50 border border-indigo-150 rounded-xl p-5 flex flex-col md:flex-row gap-4 items-start justify-between">
+            <div className="flex gap-4 items-start">
+              <div className="p-2.5 bg-indigo-100 text-indigo-800 rounded-lg shrink-0">
+                <Users className="w-5 h-5" />
+              </div>
+              <div className="space-y-0.5">
+                <h3 className="font-extrabold text-indigo-900 text-sm">Comisiones y Descuentos</h3>
+                <p className="text-xs text-indigo-800 leading-relaxed">
+                  Modifica el porcentaje de comisión y descuento de tus Agentes, Corporativos y Subagentes directamente en la tabla. Presiona el botón verde de confirmación que aparece al editar para guardar el cambio al instante.
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={handleExportSubagentsPDF}
+              disabled={isExportingPDF || filteredSubagentClients.length === 0}
+              className="px-4 py-2.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-xl text-xs font-bold shadow-sm transition-all flex items-center gap-2 shrink-0 self-start md:self-center cursor-pointer"
+              title="Descargar Reporte de Comisiones en Formato Horizontal PDF"
+            >
+              {isExportingPDF ? (
+                <RefreshCw className="w-4 h-4 animate-spin" />
+              ) : (
+                <FileText className="w-4 h-4" />
+              )}
+              <span>{isExportingPDF ? 'Generando PDF...' : 'Reporte PDF Horizontal'}</span>
+            </button>
+          </div>
+
+          {/* Search & Filter Controls */}
+          <div className="bg-white p-5 rounded-xl shadow-sm border border-gray-100 space-y-4">
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+              {/* Search input */}
+              <div className="md:col-span-1">
+                <label className="block text-[10px] font-black text-gray-400 uppercase mb-1 tracking-wider">Buscar Agente o Subagente</label>
+                <input
+                  type="text"
+                  placeholder="Nombre, correo, o subagente..."
+                  value={subagentsSearch}
+                  onChange={e => setSubagentsSearch(e.target.value)}
+                  className="w-full p-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none text-xs font-medium"
+                />
+              </div>
+
+              {/* Filter by Type */}
+              <div>
+                <label className="block text-[10px] font-black text-gray-400 uppercase mb-1 tracking-wider">Filtrar por Tipo</label>
+                <select
+                  value={subagentsTypeFilter}
+                  onChange={e => setSubagentsTypeFilter(e.target.value as any)}
+                  className="w-full p-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none text-xs font-semibold bg-white"
+                >
+                  <option value="all">Todos los Tipos</option>
+                  <option value="Agent">Solo Agentes</option>
+                  <option value="Corporate">Solo Corporativos</option>
+                </select>
+              </div>
+
+              {/* Filter by Commission value */}
+              <div>
+                <label className="block text-[10px] font-black text-gray-400 uppercase mb-1 tracking-wider">Comisión mayor o igual a (%)</label>
+                <input
+                  type="number"
+                  placeholder="Ej. 10"
+                  step="0.5"
+                  min="0"
+                  max="100"
+                  value={subagentsCommissionFilter}
+                  onChange={e => setSubagentsCommissionFilter(e.target.value)}
+                  className="w-full p-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none text-xs font-medium"
+                />
+              </div>
+
+              {/* Sort By option */}
+              <div>
+                <label className="block text-[10px] font-black text-gray-400 uppercase mb-1 tracking-wider">Ordenar por</label>
+                <select
+                  value={subagentsSortBy}
+                  onChange={e => setSubagentsSortBy(e.target.value as any)}
+                  className="w-full p-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none text-xs font-semibold bg-white"
+                >
+                  <option value="name-asc">Nombre (A - Z)</option>
+                  <option value="name-desc">Nombre (Z - A)</option>
+                  <option value="commission-desc">Comisión (Mayor a Menor)</option>
+                  <option value="commission-asc">Comisión (Menor a Mayor)</option>
+                </select>
+              </div>
+            </div>
+
+            {/* Clear filters shortcut if any filter is active */}
+            <div className="flex justify-between items-center pt-2 border-t border-gray-50">
+              <span className="text-[11px] font-bold text-gray-400">
+                Mostrando {filteredSubagentClients.length} agente(s) / corporativo(s)
+              </span>
+              {(subagentsSearch || subagentsTypeFilter !== 'all' || subagentsCommissionFilter || subagentsSortBy !== 'name-asc') && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSubagentsSearch('');
+                    setSubagentsTypeFilter('all');
+                    setSubagentsCommissionFilter('');
+                    setSubagentsSortBy('name-asc');
+                  }}
+                  className="text-[10px] font-bold text-indigo-600 hover:text-indigo-800 transition-colors flex items-center gap-1 cursor-pointer"
+                >
+                  <X className="w-3 h-3" />
+                  Limpiar Filtros
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Unified Compact Table of Agents and Subagents */}
+          <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs">
+                <thead>
+                  <tr className="bg-gray-50 border-b border-gray-150 text-[10px] font-black text-gray-400 uppercase tracking-wider">
+                    <th className="px-6 py-3.5">Nombre / Tipo</th>
+                    <th className="px-6 py-3.5">Email</th>
+                    <th className="px-6 py-3.5">Teléfono</th>
+                    <th className="px-6 py-3.5 w-48">Comisión (%)</th>
+                    <th className="px-6 py-3.5 w-48">Descuento (%)</th>
+                    <th className="px-6 py-3.5 text-center w-24">Acciones</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-gray-100">
+                  {filteredSubagentClients.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="py-12 text-center text-gray-400 italic">
+                        No se encontraron agentes o subagentes que coincidan con la búsqueda.
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredSubagentClients.flatMap(c => {
+                      const clientData = getClientData(c);
+                      const displayName = c.type === 'Individual' ? `${c.firstName} ${c.lastName}` : c.commercialName || c.legalName;
+                      const isCommMod = isParentCommissionModified(c);
+                      const isDiscMod = isParentDiscountModified(c);
+                      const parentHasChanges = isCommMod || isDiscMod;
+
+                      const rows = [];
+
+                      // Main agent row
+                      rows.push(
+                        <tr key={`parent-${c.id}`} className={`hover:bg-gray-50/50 transition-colors ${parentHasChanges ? 'bg-indigo-50/30' : ''}`}>
+                          <td className="px-6 py-3">
+                            <div className="flex items-center gap-2.5">
+                              <div className={`p-1.5 rounded-lg shrink-0 ${c.type === 'Agent' ? 'bg-purple-100 text-purple-600' : 'bg-blue-100 text-blue-600'}`}>
+                                {c.type === 'Agent' ? <Users className="w-4 h-4" /> : <Building2 className="w-4 h-4" />}
+                              </div>
+                              <div>
+                                <div className="flex items-center gap-1.5">
+                                  <span className="font-extrabold text-gray-900 text-xs">{displayName}</span>
+                                  <span className={`text-[8px] font-black px-1.5 py-0.5 rounded uppercase border ${
+                                    c.type === 'Agent' ? 'bg-purple-50 text-purple-600 border-purple-100' : 'bg-blue-50 text-blue-600 border-blue-100'
+                                  }`}>
+                                    {c.type === 'Agent' ? 'Agente' : 'Corporativo'}
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+                          </td>
+                          <td className="px-6 py-3 text-xs text-gray-500 font-medium">{c.email || '-'}</td>
+                          <td className="px-6 py-3 text-xs text-gray-500 font-medium">{c.phone || '-'}</td>
+                          <td className="px-6 py-3">
+                            <div className="flex items-center gap-1.5">
+                              <input
+                                type="number"
+                                step="0.1"
+                                min="0"
+                                max="100"
+                                value={clientData.commission ?? 0}
+                                onChange={e => handleClientCommissionChange(c, parseFloat(e.target.value))}
+                                className="w-16 p-1 border border-gray-200 rounded text-xs font-bold focus:ring-1 focus:ring-indigo-500 outline-none"
+                              />
+                              <span className="text-gray-400 font-bold text-xs shrink-0">%</span>
+                              {isCommMod && (
+                                <button
+                                  onClick={() => handleSaveQuickEdits(c.id!)}
+                                  className="p-1 bg-green-50 text-green-700 hover:bg-green-100 border border-green-200 rounded transition-all shrink-0 animate-pulse"
+                                  title="Confirmar y Guardar Comisión"
+                                >
+                                  <Check className="w-3.5 h-3.5" />
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                          <td className="px-6 py-3">
+                            <div className="flex items-center gap-1.5">
+                              <input
+                                type="number"
+                                step="0.1"
+                                min="0"
+                                max="100"
+                                value={clientData.discountPercentage ?? 0}
+                                onChange={e => handleClientDiscountChange(c, parseFloat(e.target.value))}
+                                className="w-16 p-1 border border-gray-200 rounded text-xs font-bold text-green-600 focus:ring-1 focus:ring-indigo-500 outline-none"
+                              />
+                              <span className="text-gray-400 font-bold text-xs shrink-0">%</span>
+                              {isDiscMod && (
+                                <button
+                                  onClick={() => handleSaveQuickEdits(c.id!)}
+                                  className="p-1 bg-green-50 text-green-700 hover:bg-green-100 border border-green-200 rounded transition-all shrink-0 animate-pulse"
+                                  title="Confirmar y Guardar Descuento"
+                                >
+                                  <Check className="w-3.5 h-3.5" />
+                                </button>
+                              )}
+                            </div>
+                          </td>
+                          <td className="px-6 py-3 text-center">
+                            <div className="flex items-center justify-center gap-1">
+                              <button
+                                onClick={() => setSelectedClientForDetail(c)}
+                                className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors"
+                                title="Ver Detalles"
+                              >
+                                <Eye className="w-4 h-4" />
+                              </button>
+                              <button
+                                onClick={() => startEditingClient(c)}
+                                className="p-1.5 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded transition-colors"
+                                title="Editar Información Completa"
+                              >
+                                <Edit2 className="w-4 h-4" />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+
+                      // Render subagents
+                      if (clientData.linkedAgents && clientData.linkedAgents.length > 0) {
+                        clientData.linkedAgents.forEach(sa => {
+                          const isSaCommMod = isSubagentCommissionModified(c, sa.id);
+                          const isSaDiscMod = isSubagentDiscountModified(c, sa.id);
+                          const saHasChanges = isSaCommMod || isSaDiscMod;
+
+                          rows.push(
+                            <tr key={`sa-${c.id}-${sa.id}`} className={`hover:bg-gray-50/30 transition-colors bg-gray-50/15 ${saHasChanges ? 'bg-amber-50/30 border-l-2 border-amber-500' : ''}`}>
+                              <td className="px-6 py-2 pl-12">
+                                <div className="flex items-center gap-1.5">
+                                  <span className="text-gray-300 font-mono select-none">└─</span>
+                                  <div className="h-5 w-5 rounded-full bg-indigo-50 text-indigo-600 flex items-center justify-center font-black text-[8px] shrink-0">
+                                    {sa.name ? sa.name.charAt(0).toUpperCase() : '?'}
+                                  </div>
+                                  <div className="flex items-center gap-1">
+                                    <span className="font-bold text-gray-700 text-xs truncate max-w-[150px]">{sa.name || 'Sin nombre'}</span>
+                                    <span className="text-[7px] font-black px-1 py-0.2 rounded bg-indigo-50 text-indigo-500 border border-indigo-100 uppercase scale-95 shrink-0">
+                                      Subagente
+                                    </span>
+                                  </div>
+                                </div>
+                              </td>
+                              <td className="px-6 py-2 text-[11px] text-gray-400 font-medium pl-10 truncate max-w-[180px]">{sa.email || '-'}</td>
+                              <td className="px-6 py-2 text-[11px] text-gray-400 font-medium">{sa.phone || '-'}</td>
+                              <td className="px-6 py-2">
+                                <div className="flex items-center gap-1.5">
+                                  <input
+                                    type="number"
+                                    step="0.1"
+                                    min="0"
+                                    max="100"
+                                    value={sa.commission ?? 0}
+                                    onChange={e => handleSubagentChange(c, sa.id, 'commission', parseFloat(e.target.value))}
+                                    className="w-16 p-0.5 border border-gray-200 rounded text-xs font-bold focus:ring-1 focus:ring-indigo-500 outline-none"
+                                  />
+                                  <span className="text-gray-400 font-bold text-xs shrink-0">%</span>
+                                  {isSaCommMod && (
+                                    <button
+                                      onClick={() => handleSaveQuickEdits(c.id!)}
+                                      className="p-0.5 bg-green-50 text-green-700 hover:bg-green-100 border border-green-200 rounded transition-all shrink-0 animate-pulse"
+                                      title="Confirmar y Guardar Comisión"
+                                    >
+                                      <Check className="w-3 h-3" />
+                                    </button>
+                                  )}
+                                </div>
+                              </td>
+                              <td className="px-6 py-2">
+                                <div className="flex items-center gap-1.5">
+                                  <input
+                                    type="number"
+                                    step="0.1"
+                                    min="0"
+                                    max="100"
+                                    value={sa.discountPercentage ?? 0}
+                                    onChange={e => handleSubagentChange(c, sa.id, 'discountPercentage', parseFloat(e.target.value))}
+                                    className="w-16 p-0.5 border border-gray-200 rounded text-xs font-bold text-green-600 focus:ring-1 focus:ring-indigo-500 outline-none"
+                                  />
+                                  <span className="text-gray-400 font-bold text-xs shrink-0">%</span>
+                                  {isSaDiscMod && (
+                                    <button
+                                      onClick={() => handleSaveQuickEdits(c.id!)}
+                                      className="p-0.5 bg-green-50 text-green-700 hover:bg-green-100 border border-green-200 rounded transition-all shrink-0 animate-pulse"
+                                      title="Confirmar y Guardar Descuento"
+                                    >
+                                      <Check className="w-3 h-3" />
+                                    </button>
+                                  )}
+                                </div>
+                              </td>
+                              <td className="px-6 py-2 text-center">
+                                <button
+                                  onClick={() => {
+                                    startEditingClient(c);
+                                    setActiveFormTab('agents');
+                                  }}
+                                  className="p-1 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded transition-colors"
+                                  title="Editar Subagente en la Ficha del Agente"
+                                >
+                                  <Edit2 className="w-3.5 h-3.5" />
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        });
+                      }
+
+                      return rows;
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
           </div>
         </div>
       )}
@@ -1320,7 +2116,7 @@ export default function ClientsManager({ profile, rolePermissions }: ClientsMana
                         onChange={e => setEditingClient({ ...editingClient!, country: e.target.value })}
                         className="w-full p-2.5 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
                       >
-                        {countries.map(c => <option key={c.id} value={c.code}>{c.name}</option>)}
+                        {Array.from(new Map(countries.map(c => [c.code, c])).values()).map(c => <option key={c.id} value={c.code}>{c.name}</option>)}
                       </select>
                     </div>
                     <div className="md:col-span-2">

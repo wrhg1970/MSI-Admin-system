@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Mail, XCircle, Send, Loader2, CheckCircle2, Info, Users, Copy, Languages } from 'lucide-react';
+import { Mail, XCircle, Send, Loader2, CheckCircle2, Info, Users, Copy, Languages, Files, FileStack } from 'lucide-react';
 import { InsuranceRequest, Policy, PolicyLetter } from '../types';
 
 interface BulkEmailConfigModalProps {
@@ -15,12 +15,15 @@ interface BulkEmailConfigModalProps {
     subjectTemplate: string;
     bodyTemplate: string;
     fallbackToDefault: boolean;
+    pdfMergeMode: 'separate' | 'merged';
   }) => void;
 }
 
 const AVAILABLE_LANGUAGES = [
   { id: 'es', label: 'Español' },
   { id: 'en', label: 'Inglés' },
+  { id: 'es_spain', label: 'España' },
+  { id: 'embajada_spain', label: 'Embajada España' },
   { id: 'policy', label: 'Póliza Principal' },
   { id: 'covid', label: 'Coronavirus / Covid-19' },
   { id: 'fr', label: 'Francés' },
@@ -81,6 +84,7 @@ Buen viaje y gracias por tu confianza.
 El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`
   );
   const [fallbackToDefault, setFallbackToDefault] = useState(true);
+  const [pdfMergeMode, setPdfMergeMode] = useState<'separate' | 'merged'>('separate');
   const [ccError, setCcError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -112,7 +116,8 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`
       ccEmails,
       subjectTemplate,
       bodyTemplate,
-      fallbackToDefault
+      fallbackToDefault,
+      pdfMergeMode
     });
   };
 
@@ -266,6 +271,56 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`
                     </span>
                   </div>
                 </label>
+
+                {/* PDF Merge Mode Option */}
+                <div className="pt-3 border-t border-gray-100 space-y-2">
+                  <label className="block text-[10px] font-black text-gray-500 uppercase tracking-wider">
+                    Formato de Archivos Adjuntos
+                  </label>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setPdfMergeMode('separate')}
+                      className={`p-3 rounded-xl border text-left transition-all flex flex-col gap-1 cursor-pointer ${
+                        pdfMergeMode === 'separate'
+                          ? 'bg-blue-50/80 border-blue-500 ring-2 ring-blue-500/20 text-blue-900 shadow-sm'
+                          : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-bold flex items-center gap-1.5">
+                          <Files className="w-3.5 h-3.5 text-blue-600" />
+                          Archivos Separados
+                        </span>
+                        {pdfMergeMode === 'separate' && <CheckCircle2 className="w-3.5 h-3.5 text-blue-600" />}
+                      </div>
+                      <p className="text-[10px] text-gray-500 leading-tight">
+                        Adjuntar cada carta seleccionada en un PDF individual independiente
+                      </p>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setPdfMergeMode('merged')}
+                      className={`p-3 rounded-xl border text-left transition-all flex flex-col gap-1 cursor-pointer ${
+                        pdfMergeMode === 'merged'
+                          ? 'bg-blue-50/80 border-blue-500 ring-2 ring-blue-500/20 text-blue-900 shadow-sm'
+                          : 'bg-white border-gray-200 text-gray-600 hover:bg-gray-50'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-bold flex items-center gap-1.5">
+                          <FileStack className="w-3.5 h-3.5 text-blue-600" />
+                          Un Solo PDF Integrado
+                        </span>
+                        {pdfMergeMode === 'merged' && <CheckCircle2 className="w-3.5 h-3.5 text-blue-600" />}
+                      </div>
+                      <p className="text-[10px] text-gray-500 leading-tight">
+                        Integrar todas las cartas de cada viajero en 1 solo archivo PDF
+                      </p>
+                    </button>
+                  </div>
+                </div>
               </div>
 
               {/* CC Emails configuration */}

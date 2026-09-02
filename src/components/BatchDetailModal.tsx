@@ -8,6 +8,7 @@ interface BatchDetailModalProps {
   batch: { exportDate: string; policies: InsuranceRequest[] } | null;
   clients: any[];
   onViewInsuranceDetail: (ins: InsuranceRequest) => void;
+  onUpdateExportDate?: (oldDate: string, newDate: string) => Promise<void>;
 }
 
 export default function BatchDetailModal({
@@ -16,8 +17,11 @@ export default function BatchDetailModal({
   batch,
   clients,
   onViewInsuranceDetail,
+  onUpdateExportDate,
 }: BatchDetailModalProps) {
   const [searchTerm, setSearchTerm] = useState('');
+  const [isEditingDate, setIsEditingDate] = useState(false);
+  const [newDateVal, setNewDateVal] = useState('');
 
   const filteredPolicies = useMemo(() => {
     if (!batch) return [];
@@ -55,9 +59,48 @@ export default function BatchDetailModal({
               <h3 className="text-base font-bold text-gray-900">
                 Pólizas Exportadas en Lote
               </h3>
-              <p className="text-xs text-gray-500 font-medium">
-                Fecha del Lote: <span className="font-bold text-gray-700">{batch.exportDate}</span>
-              </p>
+              {isEditingDate ? (
+                <div className="flex items-center gap-2 mt-1">
+                  <input
+                    type="date"
+                    value={newDateVal}
+                    onChange={(e) => setNewDateVal(e.target.value)}
+                    className="p-1 px-2 border border-gray-200 rounded-lg text-xs font-bold text-gray-800"
+                  />
+                  <button
+                    onClick={async () => {
+                      if (onUpdateExportDate) {
+                        await onUpdateExportDate(batch.exportDate, newDateVal);
+                      }
+                      setIsEditingDate(false);
+                    }}
+                    className="px-2 py-1 bg-indigo-600 text-white text-[10px] font-bold rounded hover:bg-indigo-700 transition-all cursor-pointer"
+                  >
+                    Guardar
+                  </button>
+                  <button
+                    onClick={() => setIsEditingDate(false)}
+                    className="px-2 py-1 bg-gray-100 text-gray-600 text-[10px] font-bold rounded hover:bg-gray-200 transition-all cursor-pointer"
+                  >
+                    Cancelar
+                  </button>
+                </div>
+              ) : (
+                <p className="text-xs text-gray-500 font-medium flex items-center gap-2">
+                  Fecha del Lote: <span className="font-bold text-gray-700">{batch.exportDate}</span>
+                  {onUpdateExportDate && (
+                    <button
+                      onClick={() => {
+                        setNewDateVal(batch.exportDate.substring(0, 10));
+                        setIsEditingDate(true);
+                      }}
+                      className="text-[10px] text-indigo-600 hover:text-indigo-800 underline font-semibold ml-1 cursor-pointer"
+                    >
+                      Editar fecha
+                    </button>
+                  )}
+                </p>
+              )}
             </div>
           </div>
           <button 

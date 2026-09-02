@@ -6,6 +6,7 @@ import { Policy, Client, Country, InsuranceRequest, UserProfile, PlanType } from
 import { differenceInYears, differenceInDays, parseISO, format, isValid } from 'date-fns';
 import { Upload, FileText, CheckCircle2, AlertCircle, X, Download, Clock, History, ChevronDown, ChevronUp, Sparkles, Check, Search } from 'lucide-react';
 import { COUNTRIES, INITIAL_POLICIES } from '../constants';
+import { getPolicyNumber, getNormalizedYYYYMMDD, formatDisplayDate } from '../lib/policyUtils';
 
 interface ImportLog {
   id?: string;
@@ -101,31 +102,14 @@ export default function BulkImportModal({
   // Date parsing/validation helpers
   const parseDateHelper = (d: string) => {
     if (!d) return '';
-    const trimmed = d.trim();
-    if (trimmed.includes('/')) {
-      const parts = trimmed.split('/');
-      if (parts.length === 3) {
-        if (parts[0].length === 4) {
-          // Assume YYYY/MM/DD
-          const year = parts[0];
-          const month = parts[1].padStart(2, '0');
-          const day = parts[2].padStart(2, '0');
-          return `${year}-${month}-${day}`;
-        } else {
-          // Assume DD/MM/YYYY
-          const day = parts[0].padStart(2, '0');
-          const month = parts[1].padStart(2, '0');
-          const year = parts[2];
-          return `${year}-${month}-${day}`;
-        }
-      }
-    }
-    return trimmed;
+    return getNormalizedYYYYMMDD(d) || String(d).trim();
   };
 
   const validateDateHelper = (d: string) => {
     if (!d) return false;
-    const date = new Date(d);
+    const ymd = getNormalizedYYYYMMDD(d);
+    if (!ymd) return false;
+    const date = parseISO(ymd);
     return isValid(date);
   };
 
@@ -195,7 +179,8 @@ export default function BulkImportModal({
       return { insuranceData: null, error: `Fila ${index + 2}: Formato de fecha inválido o vacío. Use DD/MM/YYYY o YYYY-MM-DD` };
     }
 
-    const age = differenceInYears(new Date(), parseISO(birthDate));
+    const refDate = startDate ? parseISO(startDate) : new Date();
+    const age = Math.max(0, differenceInYears(refDate, parseISO(birthDate)));
     const days = differenceInDays(parseISO(endDate), parseISO(startDate)) + 1;
 
     if (days <= 0) {
@@ -213,10 +198,10 @@ export default function BulkImportModal({
     const notes = getPassengerValLocal(row, 'Notas') || '';
 
     const getPlanForAge = (ageVal: number): string => {
-      if (isExtremeSports && ageVal >= 15 && ageVal <= 69) return 'Xtreme';
-      if (ageVal >= 6 && ageVal <= 25) return 'Student';
+      if (isExtremeSports && ageVal >= 7 && ageVal <= 69) return 'Xtreme';
+      if (ageVal >= 0 && ageVal <= 6) return 'U6';
+      if (ageVal >= 7 && ageVal <= 25) return 'Student';
       if (ageVal >= 26 && ageVal <= 69) return 'Traveler';
-      if (ageVal >= 0 && ageVal < 6) return 'U6';
       if (ageVal >= 70) return 'O70';
 
       if (insuranceTypes && insuranceTypes.length > 0) {
@@ -334,15 +319,36 @@ export default function BulkImportModal({
       return { insuranceData: null, error: `Fila ${index + 2}: Póliza "${policyName}" no encontrada` };
     }
 
-    const months = days <= 39 ? 0 : Math.ceil(days / 30.4);
-
-    let basePrice = 0;
-    let totalCost = policy.costPerDay * days;
-    if (days <= 39) {
-      basePrice = policy.pricePerDay * days;
-    } else {
-      basePrice = (policy.pricePerMonth || (policy.pricePerDay * 30)) * months;
+    const calculatedMonths = Math.floor(days / 30.4);
+    const additionalDays = Math.max(0, days - Math.round(calculatedMonths * 30.4));
+    
+    let billedMonths = calculatedMonths;
+    let billedDays = additionalDays;
+    
+    if (additionalDays > 15) {
+      billedMonths = calculatedMonths + 1;
+      billedDays = 0;
     }
+
+    if (days < 40) {
+      billedMonths = 0;
+      billedDays = days;
+    }
+    
+    const months = billedMonths;
+
+    const pricePerDay = policy.pricePerDay || 0;
+    const pricePerMonth = policy.pricePerMonth || (pricePerDay * 30);
+    
+    let monthlyRate = pricePerMonth;
+    if (billedMonths >= 4) {
+      monthlyRate = pricePerMonth * 0.8;
+    }
+    
+    let basePrice = (billedMonths * monthlyRate) + (billedDays * pricePerDay);
+    basePrice = Math.round(basePrice * 100) / 100;
+    
+    let totalCost = policy.costPerDay * days;
 
     let discount = 0;
     let commissionPercent = 0;
@@ -399,19 +405,8 @@ export default function BulkImportModal({
       commissionPercent = profile.commission || 0;
     }
 
-    if (months >= 4) {
-      let policyDiscountAmount = 0;
-      if (policyDiscountPercentage > 0) {
-        policyDiscountAmount = Math.round((basePrice * (policyDiscountPercentage / 100)) * 100) / 100;
-      }
-
-      const priceAfterPolicyDiscount = basePrice - policyDiscountAmount;
-      let clientDiscountAmount = 0;
-      if (clientDiscountPercentage > 0) {
-        clientDiscountAmount = Math.round((priceAfterPolicyDiscount * (clientDiscountPercentage / 100)) * 100) / 100;
-      }
-
-      discount = policyDiscountAmount + clientDiscountAmount;
+    if (clientDiscountPercentage > 0) {
+      discount = Math.round((basePrice * (clientDiscountPercentage / 100)) * 100) / 100;
     }
 
     const totalFinal = Math.round((basePrice - discount) * 100) / 100;
@@ -442,6 +437,7 @@ export default function BulkImportModal({
       city: getPassengerValLocal(row, 'Ciudad') || '',
       policyId: policy.id,
       policyName: policy.name,
+      policyNumber: getPolicyNumber(policy, age),
       plan: planType,
       actionType: (getPassengerValLocal(row, 'Tipo de Accion') || getPassengerValLocal(row, 'Tipo de Acción') || 'NEW').trim().toUpperCase(),
       isExtremeSports,
@@ -498,13 +494,13 @@ export default function BulkImportModal({
       headers = [
         'Tipo de cliente', 'Nombre', 'Apellido', 'Sexo', 'Correo electronico', 
         'Fecha de nacimiento', 'Fecha de solicitud', 'Tipo de Acción', 'Pais Origen', 
-        'Pais Destino', 'Ciudad', 'Fecha Salida', 'Fecha Regreso', 'Plan', 'Poliza', 'Deportes Extremos', 'Notas', 'IDSeg'
+        'Pais Destino', 'Ciudad', 'Fecha Salida', 'Fecha Regreso', 'Plan', 'Poliza', 'Deportes Extremos', 'Notas'
       ];
     } else if (importType === 'Agent/Corporate') {
       headers = [
         'Tipo de cliente', 'Cliente', 'Agente que lo solicita', 'Nombre', 'Apellido', 'Sexo', 'Correo electronico', 
         'Fecha de nacimiento', 'Fecha de solicitud', 'Tipo de Acción', 'Pais Origen',
-        'Pais Destino', 'Ciudad', 'Fecha Salida', 'Fecha Regreso', 'Plan', 'Poliza', 'Deportes Extremos', 'Notas', 'IDSeg'
+        'Pais Destino', 'Ciudad', 'Fecha Salida', 'Fecha Regreso', 'Plan', 'Poliza', 'Deportes Extremos', 'Notas'
       ];
     } else {
       // Payments
@@ -781,13 +777,10 @@ export default function BulkImportModal({
           };
 
           if (importType !== 'Payments') {
-            let rowIDseg = (getVal(row, 'IDSeg') || getVal(row, 'IDseg') || '').trim();
-            if (!rowIDseg) {
-              rowIDseg = `${prefix}${String(currentIDsegCounter).padStart(padLength, '0')}`;
-              currentIDsegCounter++;
-              row['IDSeg'] = rowIDseg;
-              row['IDseg'] = rowIDseg;
-            }
+            const rowIDseg = `${prefix}${String(currentIDsegCounter).padStart(padLength, '0')}`;
+            currentIDsegCounter++;
+            row['IDSeg'] = rowIDseg;
+            row['IDseg'] = rowIDseg;
           }
 
           const parseCurrencyHelper = (val: string) => {
@@ -921,7 +914,7 @@ export default function BulkImportModal({
 
             const isRequestDateMatch = (ins: any) => {
               if (!reqDateParsed) return true;
-              const insReqDate = ins.requestDate || (ins.createdAt?.toDate ? format(ins.createdAt.toDate(), 'yyyy-MM-dd') : '');
+              const insReqDate = getNormalizedYYYYMMDD(ins.requestDate) || getNormalizedYYYYMMDD(ins.createdAt);
               return insReqDate === reqDateParsed;
             };
 
@@ -1047,7 +1040,7 @@ export default function BulkImportModal({
             const totalFinal = insurance.totalFinal || insurance.totalPrice || 0;
             
             let newStatus = accUpdate.status;
-            if (newPaid >= totalFinal) newStatus = 'paid';
+            if ((totalFinal - newPaid) < 2) newStatus = 'paid';
             else if (newPaid > 0) newStatus = 'partially_paid';
 
             accUpdate.totalPaid = newPaid;
@@ -1136,7 +1129,8 @@ export default function BulkImportModal({
             continue;
           }
 
-          const age = differenceInYears(new Date(), parseISO(birthDate));
+          const refDate = startDate ? parseISO(startDate) : new Date();
+          const age = Math.max(0, differenceInYears(refDate, parseISO(birthDate)));
           const days = differenceInDays(parseISO(endDate), parseISO(startDate)) + 1;
 
           const destCode = findCountryCode(getVal(row, 'Pais Destino') || '');
@@ -1150,10 +1144,10 @@ export default function BulkImportModal({
           const notes = getVal(row, 'Notas') || '';
 
           const getPlanForAge = (ageVal: number): string => {
-            if (isExtremeSports && ageVal >= 15 && ageVal <= 69) return 'Xtreme';
-            if (ageVal >= 6 && ageVal <= 25) return 'Student';
+            if (isExtremeSports && ageVal >= 7 && ageVal <= 69) return 'Xtreme';
+            if (ageVal >= 0 && ageVal <= 6) return 'U6';
+            if (ageVal >= 7 && ageVal <= 25) return 'Student';
             if (ageVal >= 26 && ageVal <= 69) return 'Traveler';
-            if (ageVal >= 0 && ageVal < 6) return 'U6';
             if (ageVal >= 70) return 'O70';
 
             if (insuranceTypes && insuranceTypes.length > 0) {
@@ -1280,15 +1274,36 @@ export default function BulkImportModal({
             continue;
           }
 
-          const months = days <= 39 ? 0 : Math.ceil(days / 30.4);
-
-          let basePrice = 0;
-          let totalCost = policy.costPerDay * days;
-          if (days <= 39) {
-            basePrice = policy.pricePerDay * days;
-          } else {
-            basePrice = (policy.pricePerMonth || (policy.pricePerDay * 30)) * months;
+          const calculatedMonths = Math.floor(days / 30.4);
+          const additionalDays = Math.max(0, days - Math.round(calculatedMonths * 30.4));
+          
+          let billedMonths = calculatedMonths;
+          let billedDays = additionalDays;
+          
+          if (additionalDays > 15) {
+            billedMonths = calculatedMonths + 1;
+            billedDays = 0;
           }
+
+          if (days < 40) {
+            billedMonths = 0;
+            billedDays = days;
+          }
+          
+          const months = billedMonths;
+
+          const pricePerDay = policy.pricePerDay || 0;
+          const pricePerMonth = policy.pricePerMonth || (pricePerDay * 30);
+          
+          let monthlyRate = pricePerMonth;
+          if (billedMonths >= 4) {
+            monthlyRate = pricePerMonth * 0.8;
+          }
+          
+          let basePrice = (billedMonths * monthlyRate) + (billedDays * pricePerDay);
+          basePrice = Math.round(basePrice * 100) / 100;
+          
+          let totalCost = policy.costPerDay * days;
 
           let discount = 0;
           let commissionPercent = 0;
@@ -1313,19 +1328,8 @@ export default function BulkImportModal({
             commissionPercent = profile.commission || 0;
           }
 
-          if (months >= 4) {
-            let policyDiscountAmount = 0;
-            if (policyDiscountPercentage > 0) {
-              policyDiscountAmount = Math.round((basePrice * (policyDiscountPercentage / 100)) * 100) / 100;
-            }
-
-            const priceAfterPolicyDiscount = basePrice - policyDiscountAmount;
-            let clientDiscountAmount = 0;
-            if (clientDiscountPercentage > 0) {
-              clientDiscountAmount = Math.round((priceAfterPolicyDiscount * (clientDiscountPercentage / 100)) * 100) / 100;
-            }
-
-            discount = policyDiscountAmount + clientDiscountAmount;
+          if (clientDiscountPercentage > 0) {
+            discount = Math.round((basePrice * (clientDiscountPercentage / 100)) * 100) / 100;
           }
 
           const totalFinal = Math.round((basePrice - discount) * 100) / 100;
@@ -1356,6 +1360,7 @@ export default function BulkImportModal({
             city: getVal(row, 'Ciudad') || '',
             policyId: policy.id,
             policyName: policy.name,
+            policyNumber: getPolicyNumber(policy, age),
             plan: planType,
             actionType: (getVal(row, 'Tipo de Accion') || getVal(row, 'Tipo de Acción') || 'NEW').trim().toUpperCase(),
             isExtremeSports,
@@ -1414,7 +1419,7 @@ export default function BulkImportModal({
               const currentPaid = matchedIns.totalPaid || 0;
               const totalFinal = matchedIns.totalFinal || matchedIns.totalPrice || 0;
               
-              if (matchedIns.status === 'paid' || currentPaid >= totalFinal) {
+              if (matchedIns.status === 'paid' || (totalFinal - currentPaid) < 2) {
                 isDiscrepancy = true;
                 discrepancyMessage = `El seguro con IDSeg "${idSegMatched}" ya está completamente pagado ($${currentPaid} de $${totalFinal} USD). Este pago de $${payment.amount} USD se registrará de todos modos.`;
               } else if (currentPaid + payment.amount > totalFinal + 0.01 && payment.type === 'client_payment') {
@@ -1464,10 +1469,10 @@ export default function BulkImportModal({
             const isExtreme = ins.isExtremeSports || false;
 
             const getPlanForAgeLocal = (ageVal: number): string => {
-              if (isExtreme && ageVal >= 15 && ageVal <= 69) return 'Xtreme';
-              if (ageVal >= 6 && ageVal <= 25) return 'Student';
+              if (isExtreme && ageVal >= 7 && ageVal <= 69) return 'Xtreme';
+              if (ageVal >= 0 && ageVal <= 6) return 'U6';
+              if (ageVal >= 7 && ageVal <= 25) return 'Student';
               if (ageVal >= 26 && ageVal <= 69) return 'Traveler';
-              if (ageVal >= 0 && ageVal < 6) return 'U6';
               if (ageVal >= 70) return 'O70';
 
               if (insuranceTypes && insuranceTypes.length > 0) {
@@ -1918,7 +1923,7 @@ export default function BulkImportModal({
                               </div>
                               
                               <p className="text-[11px] text-gray-500 font-medium">
-                                Método: <span className="font-semibold text-gray-700">{pay.paymentMethod}</span> • Fecha Pago: <span className="font-semibold text-gray-700">{format(pay.date, 'dd/MM/yyyy')}</span> {item.policyMatched ? <> • Póliza: <span className="font-semibold text-gray-750 uppercase">{item.policyMatched}</span></> : ''}
+                                Método: <span className="font-semibold text-gray-700">{pay.paymentMethod}</span> • Fecha Pago: <span className="font-semibold text-gray-700">{formatDisplayDate(pay.date)}</span> {item.policyMatched ? <> • Póliza: <span className="font-semibold text-gray-750 uppercase">{item.policyMatched}</span></> : ''}
                               </p>
                               
                               {item.isDiscrepancy ? (
@@ -1970,7 +1975,7 @@ export default function BulkImportModal({
                             </div>
                             
                             <p className="text-[11px] text-gray-500 font-medium font-sans">
-                              Desde: <span className="font-semibold text-gray-700">{format(parseISO(item.insuranceData.startDate), 'dd/MM/yyyy')}</span> al <span className="font-semibold text-gray-700">{format(parseISO(item.insuranceData.endDate), 'dd/MM/yyyy')}</span> ({item.insuranceData.days} días) • Destino: <span className="font-bold uppercase text-gray-700">{item.insuranceData.destinationCountry}</span>
+                              Desde: <span className="font-semibold text-gray-700">{formatDisplayDate(item.insuranceData.startDate)}</span> al <span className="font-semibold text-gray-700">{formatDisplayDate(item.insuranceData.endDate)}</span> ({item.insuranceData.days} días) • Destino: <span className="font-bold uppercase text-gray-700">{item.insuranceData.destinationCountry}</span>
                             </p>
                             
                             {item.isDiscrepancy ? (

@@ -23,6 +23,7 @@ import {
 import { db, storage, handleFirestoreError, OperationType } from '../firebase';
 import { UserProfile, UserRole, CustomRole, Permission, SystemDocument } from '../types';
 import { usePermissions } from '../hooks/usePermissions';
+import { formatDisplayDate } from '../lib/policyUtils';
 import ConfirmModal from './ConfirmModal';
 import { 
   Plus, 
@@ -58,7 +59,13 @@ import {
   ArrowRight,
   CreditCard,
   PenTool,
-  Signature
+  Signature,
+  Cloud,
+  Copy,
+  ExternalLink,
+  Terminal,
+  HardDrive,
+  Check
 } from 'lucide-react';
 import { format } from 'date-fns';
 import { es } from 'date-fns/locale';
@@ -67,6 +74,14 @@ import WooCommerceManager from './WooCommerceManager';
 import WhatsAppIntegration from './WhatsAppIntegration';
 import StripeIntegration from './StripeIntegration';
 import QuotaDashboard from './QuotaDashboard';
+import { 
+  compressJsonToZipBlob, 
+  compressJsonToBase64Zip, 
+  decompressZipToJson, 
+  readBackupFile, 
+  formatBytes,
+  downloadBlob 
+} from '../lib/zipUtils';
 
 const SYSTEM_ROLES: { id: UserRole; name: string; description: string; color: string }[] = [
   { id: 'super_admin', name: 'Super Administrador', description: 'Acceso total al sistema y configuración', color: 'bg-red-100 text-red-700' },
@@ -77,6 +92,14 @@ const SYSTEM_ROLES: { id: UserRole; name: string; description: string; color: st
   { id: 'agent', name: 'Agente', description: 'Venta de seguros y gestión de cartera', color: 'bg-orange-100 text-orange-700' },
   { id: 'client', name: 'Cliente', description: 'Acceso a sus propias pólizas', color: 'bg-gray-100 text-gray-700' },
 ];
+
+const GCS_PROJECT_ID = 'ai-studio-msiadminplatform-aafdf6c5-a449-4ecd-ad08-755db11e4987';
+const GCS_SERVICE_ACCOUNT = 'ai-studio-msiadminplatform-aafdf6c5-a449-4ecd-ad08-755db11e4987@appspot.gserviceaccount.com';
+
+const GCS_SNIPPET_STEP1 = 'gcloud storage buckets create gs://miseguro-firestore-backups --location=us-east1 --default-storage-class=NEARLINE';
+const GCS_SNIPPET_STEP2 = `gcloud projects add-iam-policy-binding ${GCS_PROJECT_ID} --member="serviceAccount:${GCS_SERVICE_ACCOUNT}" --role="roles/datastore.importExportAdmin"`;
+const GCS_SNIPPET_STEP3 = `gcloud scheduler jobs create http firestore-weekly-backup --schedule="0 2 * * 0" --uri="https://firestore.googleapis.com/v1/projects/${GCS_PROJECT_ID}/databases/(default):exportDocuments" --http-method=POST --message-body="{\\"outputUriPrefix\\":\\"gs://miseguro-firestore-backups/semanal\\"}" --oauth-service-account-email="${GCS_SERVICE_ACCOUNT}" --location=us-east1`;
+const GCS_SNIPPET_STEP4 = `gcloud firestore export gs://miseguro-firestore-backups/manual-$(date +%Y%m%d_%H%M%S) --project=${GCS_PROJECT_ID}`;
 
 const getDefaultPermissions = (roleId: string) => {
   const perms: Record<string, { view: boolean; create: boolean; edit: boolean; delete: boolean }> = {};
@@ -247,6 +270,13 @@ export default function ConfigPanel({ profile, rolePermissions }: ConfigPanelPro
     status: 'idle' | 'success' | 'error';
     message?: string;
   }>({ status: 'idle' });
+  const [copiedGcsSnippet, setCopiedGcsSnippet] = useState<string | null>(null);
+
+  const handleCopySnippet = (text: string, id: string) => {
+    navigator.clipboard.writeText(text);
+    setCopiedGcsSnippet(id);
+    setTimeout(() => setCopiedGcsSnippet(null), 2500);
+  };
 
   // Load cloud backups and scheduler settings
   const fetchCloudBackupsAndSchedule = async () => {
@@ -335,6 +365,10 @@ export default function ConfigPanel({ profile, rolePermissions }: ConfigPanelPro
         recordCounts[collectionMeta.id] = backupData[collectionMeta.id].length;
       }
 
+      // Compress backup payload using JSZip DEFLATE level 9
+      const { base64Zip, originalSize, compressedSize } = await compressJsonToBase64Zip(backupData);
+      const ratio = Math.round((1 - compressedSize / originalSize) * 100);
+
       const backupDoc = {
         meta: {
           appId: "mi-seguro-internacional",
@@ -342,9 +376,14 @@ export default function ConfigPanel({ profile, rolePermissions }: ConfigPanelPro
           exportedAt: new Date().toISOString(),
           exportedBy: profile?.email || 'Administrador (Manual)',
           totalCollectionsCount: EXPORTABLE_COLLECTIONS.length,
-          recordCounts: recordCounts
+          recordCounts: recordCounts,
+          isCompressed: true,
+          originalSize,
+          compressedSize,
+          compressionRatio: `${ratio}%`
         },
-        databaseJson: JSON.stringify(backupData)
+        zippedData: base64Zip,
+        databaseJson: ""
       };
 
       const backupId = `backup_${Date.now()}`;
@@ -369,7 +408,7 @@ export default function ConfigPanel({ profile, rolePermissions }: ConfigPanelPro
       await fetchCloudBackupsAndSchedule();
       setCloudBackupStatus({
         status: 'success',
-        message: '¡Copia de seguridad en la nube completada con éxito! Se han guardado tus datos y se ha mantenido el límite de las últimas 5 copias.'
+        message: `¡Copia de seguridad comprimida en la nube completada con éxito! (${formatBytes(originalSize)} comprimido a ${formatBytes(compressedSize)} - reducción del ${ratio}%).`
       });
     } catch (err: any) {
       setCloudBackupStatus({
@@ -387,21 +426,21 @@ export default function ConfigPanel({ profile, rolePermissions }: ConfigPanelPro
       if (!backupSnap.exists()) throw new Error("Copia de seguridad no encontrada");
 
       const data = backupSnap.data()!;
+      let databaseObj: any = {};
+
+      if (data.zippedData) {
+        databaseObj = await decompressZipToJson(data.zippedData);
+      } else if (data.databaseJson) {
+        databaseObj = JSON.parse(data.databaseJson || "{}");
+      }
+
       const fileData = {
         meta: data.meta,
-        database: JSON.parse(data.databaseJson || "{}")
+        database: databaseObj
       };
 
-      const jsonStr = JSON.stringify(fileData, null, 2);
-      const blob = new Blob([jsonStr], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `${name}.json`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(url);
+      const zipBlob = await compressJsonToZipBlob(fileData, 'backup.json');
+      downloadBlob(zipBlob, `${name}.zip`);
     } catch (err: any) {
       alert(`No se pudo descargar la copia de seguridad: ${err.message}`);
     }
@@ -419,7 +458,13 @@ export default function ConfigPanel({ profile, rolePermissions }: ConfigPanelPro
       if (!backupSnap.exists()) throw new Error("Copia de seguridad no encontrada");
 
       const data = backupSnap.data()!;
-      const database = JSON.parse(data.databaseJson || "{}");
+      let database: any = {};
+
+      if (data.zippedData) {
+        database = await decompressZipToJson(data.zippedData);
+      } else if (data.databaseJson) {
+        database = JSON.parse(data.databaseJson || "{}");
+      }
 
       let restoredCount = 0;
       const collectionsToRestore = Object.keys(database);
@@ -553,8 +598,8 @@ export default function ConfigPanel({ profile, rolePermissions }: ConfigPanelPro
     return flattened;
   };
 
-  // 1. One Click Complete JSON Database backup
-  const handleDownloadFullBackupJSON = async () => {
+  // 1. One Click Complete Database backup (Compressed ZIP or Plain JSON)
+  const handleDownloadFullBackup = async (formatType: 'zip' | 'json' = 'zip') => {
     setIsExportingFull(true);
     setExportStatus({ status: 'idle' });
     
@@ -594,26 +639,33 @@ export default function ConfigPanel({ profile, rolePermissions }: ConfigPanelPro
           exportedAt: new Date().toISOString(),
           exportedBy: profile?.email || 'Sistema',
           totalCollectionsCount: selectedColMetas.length,
-          recordCounts: finalCountMap
+          recordCounts: finalCountMap,
+          isCompressed: formatType === 'zip'
         },
         database: backupData
       };
 
-      const jsonStr = JSON.stringify(backupEnvelope, null, 2);
-      const blob = new Blob([jsonStr], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement('a');
-      link.href = url;
-      link.download = `Backup_Seleccionado_MiSeguroInternacional_${new Date().toISOString().split('T')[0]}_${Date.now()}.json`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(url);
-      
-      setExportStatus({
-        status: 'success',
-        message: `¡Copia de seguridad generada con éxito! Se incluyeron ${selectedColMetas.length} colección(es) en el archivo JSON.`
-      });
+      const dateStamp = new Date().toISOString().split('T')[0];
+      const timeStamp = Date.now();
+
+      if (formatType === 'zip') {
+        const zipBlob = await compressJsonToZipBlob(backupEnvelope, 'backup.json');
+        downloadBlob(zipBlob, `Backup_MiSeguroInternacional_${dateStamp}_${timeStamp}.zip`);
+        
+        setExportStatus({
+          status: 'success',
+          message: `¡Copia de seguridad comprimida (.ZIP) generada con éxito! (${formatBytes(zipBlob.size)}). Se incluyeron ${selectedColMetas.length} colección(es).`
+        });
+      } else {
+        const jsonStr = JSON.stringify(backupEnvelope, null, 2);
+        const blob = new Blob([jsonStr], { type: 'application/json' });
+        downloadBlob(blob, `Backup_MiSeguroInternacional_${dateStamp}_${timeStamp}.json`);
+        
+        setExportStatus({
+          status: 'success',
+          message: `¡Copia de seguridad JSON generada con éxito! (${formatBytes(blob.size)}). Se incluyeron ${selectedColMetas.length} colección(es).`
+        });
+      }
     } catch (error: any) {
       console.error("Full backup failure: ", error);
       setExportStatus({
@@ -625,6 +677,9 @@ export default function ConfigPanel({ profile, rolePermissions }: ConfigPanelPro
       setExportCollectionProgress(null);
     }
   };
+
+  // Legacy wrapper
+  const handleDownloadFullBackupJSON = () => handleDownloadFullBackup('json');
 
   // 2. Export individual collection to CSV (Excel compatible)
   const handleExportCollectionCSV = async (collectionId: string, label: string) => {
@@ -664,46 +719,51 @@ export default function ConfigPanel({ profile, rolePermissions }: ConfigPanelPro
     }
   };
 
-  // 3. Handle validation/loading of the Backup JSON file
-  const handleBackupFileSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
+  // 3. Handle validation/loading of the Backup (.zip or .json) file
+  const handleBackupFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      try {
-        const parsed = JSON.parse(event.target?.result as string);
-        if (!parsed || !parsed.meta || !parsed.database) {
-          setSelectedBackupFile(null);
-          setSelectedBackupMeta(null);
-          setImportStatus({
-            status: 'error',
-            message: 'El archivo JSON no tiene la firma o estructura de respaldo de Mi Seguro Internacional (faltan campos "meta" o "database").'
-          });
-          return;
-        }
+    try {
+      const result = await readBackupFile(file);
+      const parsed = result.data;
 
-        setSelectedBackupFile(parsed.database);
-        setSelectedBackupMeta(parsed.meta);
-        
-        // Initialize importScope, by default check everything inside database
-        const scope: Record<string, boolean> = {};
-        Object.keys(parsed.database).forEach(colName => {
-          scope[colName] = true;
-        });
-        setImportScope(scope);
-
-        setImportStatus({ status: 'idle' });
-      } catch (err: any) {
+      if (!parsed || !parsed.meta || !parsed.database) {
         setSelectedBackupFile(null);
         setSelectedBackupMeta(null);
         setImportStatus({
           status: 'error',
-          message: `El archivo JSON es inválido o está corrupto: ${err.message || err}`
+          message: 'El archivo no tiene la firma o estructura de respaldo de Mi Seguro Internacional (faltan campos "meta" o "database").'
         });
+        return;
       }
-    };
-    reader.readAsText(file);
+
+      setSelectedBackupFile(parsed.database);
+      setSelectedBackupMeta({
+        ...parsed.meta,
+        fileInfo: {
+          name: result.fileName,
+          isCompressed: result.isCompressed,
+          sizeFormatted: formatBytes(result.originalSize)
+        }
+      });
+      
+      // Initialize importScope, by default check everything inside database
+      const scope: Record<string, boolean> = {};
+      Object.keys(parsed.database).forEach(colName => {
+        scope[colName] = true;
+      });
+      setImportScope(scope);
+
+      setImportStatus({ status: 'idle' });
+    } catch (err: any) {
+      setSelectedBackupFile(null);
+      setSelectedBackupMeta(null);
+      setImportStatus({
+        status: 'error',
+        message: `El archivo de respaldo es inválido o está corrupto: ${err.message || err}`
+      });
+    }
   };
 
   // 4. One-Click restore of DB content
@@ -1993,7 +2053,7 @@ export default function ConfigPanel({ profile, rolePermissions }: ConfigPanelPro
                         {u.role === 'agent' ? `${u.commission ?? 0}%` : '-'}
                       </td>
                       <td className="px-6 py-4 text-sm text-gray-500">
-                        {u.createdAt ? format(u.createdAt.toDate(), 'dd/MM/yyyy', { locale: es }) : '---'}
+                        {u.createdAt ? formatDisplayDate(u.createdAt) : '---'}
                       </td>
                       <td className="px-6 py-4">
                         <div className="flex gap-2">
@@ -2423,6 +2483,12 @@ export default function ConfigPanel({ profile, rolePermissions }: ConfigPanelPro
                               <span className="text-[10px] font-black uppercase px-2 py-0.5 bg-indigo-100 text-indigo-800 rounded">
                                 #{cloudBackups.length - idx}
                               </span>
+                              {bk.meta?.isCompressed && (
+                                <span className="text-[9px] font-black uppercase px-2 py-0.5 bg-emerald-100 text-emerald-800 rounded border border-emerald-200 flex items-center gap-1">
+                                  <FileSpreadsheet className="w-3 h-3 text-emerald-600" />
+                                  ZIP {bk.meta?.compressionRatio ? `(${bk.meta.compressionRatio} Ahorro)` : ''}
+                                </span>
+                              )}
                               <span className="text-xs font-black text-gray-800 font-mono">
                                 {dateStr}
                               </span>
@@ -2476,6 +2542,156 @@ export default function ConfigPanel({ profile, rolePermissions }: ConfigPanelPro
               </div>
             </div>
 
+            {/* Google Cloud Storage Automated Weekly Backups Guide Card */}
+            <div className="bg-gradient-to-br from-slate-900 via-indigo-950 to-slate-900 text-white p-8 rounded-3xl border border-indigo-500/20 shadow-xl relative overflow-hidden">
+              <div className="absolute top-0 right-0 p-8 opacity-10 pointer-events-none hidden md:block">
+                <Cloud className="w-56 h-56 text-indigo-400" />
+              </div>
+
+              <div className="max-w-4xl relative z-10 space-y-6">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex items-center gap-3">
+                    <div className="w-12 h-12 rounded-2xl bg-indigo-500/20 border border-indigo-400/30 flex items-center justify-center text-indigo-300">
+                      <Cloud className="w-6 h-6" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <h3 className="text-xl font-black tracking-tight text-white">Respaldos Automáticos Semanales en Google Cloud Storage</h3>
+                        <span className="px-2.5 py-0.5 bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 rounded-full text-[10px] font-black uppercase tracking-wider">
+                          Nativo GCP
+                        </span>
+                      </div>
+                      <p className="text-xs text-indigo-200/70 mt-0.5">
+                        Exportación automatizada sin servidor directamente desde Firestore a un bucket seguro de Google Cloud Storage.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 px-3 py-1.5 bg-white/10 rounded-xl border border-white/10 text-xs font-mono text-indigo-200">
+                    <Database className="w-3.5 h-3.5 text-indigo-400" />
+                    <span>ID Proyecto: <strong className="text-white">ai-studio-msiadminplatform-aafdf6c5-a449-4ecd-ad08-755db11e4987</strong></span>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+                  {/* Step 1 */}
+                  <div className="bg-white/5 border border-white/10 p-4 rounded-2xl space-y-2.5 flex flex-col justify-between">
+                    <div>
+                      <div className="flex items-center justify-between text-indigo-300 font-bold mb-1">
+                        <span className="flex items-center gap-1.5">
+                          <HardDrive className="w-3.5 h-3.5 text-indigo-400" />
+                          1. Crear Bucket en Cloud Storage
+                        </span>
+                        <span className="text-[10px] text-gray-400 font-mono">Nearline / us-east1</span>
+                      </div>
+                      <p className="text-[11px] text-gray-300 leading-relaxed">
+                        Crea el contenedor seguro de almacenamiento en la misma región para costo mínimo y velocidad máxima.
+                      </p>
+                    </div>
+                    <div className="bg-black/40 p-2.5 rounded-xl border border-white/10 flex items-center justify-between gap-2 font-mono text-[10px] text-emerald-300">
+                      <span className="truncate">{GCS_SNIPPET_STEP1}</span>
+                      <button
+                        type="button"
+                        onClick={() => handleCopySnippet(GCS_SNIPPET_STEP1, 'step1')}
+                        className="p-1.5 hover:bg-white/10 rounded text-gray-300 hover:text-white transition-all shrink-0 cursor-pointer"
+                        title="Copiar comando"
+                      >
+                        {copiedGcsSnippet === 'step1' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Step 2 */}
+                  <div className="bg-white/5 border border-white/10 p-4 rounded-2xl space-y-2.5 flex flex-col justify-between">
+                    <div>
+                      <div className="flex items-center justify-between text-indigo-300 font-bold mb-1">
+                        <span className="flex items-center gap-1.5">
+                          <Shield className="w-3.5 h-3.5 text-indigo-400" />
+                          2. Permisos IAM de Exportación
+                        </span>
+                        <span className="text-[10px] text-gray-400 font-mono">Service Account</span>
+                      </div>
+                      <p className="text-[11px] text-gray-300 leading-relaxed">
+                        Otorga permiso a la cuenta de servicio de Firestore para escribir los respaldos en el bucket.
+                      </p>
+                    </div>
+                    <div className="bg-black/40 p-2.5 rounded-xl border border-white/10 flex items-center justify-between gap-2 font-mono text-[10px] text-emerald-300">
+                      <span className="truncate">{GCS_SNIPPET_STEP2}</span>
+                      <button
+                        type="button"
+                        onClick={() => handleCopySnippet(GCS_SNIPPET_STEP2, 'step2')}
+                        className="p-1.5 hover:bg-white/10 rounded text-gray-300 hover:text-white transition-all shrink-0 cursor-pointer"
+                        title="Copiar comando"
+                      >
+                        {copiedGcsSnippet === 'step2' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Step 3 */}
+                  <div className="bg-white/5 border border-white/10 p-4 rounded-2xl space-y-2.5 flex flex-col justify-between">
+                    <div>
+                      <div className="flex items-center justify-between text-indigo-300 font-bold mb-1">
+                        <span className="flex items-center gap-1.5">
+                          <Clock className="w-3.5 h-3.5 text-indigo-400" />
+                          3. Programar Semanal en Cloud Scheduler
+                        </span>
+                        <span className="text-[10px] text-emerald-400 font-mono">0 2 * * 0 (Dom 02:00 AM)</span>
+                      </div>
+                      <p className="text-[11px] text-gray-300 leading-relaxed">
+                        Crea el trabajo cron en Cloud Scheduler que invocará automáticamente la API de exportación de Firestore cada domingo.
+                      </p>
+                    </div>
+                    <div className="bg-black/40 p-2.5 rounded-xl border border-white/10 flex items-center justify-between gap-2 font-mono text-[10px] text-emerald-300">
+                      <span className="truncate">{GCS_SNIPPET_STEP3}</span>
+                      <button
+                        type="button"
+                        onClick={() => handleCopySnippet(GCS_SNIPPET_STEP3, 'step3')}
+                        className="p-1.5 hover:bg-white/10 rounded text-gray-300 hover:text-white transition-all shrink-0 cursor-pointer"
+                        title="Copiar comando"
+                      >
+                        {copiedGcsSnippet === 'step3' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* Step 4 */}
+                  <div className="bg-white/5 border border-white/10 p-4 rounded-2xl space-y-2.5 flex flex-col justify-between">
+                    <div>
+                      <div className="flex items-center justify-between text-indigo-300 font-bold mb-1">
+                        <span className="flex items-center gap-1.5">
+                          <Terminal className="w-3.5 h-3.5 text-indigo-400" />
+                          4. Respaldo Manual Inmediato a GCS
+                        </span>
+                        <span className="text-[10px] text-gray-400 font-mono">1 Clic CLI</span>
+                      </div>
+                      <p className="text-[11px] text-gray-300 leading-relaxed">
+                        Ejecuta un respaldo completo instantáneo desde la consola de Google Cloud Shell en cualquier momento.
+                      </p>
+                    </div>
+                    <div className="bg-black/40 p-2.5 rounded-xl border border-white/10 flex items-center justify-between gap-2 font-mono text-[10px] text-emerald-300">
+                      <span className="truncate">{GCS_SNIPPET_STEP4}</span>
+                      <button
+                        type="button"
+                        onClick={() => handleCopySnippet(GCS_SNIPPET_STEP4, 'step4')}
+                        className="p-1.5 hover:bg-white/10 rounded text-gray-300 hover:text-white transition-all shrink-0 cursor-pointer"
+                        title="Copiar comando"
+                      >
+                        {copiedGcsSnippet === 'step4' ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="p-3.5 bg-indigo-500/10 border border-indigo-400/20 rounded-2xl flex items-start gap-2.5 text-xs text-indigo-200">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+                  <p>
+                    <strong>Rotación y Costos:</strong> Al utilizar la clase de almacenamiento <code className="text-white bg-white/10 px-1 py-0.5 rounded">Nearline</code> en Google Cloud Storage, el costo mensual por resguardar toda la base de datos de Mi Seguro Internacional es de apenas centavos de dólar. Además, puedes configurar una regla de ciclo de vida (Lifecycle Rule) en el bucket para retener 60 días y depurar copias obsoletas automáticamente.
+                  </p>
+                </div>
+              </div>
+            </div>
+
             {/* Main Action Callout Card (One-click complete backup) */}
             <div className="bg-gradient-to-br from-blue-50 to-indigo-50/50 p-8 rounded-3xl border border-blue-100/80 shadow-sm relative overflow-hidden">
               <div className="absolute top-0 right-0 p-8 opacity-5 pointer-events-none hidden md:block">
@@ -2490,7 +2706,7 @@ export default function ConfigPanel({ profile, rolePermissions }: ConfigPanelPro
 
                 <h4 className="text-lg font-black text-gray-900 mb-2">Descargar Copia de Seguridad de la Base de Datos</h4>
                 <p className="text-sm text-gray-600 mb-6 leading-relaxed">
-                  Esta opción consulta de manera segura las colecciones activas de tu base de datos Firestore de manera simultánea en tiempo real. Genera un archivo consolidado en formato <strong className="text-blue-700">JSON</strong> estructurado con todos los perfiles de usuario, pólizas, cartas de seguro, clientes, transacciones, siniestros y bitácoras listo para salvaguardar o auditar de forma externa. Puedes marcar o desmarcar colecciones para un respaldo a la medida.
+                  Esta opción consulta de manera segura las colecciones activas de tu base de datos Firestore en tiempo real. Genera un archivo comprimido de alta densidad (<strong className="text-blue-700">.ZIP</strong> con compresión DEFLATE) o bien un archivo <strong className="text-blue-700">JSON</strong> estructurado. La compresión ZIP reduce el peso en más del 80%, evitando límites de memoria y facilitando respaldos masivos de cualquier tamaño.
                 </p>
 
                 {/* Checklist for selective collections to export */}
@@ -2583,19 +2799,31 @@ export default function ConfigPanel({ profile, rolePermissions }: ConfigPanelPro
                   </div>
                 )}
 
-                <button
-                  type="button"
-                  onClick={handleDownloadFullBackupJSON}
-                  disabled={isExportingFull}
-                  className="bg-blue-600 hover:bg-blue-700 text-white font-black text-sm px-6 py-4 rounded-2xl shadow-lg shadow-blue-200 hover:shadow-xl hover:shadow-blue-300 transition-all cursor-pointer flex items-center gap-3 disabled:opacity-50 disabled:cursor-not-allowed disabled:shadow-none"
-                >
-                  <Download className="w-5 h-5" />
-                  {isExportingFull ? 'Generando Copia...' : 'Iniciar Backup de Colecciones Seleccionadas (JSON)'}
-                </button>
+                <div className="flex flex-wrap items-center gap-3">
+                  <button
+                    type="button"
+                    onClick={() => handleDownloadFullBackup('zip')}
+                    disabled={isExportingFull}
+                    className="bg-blue-600 hover:bg-blue-700 text-white font-black text-sm px-6 py-4 rounded-2xl shadow-lg shadow-blue-200 hover:shadow-xl hover:shadow-blue-300 transition-all cursor-pointer flex items-center gap-3 disabled:opacity-50 disabled:cursor-not-allowed disabled:shadow-none"
+                  >
+                    <Download className="w-5 h-5" />
+                    {isExportingFull ? 'Generando Copia...' : 'Descargar Backup Comprimido (.ZIP - Recomendado)'}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleDownloadFullBackup('json')}
+                    disabled={isExportingFull}
+                    className="bg-white hover:bg-gray-50 text-blue-700 font-bold text-xs px-4 py-3.5 rounded-2xl border border-blue-200 transition-all cursor-pointer flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    <FileSpreadsheet className="w-4 h-4 text-blue-600" />
+                    Exportar JSON sin comprimir (.JSON)
+                  </button>
+                </div>
               </div>
             </div>
 
-            {/* Live Database Restoration Card (One Click JSON Restore) */}
+            {/* Live Database Restoration Card (One Click ZIP/JSON Restore) */}
             <div className="bg-gradient-to-br from-amber-50/70 to-orange-50/40 p-8 rounded-3xl border border-amber-200/50 shadow-sm relative overflow-hidden">
               <div className="absolute top-0 right-0 p-8 opacity-5 pointer-events-none hidden md:block">
                 <Upload className="w-48 h-48 text-amber-600" />
@@ -2607,12 +2835,12 @@ export default function ConfigPanel({ profile, rolePermissions }: ConfigPanelPro
                   <span className="text-[10px] font-black uppercase tracking-wider">Importación Selectiva</span>
                 </div>
 
-                <h4 className="text-lg font-black text-gray-900 mb-2">Restaurar Base de Datos desde Respaldo (JSON)</h4>
+                <h4 className="text-lg font-black text-gray-900 mb-2">Restaurar Base de Datos desde Respaldo (.ZIP o .JSON)</h4>
                 <p className="text-sm text-gray-600 mb-6 leading-relaxed">
-                  ¿Tienes un archivo de copia de seguridad en formato JSON? Súbelo para ver las colecciones guardadas, elegir exactamente cuáles quieres restaurar/sincronizar y procesar la importación de manera selectiva.
+                  ¿Tienes un archivo de copia de seguridad en formato <strong className="text-amber-800">.ZIP</strong> o <strong className="text-amber-800">.JSON</strong>? Súbelo para ver las colecciones guardadas, verificar la información y procesar la importación selectiva.
                 </p>
 
-                {/* Status messages for JSON Import */}
+                {/* Status messages for Import */}
                 {importStatus.status === 'success' && (
                   <div className="mb-6 p-4 bg-green-50 text-green-800 border border-green-100 rounded-2xl flex items-start gap-3 text-xs animate-in slide-in-from-top-2 duration-300">
                     <CheckCircle2 className="w-5 h-5 text-green-600 shrink-0 mt-0.5" />
@@ -2654,7 +2882,7 @@ export default function ConfigPanel({ profile, rolePermissions }: ConfigPanelPro
                     <input
                       id="backup-upload-input"
                       type="file"
-                      accept=".json"
+                      accept=".json,.zip"
                       disabled={isImportingFull}
                       onChange={handleBackupFileSelected}
                       className="block w-full text-xs text-gray-500

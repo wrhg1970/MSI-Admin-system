@@ -62,6 +62,16 @@ export default function QuotaDashboard() {
   useEffect(() => {
     loadData();
 
+    // Check every 30 seconds if the current calendar day has changed (midnight/00:00 transition)
+    let lastCheckedDay = new Date().getDate();
+    const intervalId = setInterval(() => {
+      const currentDay = new Date().getDate();
+      if (currentDay !== lastCheckedDay) {
+        lastCheckedDay = currentDay;
+        loadData();
+      }
+    }, 30000);
+
     // Listen to custom event dispatched by firebase.ts
     const handleUpdate = () => {
       loadData();
@@ -69,6 +79,7 @@ export default function QuotaDashboard() {
 
     window.addEventListener('firestore_telemetry_updated', handleUpdate);
     return () => {
+      clearInterval(intervalId);
       window.removeEventListener('firestore_telemetry_updated', handleUpdate);
     };
   }, []);
@@ -78,17 +89,35 @@ export default function QuotaDashboard() {
       const storedLogs = localStorage.getItem('firestore_telemetry_recent_v1');
       const storedAgg = localStorage.getItem('firestore_telemetry_aggregated_v1');
 
+      const today = new Date();
+      const todayStr = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+
+      let logs: TelemetryEntry[] = [];
       if (storedLogs) {
-        setRecentLogs(JSON.parse(storedLogs));
-      } else {
-        setRecentLogs([]);
+        logs = JSON.parse(storedLogs).filter((item: TelemetryEntry) => {
+          const itemDate = new Date(item.timestamp);
+          return itemDate.getFullYear() === today.getFullYear() &&
+                 itemDate.getMonth() === today.getMonth() &&
+                 itemDate.getDate() === today.getDate();
+        });
       }
 
+      let agg: { [key: string]: HourlyAgg } = {};
       if (storedAgg) {
-        setAggregated(JSON.parse(storedAgg));
-      } else {
-        setAggregated({});
+        const parsed = JSON.parse(storedAgg);
+        Object.keys(parsed).forEach(k => {
+          if (k.startsWith(todayStr)) {
+            agg[k] = parsed[k];
+          }
+        });
       }
+
+      // Persist pruned today-only data
+      localStorage.setItem('firestore_telemetry_recent_v1', JSON.stringify(logs));
+      localStorage.setItem('firestore_telemetry_aggregated_v1', JSON.stringify(agg));
+
+      setRecentLogs(logs);
+      setAggregated(agg);
     } catch (e) {
       console.error('Error loading telemetry data:', e);
     }
@@ -103,19 +132,26 @@ export default function QuotaDashboard() {
     }
   };
 
-  // Pre-seed some default simulation logs if empty to show beautiful chart previews
+  // Pre-seed some default simulation logs if empty to show beautiful chart previews (only today's data)
   const handleSeedDemoData = () => {
     const demoLogs: TelemetryEntry[] = [];
     const demoAgg: { [key: string]: HourlyAgg } = {};
-    const now = Date.now();
+    
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const startMs = todayStart.getTime();
+    const nowMs = Date.now();
+    const currentHour = new Date().getHours();
 
     const collections = ['policies', 'countries', 'insurances', 'users', 'logs', 'commissions'];
     const sources = ['PoliciesManager', 'Dashboard', 'ConfigPanel', 'CommissionsManager', 'Auth', 'CatalogsManager'];
     const ops: ('read' | 'write' | 'delete')[] = ['read', 'read', 'read', 'write', 'read', 'delete'];
 
-    // Create logs for the last 6 hours
-    for (let h = 5; h >= 0; h--) {
-      const hourTime = now - h * 3600000;
+    // Create logs for today's hours up to current hour
+    for (let h = 0; h <= currentHour; h++) {
+      const hourTime = startMs + h * 3600000;
+      if (hourTime > nowMs) continue;
+
       const date = new Date(hourTime);
       const year = date.getFullYear();
       const month = String(date.getMonth() + 1).padStart(2, '0');
@@ -137,7 +173,9 @@ export default function QuotaDashboard() {
         const col = collections[Math.floor(Math.random() * collections.length)];
         const src = sources[Math.floor(Math.random() * sources.length)];
         const op = ops[Math.floor(Math.random() * ops.length)];
-        const timestamp = hourTime - Math.floor(Math.random() * 1800000);
+        // Distribute randomly inside this hour
+        const timestamp = hourTime + Math.floor(Math.random() * 3600000);
+        if (timestamp > nowMs) continue;
 
         if (op === 'read') hourlyData.reads += Math.floor(Math.random() * 8) + 1;
         else if (op === 'write') hourlyData.writes++;

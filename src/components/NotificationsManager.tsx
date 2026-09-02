@@ -21,7 +21,16 @@ import {
   Search,
   CheckCircle2,
   AlertCircle,
-  Shield
+  Shield,
+  Server,
+  RefreshCw,
+  MailCheck,
+  ShieldCheck,
+  HelpCircle,
+  SendHorizontal,
+  ExternalLink,
+  AlertTriangle,
+  Radio
 } from 'lucide-react';
 import { format, parseISO, startOfMonth, endOfMonth, eachDayOfInterval, getDay, isSameDay } from 'date-fns';
 import { es } from 'date-fns/locale';
@@ -50,9 +59,91 @@ interface NotificationSettings {
 }
 
 export default function NotificationsManager({ profile, rolePermissions }: NotificationsManagerProps) {
-  const [activeTab, setActiveTab] = useState<'birthdays' | 'monthly_reports'>('birthdays');
+  const [activeTab, setActiveTab] = useState<'birthdays' | 'monthly_reports' | 'smtp_diagnostics'>('birthdays');
   const [clients, setClients] = useState<Client[]>([]);
   const [loading, setLoading] = useState(true);
+
+  // SMTP Server Diagnostics State
+  const [smtpStatus, setSmtpStatus] = useState<any>(null);
+  const [loadingSmtpStatus, setLoadingSmtpStatus] = useState(false);
+  const [smtpDirectEmail, setSmtpDirectEmail] = useState(profile?.email || 'ventas@misegurointernacional.com');
+  const [sendingSmtpDirect, setSendingSmtpDirect] = useState(false);
+  const [smtpDirectResult, setSmtpDirectResult] = useState<{ success: boolean; message: string; details?: any } | null>(null);
+
+  const fetchSmtpStatus = async () => {
+    setLoadingSmtpStatus(true);
+    try {
+      const res = await fetch('/api/smtp-status');
+      const data = await res.json();
+      setSmtpStatus(data);
+    } catch (err: any) {
+      setSmtpStatus({
+        configured: false,
+        verified: false,
+        error: err.message || 'No se pudo conectar al endpoint de estado SMTP'
+      });
+    } finally {
+      setLoadingSmtpStatus(false);
+    }
+  };
+
+  useEffect(() => {
+    fetchSmtpStatus();
+  }, []);
+
+  const handleSendDirectSmtpTest = async () => {
+    if (!smtpDirectEmail || !smtpDirectEmail.includes('@')) {
+      setSmtpDirectResult({
+        success: false,
+        message: 'Por favor ingrese un correo electrónico válido.'
+      });
+      return;
+    }
+
+    setSendingSmtpDirect(true);
+    setSmtpDirectResult(null);
+
+    try {
+      const res = await fetch('/api/smtp-test-send', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: smtpDirectEmail.trim() })
+      });
+      const data = await res.json();
+
+      if (res.ok && data.success) {
+        setSmtpDirectResult({
+          success: true,
+          message: `¡Correo de prueba enviado con éxito a ${smtpDirectEmail.trim()}! El servidor SMTP respondió: ${data.response || '250 OK'}. (ID: ${data.messageId || 'N/A'})`
+        });
+        // Log to notification audit trail
+        try {
+          await addDoc(collection(db, 'notificationLogs'), {
+            recipient: smtpDirectEmail.trim(),
+            subject: '[DIAGNÓSTICO] Prueba de Envío de Correo MSI',
+            status: 'success',
+            errorMessage: null,
+            createdAt: serverTimestamp(),
+            triggerType: 'smtp_diagnostic',
+            sentBy: profile?.email || 'Sistema-Admin'
+          });
+        } catch (e) {}
+      } else {
+        setSmtpDirectResult({
+          success: false,
+          message: data.error || 'Error al enviar el correo de prueba.',
+          details: data.details
+        });
+      }
+    } catch (err: any) {
+      setSmtpDirectResult({
+        success: false,
+        message: 'Error de conexión con el servidor: ' + (err.message || 'Desconocido')
+      });
+    } finally {
+      setSendingSmtpDirect(false);
+    }
+  };
   const [settings, setSettings] = useState<NotificationSettings>({
     birthdayGreetingEnabled: true,
     birthdayTemplate: '¡Hola {nombre}! 🎉 De parte de todo el equipo de Mi Seguro Internacional, te deseamos un muy feliz cumpleaños. Que pases un excelente día rodeado de tus seres queridos. 🎂✨',
@@ -128,7 +219,7 @@ export default function NotificationsManager({ profile, rolePermissions }: Notif
           setSettings(defaultSettings);
         }
       } catch (error) {
-        console.error('Error fetching notification settings:', error);
+        handleFirestoreError(error, OperationType.GET, 'notificationSettings');
       }
     };
 
@@ -440,10 +531,10 @@ export default function NotificationsManager({ profile, rolePermissions }: Notif
       </div>
 
       {/* Tabs */}
-      <div className="bg-white p-2 rounded-2xl border border-gray-100 shadow-sm inline-flex gap-1.5 w-full md:w-auto">
+      <div className="bg-white p-2 rounded-2xl border border-gray-100 shadow-sm inline-flex flex-wrap gap-1.5 w-full md:w-auto">
         <button
           onClick={() => setActiveTab('birthdays')}
-          className={`flex items-center justify-center gap-2 px-6 py-3 text-sm font-bold rounded-xl transition-all cursor-pointer flex-1 md:flex-initial ${
+          className={`flex items-center justify-center gap-2 px-5 py-2.5 text-sm font-bold rounded-xl transition-all cursor-pointer flex-1 md:flex-initial ${
             activeTab === 'birthdays'
               ? 'bg-blue-600 text-white shadow-md'
               : 'text-gray-500 hover:text-gray-700 hover:bg-gray-50'
@@ -454,7 +545,7 @@ export default function NotificationsManager({ profile, rolePermissions }: Notif
         </button>
         <button
           onClick={() => setActiveTab('monthly_reports')}
-          className={`flex items-center justify-center gap-2 px-6 py-3 text-sm font-bold rounded-xl transition-all cursor-pointer flex-1 md:flex-initial ${
+          className={`flex items-center justify-center gap-2 px-5 py-2.5 text-sm font-bold rounded-xl transition-all cursor-pointer flex-1 md:flex-initial ${
             activeTab === 'monthly_reports'
               ? 'bg-blue-600 text-white shadow-md'
               : 'text-gray-500 hover:text-gray-700 hover:bg-gray-50'
@@ -462,6 +553,17 @@ export default function NotificationsManager({ profile, rolePermissions }: Notif
         >
           <FileText className="w-4 h-4" />
           Reportes Mensuales
+        </button>
+        <button
+          onClick={() => setActiveTab('smtp_diagnostics')}
+          className={`flex items-center justify-center gap-2 px-5 py-2.5 text-sm font-bold rounded-xl transition-all cursor-pointer flex-1 md:flex-initial ${
+            activeTab === 'smtp_diagnostics'
+              ? 'bg-blue-600 text-white shadow-md'
+              : 'text-gray-500 hover:text-gray-700 hover:bg-gray-50'
+          }`}
+        >
+          <Server className="w-4 h-4" />
+          Diagnóstico y Servidor SMTP
         </button>
       </div>
 
@@ -816,7 +918,7 @@ export default function NotificationsManager({ profile, rolePermissions }: Notif
                 </div>
               </div>
             </>
-          ) : (
+          ) : activeTab === 'monthly_reports' ? (
             <>
               {/* Tabs: Monthly report configuration panel */}
               <div className="xl:col-span-2 space-y-6 animate-fadeIn">
@@ -1205,6 +1307,240 @@ export default function NotificationsManager({ profile, rolePermissions }: Notif
                     <p className="text-[10px] text-gray-400 font-semibold text-center mt-1 leading-relaxed">
                       Se generarán de forma dinámica variables de prueba ficticias reemplazando {'{nombre}'}, {'{mes}'}, {'{anio}'} y {'{reportes_seleccionados}'}.
                     </p>
+                  </div>
+                </div>
+              </div>
+            </>
+          ) : (
+            <>
+              {/* Tab: SMTP Server Diagnostics & Live Testing */}
+              <div className="xl:col-span-3 space-y-6 animate-fadeIn">
+                {/* Status Hero Card */}
+                <div className="bg-white p-6 md:p-8 rounded-3xl border border-gray-100 shadow-sm">
+                  <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 pb-6 border-b border-gray-100">
+                    <div className="flex items-center gap-4">
+                      <div className={`w-14 h-14 rounded-2xl flex items-center justify-center shrink-0 ${
+                        smtpStatus?.verified 
+                          ? 'bg-emerald-50 text-emerald-600 border border-emerald-100' 
+                          : smtpStatus?.configured 
+                            ? 'bg-red-50 text-red-600 border border-red-100'
+                            : 'bg-amber-50 text-amber-600 border border-amber-100'
+                      }`}>
+                        <Server className="w-7 h-7" />
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <h2 className="text-xl font-black text-gray-900 tracking-tight">Estado del Servidor de Correo (SMTP)</h2>
+                          {smtpStatus?.verified ? (
+                            <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-emerald-50 text-emerald-700 border border-emerald-200 text-xs font-bold rounded-full">
+                              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                              Conectado y Verificado
+                            </span>
+                          ) : smtpStatus?.configured ? (
+                            <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-red-50 text-red-700 border border-red-200 text-xs font-bold rounded-full">
+                              <AlertCircle className="w-3.5 h-3.5 text-red-600" />
+                              Error de Autenticación / Conexión
+                            </span>
+                          ) : (
+                            <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-amber-50 text-amber-700 border border-amber-200 text-xs font-bold rounded-full">
+                              <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
+                              No Configurado
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-xs text-gray-500 font-medium mt-1">
+                          Monitorea la conexión en vivo con el servidor de correo electrónico para el despacho de pólizas y notificaciones.
+                        </p>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={fetchSmtpStatus}
+                      disabled={loadingSmtpStatus}
+                      className="inline-flex items-center justify-center gap-2 px-4 py-2.5 bg-gray-50 hover:bg-gray-100 text-gray-700 text-xs font-bold rounded-xl border border-gray-200 transition-all cursor-pointer disabled:opacity-50"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${loadingSmtpStatus ? 'animate-spin text-blue-600' : ''}`} />
+                      {loadingSmtpStatus ? 'Verificando...' : 'Re-comprobar Conexión'}
+                    </button>
+                  </div>
+
+                  {/* Diagnostic Details Grid */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mt-6">
+                    <div className="p-4 bg-gray-50/70 border border-gray-100 rounded-2xl">
+                      <span className="text-[10px] font-black uppercase tracking-wider text-gray-400 block mb-1">Servidor Host</span>
+                      <span className="text-xs font-bold text-gray-800 flex items-center gap-1.5">
+                        <Radio className="w-3.5 h-3.5 text-blue-500" />
+                        {smtpStatus?.host || 'smtp.gmail.com'}
+                      </span>
+                    </div>
+
+                    <div className="p-4 bg-gray-50/70 border border-gray-100 rounded-2xl">
+                      <span className="text-[10px] font-black uppercase tracking-wider text-gray-400 block mb-1">Puerto & Cifrado</span>
+                      <span className="text-xs font-bold text-gray-800">
+                        Puerto {smtpStatus?.port || 587} {smtpStatus?.secure ? '(SSL/TLS)' : '(STARTTLS)'}
+                      </span>
+                    </div>
+
+                    <div className="p-4 bg-gray-50/70 border border-gray-100 rounded-2xl">
+                      <span className="text-[10px] font-black uppercase tracking-wider text-gray-400 block mb-1">Usuario Autenticado</span>
+                      <span className="text-xs font-bold text-gray-800 truncate block" title={smtpStatus?.user || 'No configurado'}>
+                        {smtpStatus?.user || 'ventas@misegurointernacional.com'}
+                      </span>
+                    </div>
+
+                    <div className="p-4 bg-gray-50/70 border border-gray-100 rounded-2xl">
+                      <span className="text-[10px] font-black uppercase tracking-wider text-gray-400 block mb-1">Remitente Oficial (From)</span>
+                      <span className="text-xs font-bold text-gray-800 truncate block" title={smtpStatus?.from || 'No configurado'}>
+                        {smtpStatus?.from || 'no-reply@misegurointernacional.com'}
+                      </span>
+                    </div>
+                  </div>
+
+                  {smtpStatus?.message && (
+                    <div className={`mt-6 p-4 rounded-2xl border text-xs font-medium flex items-start gap-3 ${
+                      smtpStatus.verified 
+                        ? 'bg-emerald-50/60 border-emerald-200 text-emerald-900' 
+                        : 'bg-red-50/60 border-red-200 text-red-900'
+                    }`}>
+                      {smtpStatus.verified ? (
+                        <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
+                      ) : (
+                        <AlertCircle className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
+                      )}
+                      <div>
+                        <p className="font-bold">{smtpStatus.message}</p>
+                        {smtpStatus.advice && <p className="mt-1 text-[11px] opacity-90">{smtpStatus.advice}</p>}
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* Live Diagnostic Sender & Troubleshooting Cards */}
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  {/* Card 1: Live Interactive Test */}
+                  <div className="bg-white p-6 rounded-3xl border border-gray-100 shadow-sm space-y-4">
+                    <div className="flex items-center gap-3 border-b border-gray-50 pb-4">
+                      <div className="w-10 h-10 bg-blue-50 text-blue-600 border border-blue-100 rounded-xl flex items-center justify-center shrink-0">
+                        <SendHorizontal className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <h3 className="text-sm font-black text-gray-900 uppercase tracking-tight">Prueba de Envío en Tiempo Real</h3>
+                        <p className="text-[11px] text-gray-500 font-medium">Envía un correo de verificación en vivo para comprobar la entrega inmediata.</p>
+                      </div>
+                    </div>
+
+                    <div className="space-y-3">
+                      <div>
+                        <label className="text-[11px] font-bold text-gray-700 block mb-1">
+                          Dirección de Correo Destinatario para la Prueba:
+                        </label>
+                        <input
+                          type="email"
+                          value={smtpDirectEmail}
+                          onChange={(e) => setSmtpDirectEmail(e.target.value)}
+                          placeholder="ejemplo@gmail.com o correo de prueba"
+                          className="w-full px-4 py-2.5 border border-gray-200 focus:ring-2 focus:ring-blue-500 rounded-xl outline-none text-xs font-semibold bg-gray-50/10 placeholder-gray-400"
+                        />
+                      </div>
+
+                      {smtpDirectResult && (
+                        <div className={`p-4 rounded-xl border text-xs leading-relaxed animate-fadeIn ${
+                          smtpDirectResult.success 
+                            ? 'bg-emerald-50 border-emerald-200 text-emerald-800' 
+                            : 'bg-red-50 border-red-200 text-red-800'
+                        }`}>
+                          <div className="flex items-start gap-2">
+                            {smtpDirectResult.success ? (
+                              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                            ) : (
+                              <AlertCircle className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
+                            )}
+                            <div>
+                              <p className="font-bold">{smtpDirectResult.message}</p>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={handleSendDirectSmtpTest}
+                        disabled={sendingSmtpDirect}
+                        className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-3 px-5 rounded-xl text-xs transition-all flex items-center justify-center gap-2 cursor-pointer shadow-md disabled:bg-gray-300"
+                      >
+                        {sendingSmtpDirect ? (
+                          <>
+                            <div className="animate-spin rounded-full h-3.5 w-3.5 border-b-2 border-white"></div>
+                            <span>Verificando y Enviando por SMTP...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Send className="w-4 h-4" />
+                            <span>Enviar Correo de Diagnóstico Ahora</span>
+                          </>
+                        )}
+                      </button>
+
+                      <p className="text-[10px] text-gray-400 font-semibold text-center leading-relaxed">
+                        Esta prueba realiza una conexión socket directa con el servidor SMTP y registra la confirmación de recepción (Código 250).
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* Card 2: Why clients might not see emails & Solutions */}
+                  <div className="bg-white p-6 rounded-3xl border border-gray-100 shadow-sm space-y-4">
+                    <div className="flex items-center gap-3 border-b border-gray-50 pb-4">
+                      <div className="w-10 h-10 bg-amber-50 text-amber-600 border border-amber-100 rounded-xl flex items-center justify-center shrink-0">
+                        <HelpCircle className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <h3 className="text-sm font-black text-gray-900 uppercase tracking-tight">¿Por qué algunos clientes no reciben sus correos?</h3>
+                        <p className="text-[11px] text-gray-500 font-medium">Causas frecuentes de recepción y soluciones recomendadas.</p>
+                      </div>
+                    </div>
+
+                    <div className="space-y-3.5 text-xs text-gray-600">
+                      <div className="flex items-start gap-2.5">
+                        <span className="w-5 h-5 bg-amber-100 text-amber-800 font-black text-[10px] rounded-full flex items-center justify-center shrink-0 mt-0.5">1</span>
+                        <div>
+                          <strong className="text-gray-900 block">Carpeta de Spam / Correo No Deseado / Promociones</strong>
+                          <p className="text-[11px] text-gray-500 mt-0.5">
+                            Los proveedores como Hotmail, Outlook o dominios empresariales a menudo filtran correos con adjuntos PDF. Indique al cliente buscar "Mi Seguro Internacional" en su bandeja de <strong>Spam</strong> o <strong>No Deseados</strong> y marcarlo como <em>"No es spam"</em>.
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-start gap-2.5">
+                        <span className="w-5 h-5 bg-blue-100 text-blue-800 font-black text-[10px] rounded-full flex items-center justify-center shrink-0 mt-0.5">2</span>
+                        <div>
+                          <strong className="text-gray-900 block">Registro SPF en DNS del Dominio</strong>
+                          <p className="text-[11px] text-gray-500 mt-0.5">
+                            Verifique que el dominio <code className="bg-gray-100 px-1 py-0.5 rounded text-[10px]">misegurointernacional.com</code> tenga configurado en su DNS el registro TXT de SPF: <code className="bg-gray-100 px-1 py-0.5 rounded text-[10px]">v=spf1 include:_spf.google.com ~all</code> para evitar rechazos en buzones corporativos.
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-start gap-2.5">
+                        <span className="w-5 h-5 bg-emerald-100 text-emerald-800 font-black text-[10px] rounded-full flex items-center justify-center shrink-0 mt-0.5">3</span>
+                        <div>
+                          <strong className="text-gray-900 block">Limpieza Automática de Correos y Caracteres</strong>
+                          <p className="text-[11px] text-gray-500 mt-0.5">
+                            El sistema ahora sanitiza y elimina espacios en blanco o comas accidentales en las direcciones de los clientes antes de enviarlas al servidor.
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-start gap-2.5">
+                        <span className="w-5 h-5 bg-indigo-100 text-indigo-800 font-black text-[10px] rounded-full flex items-center justify-center shrink-0 mt-0.5">4</span>
+                        <div>
+                          <strong className="text-gray-900 block">Descarga y Envío Directo por WhatsApp</strong>
+                          <p className="text-[11px] text-gray-500 mt-0.5">
+                            En el panel de pólizas puede descargar el certificado o copiar la liga web de la póliza para compartirla de inmediato al viajero por WhatsApp.
+                          </p>
+                        </div>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>

@@ -4,6 +4,7 @@ import { db, handleFirestoreError, OperationType } from '../firebase';
 import { Client, InsuranceRequest, Payment, Claim } from '../types';
 import { X, Shield, Calendar, DollarSign, CreditCard, Receipt, Briefcase, CheckCircle2, Clock, AlertCircle, ArrowRight, FileText, Search } from 'lucide-react';
 import { format } from 'date-fns';
+import { formatDisplayDate } from '../lib/policyUtils';
 
 interface ClientDetailModalProps {
   isOpen: boolean;
@@ -453,7 +454,7 @@ export default function ClientDetailModal({ isOpen, onClose, client }: ClientDet
                               <div className="flex items-center gap-3 mt-0.5 text-[10px] text-gray-500">
                                 <span className="flex items-center gap-1">
                                   <Calendar className="w-3 h-3" />
-                                  {pay.date?.toDate ? format(pay.date.toDate(), 'dd/MM/yyyy') : format(new Date(pay.date), 'dd/MM/yyyy')}
+                                  {formatDisplayDate(pay.date)}
                                 </span>
                                 <span className="flex items-center gap-1">
                                   <CreditCard className="w-3 h-3" />
@@ -553,7 +554,7 @@ export default function ClientDetailModal({ isOpen, onClose, client }: ClientDet
                                 </td>
                                 <td className="px-6 py-4 text-xs text-gray-500">
                                   {commissionPayment?.date ? (
-                                    commissionPayment.date.toDate ? format(commissionPayment.date.toDate(), 'dd/MM/yyyy') : format(new Date(commissionPayment.date), 'dd/MM/yyyy')
+                                    formatDisplayDate(commissionPayment.date)
                                   ) : '-'}
                                 </td>
                               </tr>
@@ -615,6 +616,22 @@ export default function ClientDetailModal({ isOpen, onClose, client }: ClientDet
                               </div>
 
                               <h4 className="font-bold text-gray-900 text-sm mb-1">{ins?.policyName || 'Póliza sin especificar'}</h4>
+                              
+                              <div className="space-y-1 mb-2">
+                                {claim.reference && (
+                                  <p className="text-xs font-bold text-rose-600 flex items-center gap-1">
+                                    <span className="text-[10px] text-gray-400 font-black uppercase">Ref (EN):</span>
+                                    <span>{claim.reference}</span>
+                                  </p>
+                                )}
+                                {claim.claimAmount !== undefined && claim.claimAmount !== null && (
+                                  <p className="text-xs font-bold text-emerald-700 flex items-center gap-1">
+                                    <span className="text-[10px] text-gray-400 font-black uppercase">Reclamo:</span>
+                                    <span>${Number(claim.claimAmount).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD</span>
+                                  </p>
+                                )}
+                              </div>
+
                               <p className="text-xs text-gray-500 font-medium line-clamp-3 leading-relaxed mb-3">
                                 {claim.description}
                               </p>

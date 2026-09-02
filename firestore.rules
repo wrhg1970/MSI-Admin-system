@@ -18,8 +18,8 @@ service cloud.firestore {
     
     function isAdmin() {
       return isAuthenticated() && (
-        (authEmail().lower() == "ventas@misegurointernacional.com") ||
-        (authEmail().lower() == "wrhg1970@gmail.com") ||
+        (authEmail() == "ventas@misegurointernacional.com" || authEmail() == "wrhg1970@gmail.com") ||
+        (authEmail().matches("(?i)ventas@misegurointernacional\\.com") || authEmail().matches("(?i)wrhg1970@gmail\\.com")) ||
         request.auth.uid == "VTuoortBNjVYkwVviYkbSlyUzNS2" ||
         (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
          'role' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data &&
@@ -28,12 +28,12 @@ service cloud.firestore {
     }
     function isSuperAdmin() {
       return isAuthenticated() && (
-        (authEmail().lower() == "ventas@misegurointernacional.com") ||
-        (authEmail().lower() == "wrhg1970@gmail.com") ||
+        (authEmail() == "ventas@misegurointernacional.com" || authEmail() == "wrhg1970@gmail.com") ||
+        (authEmail().matches("(?i)ventas@misegurointernacional\\.com") || authEmail().matches("(?i)wrhg1970@gmail\\.com")) ||
         request.auth.uid == "VTuoortBNjVYkwVviYkbSlyUzNS2" ||
         (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
          'role' in get(/databases/$(database)/documents/users/$(request.auth.uid)).data &&
-         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'super_admin')
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['super_admin', 'director', 'admin'])
       );
     }
     function isValidId(id) { return id is string && id.size() > 0 && id.size() <= 128; }
@@ -97,8 +97,8 @@ service cloud.firestore {
     match /insurances/{insuranceId} {
       allow read: if true;
       allow create: if isAuthenticated();
-      allow update: if isAdmin() && (isSuperAdmin() || resource.data.get('closed', false) != true);
-      allow delete: if isSuperAdmin();
+      allow update: if isAdmin() && (isSuperAdmin() || resource.data.get('closed', false) != true || resource.data.get('actionType', '') == 'CAN');
+      allow delete: if isSuperAdmin() || (isAdmin() && resource.data.get('actionType', '') in ['COR', 'CAN']);
     }
 
     match /payments/{paymentId} {
@@ -106,17 +106,20 @@ service cloud.firestore {
       allow create: if isAdmin() && (
         isSuperAdmin() || 
         !exists(/databases/$(database)/documents/insurances/$(request.resource.data.insuranceId)) ||
-        get(/databases/$(database)/documents/insurances/$(request.resource.data.insuranceId)).data.get('closed', false) != true
+        get(/databases/$(database)/documents/insurances/$(request.resource.data.insuranceId)).data.get('closed', false) != true ||
+        get(/databases/$(database)/documents/insurances/$(request.resource.data.insuranceId)).data.get('actionType', '') == 'CAN'
       );
       allow update: if isAdmin() && (
         isSuperAdmin() || 
         !exists(/databases/$(database)/documents/insurances/$(resource.data.insuranceId)) ||
-        get(/databases/$(database)/documents/insurances/$(resource.data.insuranceId)).data.get('closed', false) != true
+        get(/databases/$(database)/documents/insurances/$(resource.data.insuranceId)).data.get('closed', false) != true ||
+        get(/databases/$(database)/documents/insurances/$(resource.data.insuranceId)).data.get('actionType', '') == 'CAN'
       );
       allow delete: if isAdmin() && (
         isSuperAdmin() || 
         !exists(/databases/$(database)/documents/insurances/$(resource.data.insuranceId)) ||
-        get(/databases/$(database)/documents/insurances/$(resource.data.insuranceId)).data.get('closed', false) != true
+        get(/databases/$(database)/documents/insurances/$(resource.data.insuranceId)).data.get('closed', false) != true ||
+        get(/databases/$(database)/documents/insurances/$(resource.data.insuranceId)).data.get('actionType', '') == 'CAN'
       );
     }
 
@@ -144,8 +147,8 @@ service cloud.firestore {
     match /paymentMethods/{methodId} { allow read: if isAuthenticated(); allow write: if isAdmin(); }
     match /insuranceLetters/{letterId} { allow read: if isAuthenticated(); allow write: if isAdmin(); }
     match /policyLetters/{letterId} { allow read: if isAuthenticated(); allow write: if isAdmin(); }
-    match /statementUploads/{uploadId} { allow read, write: if isAdmin(); }
-    match /statementRecords/{recordId} { allow read, write: if isAdmin(); }
+    match /statementUploads/{uploadId} { allow read, create, update: if isAuthenticated(); allow delete: if isAdmin(); }
+    match /statementRecords/{recordId} { allow read, create, update: if isAuthenticated(); allow delete: if isAdmin(); }
     match /providers/{providerId} { allow read: if isAuthenticated(); allow write: if isAdmin(); }
 
     match /bulkImportLogs/{logId} {
@@ -163,7 +166,8 @@ service cloud.firestore {
     }
     match /caremedInvoices/{invoiceId} {
       allow read: if isAuthenticated();
-      allow write: if isAdmin();
+      allow create, update: if isAdmin();
+      allow delete: if isSuperAdmin();
     }
     match /quotes/{quoteId} {
       allow read, write: if isAuthenticated();

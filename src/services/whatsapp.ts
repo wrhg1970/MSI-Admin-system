@@ -1,5 +1,6 @@
 import { doc, getDoc, setDoc, addDoc, collection, query, where, getDocs } from 'firebase/firestore';
 import { db, auth } from '../firebase';
+import { logInsuranceActivity } from '../utils/activityLogger';
 
 export interface WhatsAppTemplates {
   bienvenidaBody: string;
@@ -203,7 +204,7 @@ export async function triggerWhatsAppNotification(
 
     // 6. Log Activity in insuranceActivities so it's super visible
     if (insurance.id) {
-      await addDoc(collection(db, 'insuranceActivities'), {
+      await logInsuranceActivity({
         insuranceId: insurance.id,
         type: 'automatic',
         description: isSuccess 
@@ -237,7 +238,7 @@ export async function triggerWhatsAppNotification(
     // Attempt logging error on insurance
     if (insurance && insurance.id) {
       try {
-        await addDoc(collection(db, 'insuranceActivities'), {
+        await logInsuranceActivity({
           insuranceId: insurance.id,
           type: 'automatic',
           description: `Error del sistema enviando WhatsApp (Evento: ${event}): ${err.message || err}`,

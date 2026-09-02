@@ -2,14 +2,14 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { collection, onSnapshot, addDoc, doc, updateDoc, deleteDoc, serverTimestamp, query, orderBy, where, getDocs, writeBatch, Timestamp, increment } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../firebase';
 import { StatementUpload, StatementRecord, Category, Subcategory, UserProfile, Payment, Client, Provider } from '../types';
-import { Plus, Trash2, Edit2, Save, X, FileText, Upload, CheckCircle2, AlertCircle, ChevronRight, ChevronDown, Filter, Search, MoreVertical, CheckSquare, Square, ArrowRightLeft, History, DollarSign, Building2, User } from 'lucide-react';
-import { GoogleGenAI, Type } from "@google/genai";
+import { Plus, Trash2, Edit2, Save, X, FileText, Upload, CheckCircle2, AlertCircle, ChevronRight, ChevronDown, Filter, Search, MoreVertical, CheckSquare, Square, ArrowRightLeft, History, DollarSign, Building2, User, ShieldCheck } from 'lucide-react';
 import ConfirmModal from './ConfirmModal';
 import { format } from 'date-fns';
+import { formatDisplayDate } from '../lib/policyUtils';
 
-const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+export default function StatementOCRManager({ profile, onReconcile, exchangeRate = 17.55 }: { profile: UserProfile | null; onReconcile?: (type: 'income' | 'expense') => void; exchangeRate?: number }) {
+  const isSuperAdminOrDirector = profile?.role === 'super_admin' || profile?.role === 'director' || profile?.role === 'admin' || profile?.email === 'ventas@misegurointernacional.com' || profile?.email === 'wrhg1970@gmail.com';
 
-export default function StatementOCRManager({ profile, onReconcile, exchangeRate = 17.5 }: { profile: UserProfile | null; onReconcile?: (type: 'income' | 'expense') => void; exchangeRate?: number }) {
   const [uploads, setUploads] = useState<StatementUpload[]>([]);
   const [records, setRecords] = useState<StatementRecord[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
@@ -25,6 +25,8 @@ export default function StatementOCRManager({ profile, onReconcile, exchangeRate
   const [duplicateWarning, setDuplicateWarning] = useState<{ record: StatementRecord; existing: Payment[] } | null>(null);
   const [pendingFile, setPendingFile] = useState<File | null>(null);
   const [showCurrencyModal, setShowCurrencyModal] = useState(false);
+  const [sidebarCurrencyFilter, setSidebarCurrencyFilter] = useState<'ALL' | 'USD' | 'MXP'>('ALL');
+  const [sidebarSearch, setSidebarSearch] = useState('');
   const [showQuickAddProvider, setShowQuickAddProvider] = useState(false);
   const [showQuickAddClient, setShowQuickAddClient] = useState(false);
   const [quickProvider, setQuickProvider] = useState({
@@ -52,10 +54,30 @@ export default function StatementOCRManager({ profile, onReconcile, exchangeRate
   }>({ isOpen: false, type: 'delete_upload' });
 
   useEffect(() => {
-    const unsubUploads = onSnapshot(query(collection(db, 'statementUploads'), orderBy('uploadDate', 'desc')), (snap) => {
-      setUploads(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as StatementUpload)));
-      setLoading(false);
-    });
+    const unsubUploads = onSnapshot(
+      collection(db, 'statementUploads'), 
+      (snap) => {
+        const items = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as StatementUpload));
+        // Sort newest upload first in memory to prevent missing index errors
+        items.sort((a, b) => {
+          const dateA = a.uploadDate?.toMillis ? a.uploadDate.toMillis() : new Date(a.uploadDate || 0).getTime();
+          const dateB = b.uploadDate?.toMillis ? b.uploadDate.toMillis() : new Date(b.uploadDate || 0).getTime();
+          return dateB - dateA;
+        });
+        setUploads(items);
+        setLoading(false);
+        
+        // Auto-select latest upload if none selected or if active upload was deleted
+        setActiveUploadId(prev => {
+          if (prev && items.some(u => u.id === prev)) return prev;
+          return items.length > 0 ? items[0].id! : null;
+        });
+      },
+      (err) => {
+        console.error("Error fetching statementUploads:", err);
+        setLoading(false);
+      }
+    );
 
     const unsubCats = onSnapshot(query(collection(db, 'categories'), orderBy('name', 'asc')), (snap) => {
       setCategories(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Category)));
@@ -88,15 +110,29 @@ export default function StatementOCRManager({ profile, onReconcile, exchangeRate
       return;
     }
 
+    // Query by uploadId and sort in memory (avoids requiring Firestore composite index)
     const unsubRecords = onSnapshot(
-      query(collection(db, 'statementRecords'), where('uploadId', '==', activeUploadId), orderBy('date', 'asc')),
+      query(collection(db, 'statementRecords'), where('uploadId', '==', activeUploadId)),
       (snap) => {
-        setRecords(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as StatementRecord)));
+        const items = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as StatementRecord));
+        items.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+        setRecords(items);
+      },
+      (err) => {
+        console.error("Error fetching statementRecords:", err);
       }
     );
 
     return unsubRecords;
   }, [activeUploadId]);
+
+  const filteredUploads = useMemo(() => {
+    return uploads.filter(u => {
+      const matchCurrency = sidebarCurrencyFilter === 'ALL' || (u.currency || 'USD') === sidebarCurrencyFilter;
+      const matchSearch = !sidebarSearch.trim() || (u.fileName || '').toLowerCase().includes(sidebarSearch.toLowerCase());
+      return matchCurrency && matchSearch;
+    });
+  }, [uploads, sidebarCurrencyFilter, sidebarSearch]);
 
   const stats = useMemo(() => {
     const incomes = records.filter(r => r.type === 'income');
@@ -143,60 +179,95 @@ export default function StatementOCRManager({ profile, onReconcile, exchangeRate
     try {
       // 1. Convert file to base64
       const reader = new FileReader();
-      const base64Promise = new Promise<string>((resolve) => {
+      const base64Promise = new Promise<string>((resolve, reject) => {
         reader.onload = () => {
           const base64 = (reader.result as string).split(',')[1];
           resolve(base64);
         };
+        reader.onerror = (err) => reject(err);
         reader.readAsDataURL(file);
       });
       const base64Data = await base64Promise;
 
-      // 2. Call Gemini for OCR
-      const response = await ai.models.generateContent({
-        model: "gemini-3.5-flash",
-        contents: [
-          {
-            parts: [
-              {
-                text: "Extract all transactions from this bank statement. Classify each transaction as either an 'income' or 'expense' with absolute precision.\n" +
-                      "Instructions for Classification:\n" +
-                      "1. Identify 'income' (ingresos / abonos / depósitos / créditos / transferencias recibidas / intereses ganados / dividendos / devoluciones) when money enters the account. Look for transactions under headers like 'Abonos', 'Depósitos', 'Crédito', 'Deposits', 'Credits', 'Inflow', 'Debe', or values with a positive sign (+) or values under inflow columns.\n" +
-                      "2. Identify 'expense' (egresos / cargos / retiros / débitos / pago / comisión / transferencias enviadas / compras / consumos) when money leaves the account. Look for transactions under headers like 'Cargos', 'Retiros', 'Débito', 'Withdrawals', 'Debits', 'Outflow', 'Haber', or values with a negative sign (-) or values under outflow columns.\n" +
-                      "3. If a column contains both types, look for negative/positive signs or key phrases ('pago', 'retiro', 'depósito') to categorize them.\n" +
-                      "4. The 'amount' field must ALWAYS be a positive number, regardless of how it is written in the document.\n" +
-                      "5. Extract the date as YYYY-MM-DD. If only day and month are present, infer the year from the bank statement's statement period or header.\n" +
-                      "Return a JSON array of objects with the specified schema."
-              },
-              { inlineData: { mimeType: file.type, data: base64Data } }
-            ]
+      // Infer mimeType if empty
+      let detectedType = file.type;
+      if (!detectedType) {
+        const ext = file.name.split('.').pop()?.toLowerCase();
+        if (ext === 'pdf') detectedType = 'application/pdf';
+        else if (ext === 'jpg' || ext === 'jpeg') detectedType = 'image/jpeg';
+        else if (ext === 'png') detectedType = 'image/png';
+        else if (ext === 'webp') detectedType = 'image/webp';
+        else detectedType = 'application/pdf';
+      }
+
+      // 2. Call server-side API endpoint for Gemini OCR parsing with automatic client retry on transient failures
+      let data: any = null;
+      let lastFetchErr: any = null;
+
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const res = await fetch('/api/statement/parse-statement', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              fileData: base64Data,
+              fileName: file.name,
+              fileType: detectedType,
+              currency
+            })
+          });
+
+          const resText = await res.text();
+          
+          if (!resText || resText.trim().startsWith("<") || resText.includes("<!DOCTYPE") || resText.includes("<html")) {
+            throw new Error("El servicio de análisis está inicializando o procesando alta demanda. Reintentando...");
           }
-        ],
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                date: { type: Type.STRING },
-                description: { type: Type.STRING },
-                amount: { type: Type.NUMBER },
-                type: { type: Type.STRING, enum: ["income", "expense"] }
-              },
-              required: ["date", "description", "amount", "type"]
+
+          let parsedBody: any = {};
+          try {
+            parsedBody = JSON.parse(resText);
+          } catch {
+            if (!res.ok) {
+              throw new Error(`Error de comunicación con el servidor (${res.status}).`);
             }
+            throw new Error("El servidor devolvió una respuesta no estructurada. Por favor intenta nuevamente.");
+          }
+
+          if (!res.ok || parsedBody.error) {
+            throw new Error(parsedBody.error || `Error del servidor (${res.status})`);
+          }
+
+          data = parsedBody;
+          break; // Success
+        } catch (err: any) {
+          lastFetchErr = err;
+          const errMessage = String(err?.message || err);
+          // If server reported high demand, proxy refresh, or transient network error, wait briefly and retry once
+          if (attempt === 0) {
+            console.log("Reintentando procesamiento de estado de cuenta en 2s...", errMessage);
+            await new Promise(r => setTimeout(r, 2000));
+          } else {
+            break;
           }
         }
-      });
+      }
 
-      const parsedRecords = JSON.parse(response.text);
+      if (!data) {
+        throw lastFetchErr || new Error("No se pudo procesar el estado de cuenta. Por favor intenta de nuevo en unos instantes.");
+      }
+
+      const parsedRecords = data.records || [];
+
+      if (!parsedRecords || parsedRecords.length === 0) {
+        alert("No se pudieron detectar movimientos en el estado de cuenta. Por favor verifica que el archivo sea un documento bancario legible.");
+        return;
+      }
       
       // 3. Calculate totals
-      const totalIncomes = parsedRecords.reduce((acc: number, r: any) => r.type === 'income' ? acc + r.amount : acc, 0);
-      const totalExpenses = parsedRecords.reduce((acc: number, r: any) => r.type === 'expense' ? acc + r.amount : acc, 0);
+      const totalIncomes = parsedRecords.reduce((acc: number, r: any) => r.type === 'income' ? acc + (Number(r.amount) || 0) : acc, 0);
+      const totalExpenses = parsedRecords.reduce((acc: number, r: any) => r.type === 'expense' ? acc + (Number(r.amount) || 0) : acc, 0);
 
-      // 4. Create Upload record
+      // 4. Create Upload record in Firestore (Stored permanently)
       const uploadRef = await addDoc(collection(db, 'statementUploads'), {
         fileName: file.name,
         uploadDate: serverTimestamp(),
@@ -207,19 +278,20 @@ export default function StatementOCRManager({ profile, onReconcile, exchangeRate
         currency,
         status: 'processed',
         userId: profile.uid,
+        userName: profile.displayName || profile.email || 'Admin',
         createdAt: serverTimestamp()
       });
 
-      // 5. Create individual records
+      // 5. Create individual records in batch in Firestore
       const batch = writeBatch(db);
       parsedRecords.forEach((r: any) => {
         const recordRef = doc(collection(db, 'statementRecords'));
         batch.set(recordRef, {
           uploadId: uploadRef.id,
-          date: r.date,
-          description: r.description,
-          amount: r.amount,
-          type: r.type,
+          date: r.date || new Date().toISOString().split('T')[0],
+          description: r.description || 'Movimiento Bancario',
+          amount: Math.abs(Number(r.amount) || 0),
+          type: r.type === 'expense' ? 'expense' : 'income',
           currency,
           reconciled: false,
           createdAt: serverTimestamp()
@@ -228,9 +300,9 @@ export default function StatementOCRManager({ profile, onReconcile, exchangeRate
       await batch.commit();
 
       setActiveUploadId(uploadRef.id);
-    } catch (error) {
+    } catch (error: any) {
       console.error("OCR Error:", error);
-      alert("Error al procesar el estado de cuenta. Por favor intenta de nuevo.");
+      alert(`Error al procesar el estado de cuenta: ${error.message || 'Error inesperado'}`);
     } finally {
       setProcessing(false);
     }
@@ -268,20 +340,27 @@ export default function StatementOCRManager({ profile, onReconcile, exchangeRate
   };
 
   const checkDuplicates = async (record: StatementRecord) => {
+    const upload = uploads.find(u => u.id === record.uploadId);
+    const recCurrency = record.currency || upload?.currency || 'USD';
     const q = query(
       collection(db, 'payments'),
-      where('amount', '==', record.amount),
       where('type', '==', record.type === 'income' ? 'client_payment' : 'provider_payment')
     );
     const snap = await getDocs(q);
     const existing = snap.docs.map(d => ({ id: d.id, ...d.data() } as Payment));
     
-    // Simple date proximity check (within 3 days)
-    const recordDate = new Date(record.date);
+    // Check amount according to currency and date proximity check (within 4 days)
+    const recordDate = new Date(record.date.replace(/-/g, '/') + ' 12:00:00');
     const duplicates = existing.filter(p => {
+      const pCurrency = p.currency || 'USD';
+      // Compare amount in matching currency
+      const pAmount = pCurrency === 'USD' ? (p.amount || 0) : (p.amountMXP || p.amount || 0);
+      const isAmountClose = Math.abs(pAmount - record.amount) < 0.05;
+      if (!isAmountClose) return false;
+
       const pDate = p.date instanceof Timestamp ? p.date.toDate() : new Date(p.date);
       const diff = Math.abs(pDate.getTime() - recordDate.getTime()) / (1000 * 60 * 60 * 24);
-      return diff <= 3;
+      return diff <= 4;
     });
 
     return duplicates;
@@ -312,11 +391,14 @@ export default function StatementOCRManager({ profile, onReconcile, exchangeRate
       const upload = uploads.find(u => u.id === record.uploadId);
       const currency = record.currency || upload?.currency || 'USD';
       
+      // Construct date at noon to avoid UTC timezone off-by-one errors
+      const paymentDate = new Date(record.date.replace(/-/g, '/') + ' 12:00:00');
+
       const paymentData: any = {
         currency: currency,
         type: record.isClientIncome ? 'client_payment' : (record.isProviderExpense ? 'provider_payment' : (record.type === 'income' ? 'client_payment' : 'provider_payment')),
         status: 'completed',
-        date: Timestamp.fromDate(new Date(record.date)),
+        date: Timestamp.fromDate(paymentDate),
         notes: `Conciliado de: ${record.description}`,
         insuranceId: 'conciliacion_bancaria',
         clientId: (record.isClientIncome && record.clientId) ? record.clientId : null,
@@ -475,6 +557,10 @@ export default function StatementOCRManager({ profile, onReconcile, exchangeRate
   };
 
   const handleDeleteUpload = async (id: string) => {
+    if (!isSuperAdminOrDirector) {
+      alert("Acceso denegado: Solo el Administrador o Director puede eliminar estados de cuenta.");
+      return;
+    }
     try {
       const batch = writeBatch(db);
       // Delete all records first
@@ -497,48 +583,105 @@ export default function StatementOCRManager({ profile, onReconcile, exchangeRate
       {/* Sidebar: History */}
       <div className="lg:col-span-1 space-y-4">
         <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6">
-          <h3 className="text-lg font-bold text-gray-900 mb-4 flex items-center gap-2">
-            <History className="w-5 h-5 text-blue-600" />
-            Historial
-          </h3>
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-bold text-gray-900 flex items-center gap-2">
+              <History className="w-5 h-5 text-blue-600" />
+              Historial
+            </h3>
+            <span className="text-[10px] font-bold px-2 py-0.5 bg-blue-50 text-blue-700 rounded-full border border-blue-100">
+              {uploads.length} {uploads.length === 1 ? 'archivo' : 'archivos'}
+            </span>
+          </div>
           
           <label className="block w-full">
             <div className={`border-2 border-dashed rounded-xl p-4 text-center cursor-pointer transition-all ${processing ? 'bg-gray-50 border-gray-200' : 'border-blue-200 hover:border-blue-400 hover:bg-blue-50'}`}>
               {processing ? (
                 <div className="flex flex-col items-center gap-2">
                   <div className="w-6 h-6 border-2 border-blue-600 border-t-transparent rounded-full animate-spin" />
-                  <span className="text-xs font-bold text-gray-500">Procesando OCR...</span>
+                  <span className="text-xs font-bold text-gray-600">Procesando y guardando OCR con IA...</span>
+                  <span className="text-[10px] text-gray-400">Extrayendo todas las transacciones</span>
                 </div>
               ) : (
                 <div className="flex flex-col items-center gap-2">
                   <Upload className="w-6 h-6 text-blue-600" />
                   <span className="text-xs font-bold text-gray-600">Cargar Estado de Cuenta</span>
-                  <span className="text-[10px] text-gray-400">PDF o Imagen</span>
+                  <span className="text-[10px] text-gray-400">PDF o Imagen (USD / MXP)</span>
                 </div>
               )}
               <input type="file" className="hidden" accept="image/*,application/pdf" onChange={handleFileUpload} disabled={processing} />
             </div>
           </label>
 
-          <div className="mt-6 space-y-2 max-h-[500px] overflow-y-auto pr-2 custom-scrollbar">
-            {uploads.map((upload) => (
+          {/* Filter & Search in Sidebar */}
+          <div className="mt-4 space-y-2">
+            <div className="flex bg-gray-100 p-0.5 rounded-lg text-[11px] font-bold">
+              <button
+                type="button"
+                onClick={() => setSidebarCurrencyFilter('ALL')}
+                className={`flex-1 py-1 rounded-md transition-all ${sidebarCurrencyFilter === 'ALL' ? 'bg-white text-gray-900 shadow-sm' : 'text-gray-500 hover:text-gray-800'}`}
+              >
+                Todos ({uploads.length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setSidebarCurrencyFilter('USD')}
+                className={`flex-1 py-1 rounded-md transition-all flex items-center justify-center gap-1 ${sidebarCurrencyFilter === 'USD' ? 'bg-emerald-600 text-white shadow-sm' : 'text-emerald-700 hover:bg-emerald-50'}`}
+              >
+                USD ({uploads.filter(u => (u.currency || 'USD') === 'USD').length})
+              </button>
+              <button
+                type="button"
+                onClick={() => setSidebarCurrencyFilter('MXP')}
+                className={`flex-1 py-1 rounded-md transition-all flex items-center justify-center gap-1 ${sidebarCurrencyFilter === 'MXP' ? 'bg-blue-600 text-white shadow-sm' : 'text-blue-700 hover:bg-blue-50'}`}
+              >
+                MXP ({uploads.filter(u => u.currency === 'MXP').length})
+              </button>
+            </div>
+
+            {uploads.length > 3 && (
+              <input
+                type="text"
+                value={sidebarSearch}
+                onChange={(e) => setSidebarSearch(e.target.value)}
+                placeholder="Buscar archivo..."
+                className="w-full px-2.5 py-1 text-xs border border-gray-200 rounded-lg focus:outline-none focus:ring-1 focus:ring-blue-500"
+              />
+            )}
+          </div>
+
+          <div className="mt-4 space-y-2 max-h-[480px] overflow-y-auto pr-1 custom-scrollbar">
+            {filteredUploads.length === 0 && !processing && (
+              <div className="p-4 text-center text-xs text-gray-400 bg-gray-50 rounded-xl border border-dashed border-gray-200">
+                {uploads.length === 0 
+                  ? 'No hay estados de cuenta cargados aún. Sube un PDF o imagen para comenzar.'
+                  : 'No se encontraron estados de cuenta con los filtros actuales.'}
+              </div>
+            )}
+            {filteredUploads.map((upload) => (
               <div
                 key={upload.id}
                 onClick={() => setActiveUploadId(upload.id!)}
-                className={`p-3 rounded-xl border cursor-pointer transition-all group ${activeUploadId === upload.id ? 'bg-blue-50 border-blue-200 ring-1 ring-blue-200' : 'bg-white border-gray-100 hover:border-blue-200'}`}
+                className={`p-3 rounded-xl border cursor-pointer transition-all group ${activeUploadId === upload.id ? 'bg-blue-50 border-blue-300 ring-1 ring-blue-300 shadow-sm' : 'bg-white border-gray-100 hover:border-blue-200'}`}
               >
-                <div className="flex justify-between items-start mb-1">
-                  <span className="text-xs font-bold text-gray-900 truncate max-w-[120px]">{upload.fileName}</span>
-                  <button 
-                    onClick={(e) => { e.stopPropagation(); setConfirmModal({ isOpen: true, type: 'delete_upload', id: upload.id }); }}
-                    className="opacity-0 group-hover:opacity-100 p-1 text-red-500 hover:bg-red-50 rounded-lg transition-all"
-                  >
-                    <Trash2 className="w-3 h-3" />
-                  </button>
+                <div className="flex justify-between items-start mb-1 gap-1">
+                  <span className="text-xs font-bold text-gray-900 truncate max-w-[130px]" title={upload.fileName}>
+                    {upload.fileName}
+                  </span>
+                  {isSuperAdminOrDirector && (
+                    <button 
+                      onClick={(e) => { e.stopPropagation(); setConfirmModal({ isOpen: true, type: 'delete_upload', id: upload.id }); }}
+                      className="opacity-0 group-hover:opacity-100 p-1 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all"
+                      title="Eliminar del historial (Solo Super Admin / Director)"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
                 </div>
                 <div className="flex justify-between items-center text-[10px] text-gray-400">
                   <span>{format(upload.uploadDate instanceof Timestamp ? upload.uploadDate.toDate() : new Date(upload.uploadDate), 'dd/MM/yyyy HH:mm')}</span>
-                  <span className="font-bold text-blue-600">{upload.currency || 'USD'}</span>
+                  <span className={`font-bold px-1.5 py-0.2 rounded ${upload.currency === 'USD' ? 'bg-emerald-100 text-emerald-800' : 'bg-blue-100 text-blue-800'}`}>
+                    {upload.currency || 'USD'}
+                  </span>
                   <span className={`px-1.5 py-0.5 rounded-full font-bold uppercase ${upload.status === 'reconciled' ? 'bg-green-100 text-green-700' : 'bg-blue-100 text-blue-700'}`}>
                     {upload.status === 'reconciled' ? 'Conciliado' : 'Pendiente'}
                   </span>
@@ -547,7 +690,7 @@ export default function StatementOCRManager({ profile, onReconcile, exchangeRate
                   <div className="text-[10px]">
                     <span className="block text-gray-400">Ingresos</span>
                     <div className="flex flex-col">
-                      <span className="font-bold text-green-600">${upload.totalIncomes.toLocaleString()}</span>
+                      <span className="font-bold text-green-600">${upload.totalIncomes.toLocaleString()} {upload.currency || 'USD'}</span>
                       {upload.reconciledIncomes !== undefined && (
                         <span className="text-[8px] text-green-700">Conciliado: ${upload.reconciledIncomes.toLocaleString()}</span>
                       )}
@@ -556,7 +699,7 @@ export default function StatementOCRManager({ profile, onReconcile, exchangeRate
                   <div className="text-[10px]">
                     <span className="block text-gray-400">Egresos</span>
                     <div className="flex flex-col">
-                      <span className="font-bold text-red-600">${upload.totalExpenses.toLocaleString()}</span>
+                      <span className="font-bold text-red-600">${upload.totalExpenses.toLocaleString()} {upload.currency || 'USD'}</span>
                       {upload.reconciledExpenses !== undefined && (
                         <span className="text-[8px] text-red-700">Conciliado: ${upload.reconciledExpenses.toLocaleString()}</span>
                       )}
@@ -565,6 +708,13 @@ export default function StatementOCRManager({ profile, onReconcile, exchangeRate
                 </div>
               </div>
             ))}
+          </div>
+
+          <div className="mt-4 p-3 bg-emerald-50 border border-emerald-100 rounded-xl flex items-start gap-2.5 text-emerald-800">
+            <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+            <p className="text-[11px] leading-tight">
+              <strong>Persistencia Garantizada:</strong> Cada estado de cuenta subido queda resguardado indefinidamente en la base de datos de auditoría.
+            </p>
           </div>
         </div>
       </div>
@@ -780,37 +930,47 @@ export default function StatementOCRManager({ profile, onReconcile, exchangeRate
       {/* Currency Selection Modal */}
       {showCurrencyModal && (
         <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[60] p-4">
-          <div className="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-8 animate-in fade-in zoom-in duration-200">
+          <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-8 animate-in fade-in zoom-in duration-200">
             <div className="text-center mb-6">
-              <div className="w-16 h-16 bg-blue-50 rounded-full flex items-center justify-center mx-auto mb-4">
-                <DollarSign className="w-8 h-8 text-blue-600" />
+              <div className="w-16 h-16 bg-blue-50 rounded-full flex items-center justify-center mx-auto mb-4 text-blue-600">
+                <DollarSign className="w-8 h-8" />
               </div>
-              <h3 className="text-xl font-bold text-gray-900">Seleccionar Moneda</h3>
-              <p className="text-sm text-gray-500 mt-2">
-                ¿En qué moneda están expresadas las transacciones de este estado de cuenta?
+              <h3 className="text-xl font-bold text-gray-900">Moneda del Estado de Cuenta</h3>
+              <p className="text-xs text-gray-500 mt-1">
+                Selecciona la divisa para que el motor de IA optimice la extracción de columnas, importes y fechas:
               </p>
             </div>
             
             <div className="grid grid-cols-2 gap-4">
               <button
-                onClick={() => processFile('MXP')}
-                className="flex flex-col items-center gap-2 p-4 border-2 border-gray-100 rounded-2xl hover:border-blue-500 hover:bg-blue-50 transition-all group"
-              >
-                <span className="text-2xl font-black text-gray-300 group-hover:text-blue-600">MXP</span>
-                <span className="text-xs font-bold text-gray-500">Pesos Mexicanos</span>
-              </button>
-              <button
+                type="button"
                 onClick={() => processFile('USD')}
-                className="flex flex-col items-center gap-2 p-4 border-2 border-gray-100 rounded-2xl hover:border-blue-500 hover:bg-blue-50 transition-all group"
+                className="flex flex-col items-center gap-2 p-5 border-2 border-emerald-200 bg-emerald-50/50 rounded-2xl hover:border-emerald-500 hover:bg-emerald-100/60 transition-all text-center group shadow-sm"
               >
-                <span className="text-2xl font-black text-gray-300 group-hover:text-blue-600">USD</span>
-                <span className="text-xs font-bold text-gray-500">Dólares</span>
+                <div className="w-10 h-10 rounded-full bg-emerald-600 text-white flex items-center justify-center font-black text-sm shadow">
+                  USD
+                </div>
+                <span className="text-sm font-bold text-gray-900">Dólares (USD)</span>
+                <span className="text-[10px] text-gray-500 leading-tight">Bancos de EE.UU. o cuentas en dólares (Chase, BofA, Wells Fargo, etc.)</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => processFile('MXP')}
+                className="flex flex-col items-center gap-2 p-5 border-2 border-blue-200 bg-blue-50/50 rounded-2xl hover:border-blue-500 hover:bg-blue-100/60 transition-all text-center group shadow-sm"
+              >
+                <div className="w-10 h-10 rounded-full bg-blue-600 text-white flex items-center justify-center font-black text-sm shadow">
+                  MXP
+                </div>
+                <span className="text-sm font-bold text-gray-900">Pesos (MXP)</span>
+                <span className="text-[10px] text-gray-500 leading-tight">Bancos nacionales (BBVA, Banorte, Santander, Banamex, etc.)</span>
               </button>
             </div>
 
             <button
+              type="button"
               onClick={() => { setShowCurrencyModal(false); setPendingFile(null); }}
-              className="w-full mt-6 py-3 text-gray-400 text-sm font-bold hover:text-gray-600 transition-colors"
+              className="w-full mt-6 py-2.5 text-gray-400 text-xs font-bold hover:text-gray-600 transition-colors"
             >
               Cancelar
             </button>
@@ -1052,7 +1212,7 @@ export default function StatementOCRManager({ profile, onReconcile, exchangeRate
                     <div>
                       <span className="text-xs font-bold text-gray-700 block">{p.notes || 'Sin notas'}</span>
                       <span className="text-[10px] text-gray-400">
-                        {format(p.date instanceof Timestamp ? p.date.toDate() : new Date(p.date), 'dd/MM/yyyy')}
+                        {formatDisplayDate(p.date)}
                       </span>
                     </div>
                     <span className="text-xs font-bold text-gray-900">${p.amount.toLocaleString()}</span>

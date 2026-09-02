@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { collection, query, onSnapshot, addDoc, doc, updateDoc, deleteDoc, serverTimestamp, orderBy, where } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../firebase';
+import { useFirestoreData } from '../context/FirestoreDataContext';
 import { Provider, Category, Subcategory, UserProfile, CustomRole, Payment } from '../types';
 import { Plus, Trash2, Edit2, Save, X, Building2, User, FileText, Phone, Mail, MapPin, LayoutGrid, List, Search, CreditCard, Upload, Globe, Hash } from 'lucide-react';
 import ConfirmModal from './ConfirmModal';
@@ -13,10 +14,7 @@ interface ProvidersManagerProps {
 
 export default function ProvidersManager({ profile, rolePermissions }: ProvidersManagerProps) {
   const { hasPermission } = usePermissions(profile, rolePermissions);
-  const [providers, setProviders] = useState<Provider[]>([]);
-  const [categories, setCategories] = useState<Category[]>([]);
-  const [subcategories, setSubcategories] = useState<Subcategory[]>([]);
-  const [insurances, setInsurances] = useState<any[]>([]);
+  const { providers, categories, subcategories, insurances } = useFirestoreData();
   const [editingProvider, setEditingProvider] = useState<Provider | null>(null);
   const [isAddingProvider, setIsAddingProvider] = useState(false);
   const [activeModalTab, setActiveModalTab] = useState<'general' | 'bank' | 'payments'>('general');
@@ -55,40 +53,8 @@ export default function ProvidersManager({ profile, rolePermissions }: Providers
     !providers.some(p => p.legalName?.toLowerCase()?.trim() === reqName.toLowerCase().trim() || p.commercialName?.toLowerCase()?.trim() === reqName.toLowerCase().trim())
   );
 
-  useEffect(() => {
-    if (!profile || !hasPermission('providers')) return;
-
-    const unsubProviders = onSnapshot(query(collection(db, 'providers'), orderBy('createdAt', 'desc')), (snap) => {
-      setProviders(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Provider)));
-    }, (error) => {
-      handleFirestoreError(error, OperationType.GET, 'providers');
-    });
-
-    const unsubCats = onSnapshot(query(collection(db, 'categories'), orderBy('name')), (snap) => {
-      setCategories(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Category)));
-    }, (error) => {
-      handleFirestoreError(error, OperationType.GET, 'categories');
-    });
-
-    const unsubSubs = onSnapshot(query(collection(db, 'subcategories'), orderBy('name')), (snap) => {
-      setSubcategories(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Subcategory)));
-    }, (error) => {
-      handleFirestoreError(error, OperationType.GET, 'subcategories');
-    });
-
-    const unsubInsurances = onSnapshot(collection(db, 'insurances'), (snap) => {
-      setInsurances(snap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-    }, (error) => {
-      console.error("Error fetching insurances:", error);
-    });
-
-    return () => {
-      unsubProviders();
-      unsubCats();
-      unsubSubs();
-      unsubInsurances();
-    };
-  }, [profile]);
+  // Note: Local collection snapshot listeners were removed. Data is now subscribed and
+  // cached centrally via useFirestoreData() context.
 
   useEffect(() => {
     if (!editingProvider || !editingProvider.id) {

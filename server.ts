@@ -2,7 +2,10 @@ import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import fs from "fs";
+import zlib from "zlib";
+import JSZip from "jszip";
 import nodemailer from "nodemailer";
+import crypto from "crypto";
 import { handleWooCommerceWebhook } from "./src/services/woocommerce";
 import Stripe from "stripe";
 import { doc, getDoc, updateDoc, addDoc, collection, setDoc, deleteDoc, getDocs } from "firebase/firestore";
@@ -12,12 +15,13 @@ import { initializeApp, getApps } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
 import firebaseConfig from "./firebase-applet-config.json";
 
-if (getApps().length === 0) {
-  initializeApp({
-    projectId: firebaseConfig.projectId
-  });
-}
-const adminDb = getFirestore(undefined, firebaseConfig.firestoreDatabaseId);
+const defaultApp = getApps().length === 0
+  ? initializeApp({
+      projectId: firebaseConfig.projectId
+    })
+  : getApps()[0];
+
+const adminDb = getFirestore(defaultApp, firebaseConfig.firestoreDatabaseId || undefined);
 
 const isAlreadyLoadedLocal = (insurance: any) => {
   if (!insurance) return true;
@@ -31,8 +35,13 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  // Use larger limit for PDF attachments
-  app.use(express.json({ limit: '50mb' }));
+  // Use larger limit for PDF attachments and capture rawBody for webhook signature validation
+  app.use(express.json({ 
+    limit: '50mb',
+    verify: (req: any, res, buf) => {
+      req.rawBody = buf;
+    }
+  }));
 
   // In-memory OTP storage (Email -> {code, expires})
   const otpStore = new Map<string, { code: string, expires: number }>();
@@ -42,13 +51,33 @@ async function startServer() {
     const { email } = req.body;
     if (!email) return res.status(400).json({ error: "Email requerido" });
 
+    const emailLower = email.trim().toLowerCase();
+    const superAdmins = ['ventas@misegurointernacional.com', 'wrhg1970@gmail.com'];
+    const isSuperAdmin = superAdmins.includes(emailLower);
+
+    let userExists = isSuperAdmin;
+    if (!userExists) {
+      try {
+        const userSnap = await adminDb.collection('users').where('email', '==', emailLower).get();
+        if (!userSnap.empty) {
+          userExists = true;
+        }
+      } catch (dbErr) {
+        console.error("Error querying users collection for OTP request:", dbErr);
+      }
+    }
+
+    if (!userExists) {
+      return res.status(403).json({ error: "El correo electrónico no está registrado en el sistema. Solicite registro a un Administrador." });
+    }
+
     const code = Math.floor(100000 + Math.random() * 900000).toString();
     const expires = Date.now() + 10 * 60 * 1000; // 10 minutes
 
-    otpStore.set(email, { code, expires });
+    otpStore.set(emailLower, { code, expires });
 
     if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
-      console.log(`[AUTH] OTP for ${email}: ${code}`);
+      console.log(`[AUTH] OTP for ${emailLower}: ${code}`);
       return res.status(200).json({ 
         success: true, 
         message: `En modo desarrollo. Código de acceso: ${code}`,
@@ -98,11 +127,31 @@ async function startServer() {
     const { email, code } = req.body;
     if (!email || !code) return res.status(400).json({ error: "Email y código requeridos" });
 
-    const stored = otpStore.get(email);
+    const emailLower = email.trim().toLowerCase();
+    const superAdmins = ['ventas@misegurointernacional.com', 'wrhg1970@gmail.com'];
+    const isSuperAdmin = superAdmins.includes(emailLower);
+
+    let userExists = isSuperAdmin;
+    if (!userExists) {
+      try {
+        const userSnap = await adminDb.collection('users').where('email', '==', emailLower).get();
+        if (!userSnap.empty) {
+          userExists = true;
+        }
+      } catch (dbErr) {
+        console.error("Error querying users collection for OTP verification:", dbErr);
+      }
+    }
+
+    if (!userExists) {
+      return res.status(403).json({ error: "El correo electrónico no está registrado en el sistema." });
+    }
+
+    const stored = otpStore.get(emailLower);
     if (!stored) return res.status(400).json({ error: "No se encontró un código para este email" });
 
     if (Date.now() > stored.expires) {
-      otpStore.delete(email);
+      otpStore.delete(emailLower);
       return res.status(400).json({ error: "El código ha expirado" });
     }
 
@@ -111,17 +160,17 @@ async function startServer() {
     }
 
     // Success - clear OTP
-    otpStore.delete(email);
+    otpStore.delete(emailLower);
     res.json({ success: true });
   });
 
   // API Route: Send Email
   app.post("/api/send-certificate", async (req, res) => {
-    const { to, cc, bcc, subject, body, pdfs } = req.body;
+    const { to, cc, bcc, subject, body, html, pdfs, attachments } = req.body;
 
     if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
       return res.status(500).json({ 
-        error: "Servicios de correo no configurados. Por favor contacte al administrador." 
+        error: "Servicios de correo no configurados. Por favor configure las credenciales SMTP_USER y SMTP_PASS." 
       });
     }
 
@@ -136,40 +185,242 @@ async function startServer() {
     });
 
     try {
-      if (!to || !Array.isArray(to) || to.length === 0) {
-        return res.status(400).json({ error: "Destinatario no válido" });
+      // Robust recipient sanitization & extraction
+      const cleanEmailList = (input: any): string[] => {
+        if (!input) return [];
+        const raw = Array.isArray(input) ? input : [input];
+        const flat: string[] = [];
+        raw.forEach((item: any) => {
+          if (typeof item === 'string') {
+            item.split(/[,;]/).forEach(e => {
+              const cleaned = e.trim();
+              if (cleaned && cleaned.includes('@')) {
+                flat.push(cleaned);
+              }
+            });
+          }
+        });
+        return Array.from(new Set(flat));
+      };
+
+      const toList = cleanEmailList(to);
+      const ccList = cleanEmailList(cc);
+      const bccList = cleanEmailList(bcc);
+
+      if (toList.length === 0) {
+        return res.status(400).json({ error: "Destinatario no válido. Verifique la dirección de correo." });
       }
 
-      const ccList = Array.isArray(cc) ? cc.filter((e: any) => e && typeof e === 'string' && e.trim() !== '') : [];
-      const bccList = Array.isArray(bcc) ? bcc.filter((e: any) => e && typeof e === 'string' && e.trim() !== '') : [];
+      const rawAttachments = attachments || pdfs || [];
+      const formattedAttachments = rawAttachments.map((att: any) => ({
+        filename: att.filename,
+        content: Buffer.from(att.data || att.content, 'base64'),
+      }));
 
-      await transporter.sendMail({
-        from: `"Mi Seguro Internacional" <${process.env.SMTP_FROM || process.env.SMTP_USER}>`,
-        to: to.filter((e: any) => e && typeof e === 'string' && e.trim() !== '').join(', '),
+      const emailSubject = subject || 'Certificados de Seguro - Mi Seguro Internacional';
+      const emailBody = body || 'Adjunto enviamos los documentos solicitados.';
+      
+      // Generate clean HTML layout if none provided to boost deliverability and avoid spam filters
+      const emailHtml = html || `
+        <!DOCTYPE html>
+        <html>
+        <head>
+          <meta charset="utf-8">
+          <style>
+            body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; margin: 0; padding: 20px; background-color: #f8fafc; color: #1e293b; }
+            .container { max-width: 620px; margin: 0 auto; background-color: #ffffff; border-radius: 12px; border: 1px solid #e2e8f0; overflow: hidden; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05); }
+            .header { background: linear-gradient(135deg, #1e3a8a 0%, #2563eb 100%); padding: 28px 24px; text-align: center; color: #ffffff; }
+            .header h1 { margin: 0; font-size: 20px; font-weight: 700; letter-spacing: 0.5px; }
+            .header p { margin: 6px 0 0; font-size: 13px; opacity: 0.9; }
+            .content { padding: 28px 24px; font-size: 14px; line-height: 1.65; color: #334155; }
+            .message-box { background-color: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 18px; margin: 16px 0; white-space: pre-wrap; font-size: 14px; color: #1e293b; }
+            .footer { padding: 20px 24px; background-color: #f1f5f9; text-align: center; font-size: 11px; color: #64748b; border-top: 1px solid #e2e8f0; }
+            .footer a { color: #2563eb; text-decoration: none; }
+          </style>
+        </head>
+        <body>
+          <div class="container">
+            <div class="header">
+              <h1>Mi Seguro Internacional</h1>
+              <p>Protección y Asistencia Global en Viajes</p>
+            </div>
+            <div class="content">
+              <div class="message-box">${emailBody.replace(/\n/g, '<br>')}</div>
+              <p style="font-size: 12px; color: #64748b; margin-top: 20px;">
+                📎 <strong>Archivos adjuntos:</strong> Por favor revise el o los archivos PDF adjuntos a este mensaje con su certificado y detalles de póliza.
+              </p>
+            </div>
+            <div class="footer">
+              <p style="margin: 0 0 6px 0;"><strong>SETMEX S.A. de C.V. / Mi Seguro Internacional</strong></p>
+              <p style="margin: 0;">Para dudas o aclaraciones responda directamente a este correo o contacte a su asesor de viajes.</p>
+            </div>
+          </div>
+        </body>
+        </html>
+      `;
+
+      const fromAddress = process.env.SMTP_FROM || process.env.SMTP_USER;
+      const replyToAddress = process.env.SMTP_REPLY_TO || fromAddress;
+
+      const info = await transporter.sendMail({
+        from: `"Mi Seguro Internacional" <${fromAddress}>`,
+        replyTo: replyToAddress,
+        to: toList.join(', '),
         cc: ccList.length > 0 ? ccList.join(', ') : undefined,
         bcc: bccList.length > 0 ? bccList.join(', ') : undefined,
-        subject: subject || 'Certificados de Seguro - Mi Seguro Internacional',
-        text: body || 'Adjunto enviamos el certificado de tu seguro. Gracias por confiar en nosotros.',
-        attachments: pdfs.map((pdf: any) => ({
-          filename: pdf.filename,
-          content: Buffer.from(pdf.data, 'base64'),
-        })),
+        subject: emailSubject,
+        text: emailBody,
+        html: emailHtml,
+        attachments: formattedAttachments,
       });
-      res.json({ success: true });
+
+      console.log(`[EMAIL DISPATCH] Sent to ${toList.join(', ')}. MessageId: ${info.messageId}`);
+      res.json({ success: true, messageId: info.messageId });
     } catch (error: any) {
       console.error("Error sending email:", error);
       
       let clientError = "Fallo al enviar el correo";
       if (error.code === 'EAUTH') {
-        clientError = "Error de autenticación: El usuario o contraseña de correo son incorrectos. Si usa Gmail, asegúrese de usar una 'Contraseña de Aplicación'.";
+        clientError = "Error de autenticación: El usuario o contraseña de correo son incorrectos. Si usa Gmail, asegúrese de usar una 'Contraseña de Aplicación' de 16 caracteres.";
       } else if (error.code === 'ESOCKET') {
         clientError = "Error de conexión: No se pudo conectar al servidor de correo.";
+      } else if (error.responseCode === 550 || error.responseCode === 553) {
+        clientError = "Dirección de destinatario rechazada por el servidor de correo.";
       }
 
-      const debugDetails = `${error.message || String(error)}${error.code ? ` (Code: ${error.code})` : ''}${error.command ? ` (Command: ${error.command})` : ''}`;
+      const debugDetails = `${error.message || String(error)}${error.code ? ` (Code: ${error.code})` : ''}${error.response ? ` (Response: ${error.response})` : ''}`;
       res.status(500).json({ 
         error: clientError,
         details: debugDetails
+      });
+    }
+  });
+
+  // API Route: Test direct SMTP sending
+  app.post("/api/smtp-test-send", async (req, res) => {
+    const { to } = req.body;
+    if (!to || typeof to !== 'string' || !to.includes('@')) {
+      return res.status(400).json({ error: "Debe proporcionar una dirección de correo válida para la prueba." });
+    }
+
+    if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
+      return res.status(500).json({ error: "SMTP no configurado en variables de entorno." });
+    }
+
+    try {
+      const transporter = nodemailer.createTransport({
+        host: process.env.SMTP_HOST || 'smtp.gmail.com',
+        port: parseInt(process.env.SMTP_PORT || '587'),
+        secure: process.env.SMTP_SECURE === 'true',
+        auth: {
+          user: process.env.SMTP_USER,
+          pass: process.env.SMTP_PASS,
+        },
+      });
+
+      const now = new Date();
+      const info = await transporter.sendMail({
+        from: `"Prueba de Conexión MSI" <${process.env.SMTP_FROM || process.env.SMTP_USER}>`,
+        replyTo: process.env.SMTP_FROM || process.env.SMTP_USER,
+        to: to.trim(),
+        subject: `[DIAGNÓSTICO] Prueba de Envío de Correo MSI - ${now.toLocaleTimeString()}`,
+        text: `Esta es una prueba de envío en vivo desde el servidor MSI para verificar que el servicio SMTP funciona correctamente. Fecha: ${now.toISOString()}`,
+        html: `
+          <div style="font-family: sans-serif; padding: 20px; border: 1px solid #cbd5e1; border-radius: 8px; max-width: 500px;">
+            <h3 style="color: #1e3a8a; margin-top: 0;">Prueba de Diagnóstico SMTP Exitosa</h3>
+            <p>Este correo confirma que el servidor de correo está correctamente autenticado y puede entregar mensajes sin problemas.</p>
+            <hr style="border: 0; border-top: 1px solid #e2e8f0; margin: 15px 0;">
+            <p style="font-size: 12px; color: #64748b;">
+              <strong>Host SMTP:</strong> ${process.env.SMTP_HOST || 'smtp.gmail.com'}<br>
+              <strong>Remitente:</strong> ${process.env.SMTP_FROM || process.env.SMTP_USER}<br>
+              <strong>Hora:</strong> ${now.toLocaleString()}
+            </p>
+          </div>
+        `
+      });
+
+      res.json({ success: true, messageId: info.messageId, response: info.response });
+    } catch (err: any) {
+      console.error("[SMTP TEST ERROR]", err);
+      res.status(500).json({ error: err.message || 'Fallo en la prueba de envío', details: err });
+    }
+  });
+
+  // API Route: Check SMTP Configuration & Diagnostics
+  app.get("/api/smtp-status", async (req, res) => {
+    const isConfigured = Boolean(process.env.SMTP_USER && process.env.SMTP_PASS);
+    const host = process.env.SMTP_HOST || 'smtp.gmail.com';
+    const port = parseInt(process.env.SMTP_PORT || '587');
+    const secure = process.env.SMTP_SECURE === 'true';
+    const user = process.env.SMTP_USER ? `${process.env.SMTP_USER.slice(0, 3)}***@${process.env.SMTP_USER.split('@')[1] || ''}` : null;
+    const from = process.env.SMTP_FROM || process.env.SMTP_USER || null;
+    const passLength = process.env.SMTP_PASS ? process.env.SMTP_PASS.length : 0;
+
+    if (!isConfigured) {
+      return res.json({
+        configured: false,
+        verified: false,
+        host,
+        port,
+        secure,
+        user: null,
+        from,
+        passConfigured: false,
+        message: "Las credenciales SMTP (SMTP_USER y SMTP_PASS) no están configuradas en las variables de entorno del servidor.",
+        recommendations: [
+          "Defina SMTP_USER con su dirección de correo (ej. ventas@misegurointernacional.com o cuenta de Gmail).",
+          "Defina SMTP_PASS con la 'Contraseña de aplicación' de 16 caracteres de Google (App Password) generada en myaccount.google.com/apppasswords.",
+          "Defina SMTP_FROM con el remitente deseado (ej. ventas@misegurointernacional.com)."
+        ]
+      });
+    }
+
+    try {
+      const transporter = nodemailer.createTransport({
+        host,
+        port,
+        secure,
+        auth: {
+          user: process.env.SMTP_USER,
+          pass: process.env.SMTP_PASS,
+        },
+      });
+
+      await transporter.verify();
+
+      return res.json({
+        configured: true,
+        verified: true,
+        host,
+        port,
+        secure,
+        user,
+        from,
+        passConfigured: true,
+        passLength,
+        message: "Conexión y autenticación con el servidor SMTP verificadas con éxito. El servicio de correo está listo para enviar."
+      });
+    } catch (error: any) {
+      console.error("[SMTP DIAGNOSTICS] Verification failed:", error);
+      let advice = "Verifique sus credenciales SMTP.";
+      if (error.code === 'EAUTH') {
+        advice = "Error de autenticación: Credenciales rechazadas por el proveedor. En Gmail debe tener verificación en 2 pasos activada y generar una 'Contraseña de Aplicación' de 16 caracteres.";
+      } else if (error.code === 'ESOCKET' || error.code === 'ETIMEDOUT') {
+        advice = `Error de conexión con ${host}:${port}. Verifique si el puerto o host están bloqueados o use puerto 587 con secure=false.`;
+      }
+
+      return res.json({
+        configured: true,
+        verified: false,
+        host,
+        port,
+        secure,
+        user,
+        from,
+        passConfigured: true,
+        error: error.message || String(error),
+        code: error.code || null,
+        advice
       });
     }
   });
@@ -367,6 +618,7 @@ ${body}`);
   // ===============================================================
   app.post("/api/woocommerce/webhook", async (req, res) => {
     const topic = req.headers['x-wc-webhook-topic']; // webhook event type (e.g., order.created, order.updated)
+    const signature = req.headers['x-wc-webhook-signature'] as string;
     const orderPayload = req.body;
     
     console.log(`[WOO_WEBHOOK] Received Webhook Event Topic: ${topic}. Order ID: ${orderPayload?.id}`);
@@ -375,6 +627,36 @@ ${body}`);
     if (!orderPayload || !orderPayload.id) {
       console.log("[WOO_WEBHOOK] Empty or handshaking webhook received.");
       return res.status(200).json({ success: true, message: "Ping/Handshake acknowledged" });
+    }
+
+    try {
+      // Fetch saved WooCommerce integration configuration from Firestore to retrieve webhookSecret
+      const configDoc = await adminDb.collection('settings').doc('woocommerce').get();
+      if (configDoc.exists) {
+        const configData = configDoc.data();
+        const secret = configData?.webhookSecret;
+        if (secret && secret.trim() !== '') {
+          // Calculate HMAC-SHA256 of the raw body
+          const rawBody = (req as any).rawBody || Buffer.from(JSON.stringify(req.body));
+          const computedSignature = crypto
+            .createHmac('sha256', secret.trim())
+            .update(rawBody)
+            .digest('base64');
+
+          if (computedSignature !== signature) {
+            console.error(`[WOO_WEBHOOK] Signature verification failed. Expected: ${computedSignature}, Received: ${signature}`);
+            return res.status(401).json({ 
+              success: false, 
+              error: "Firma de webhook inválida. Acceso no autorizado." 
+            });
+          }
+          console.log(`[WOO_WEBHOOK] Signature verified successfully.`);
+        } else {
+          console.log(`[WOO_WEBHOOK] Webhook secret not configured in Settings. Skipping validation (optional mode).`);
+        }
+      }
+    } catch (error: any) {
+      console.error(`[WOO_WEBHOOK] Error during signature validation:`, error);
     }
 
     try {
@@ -391,30 +673,89 @@ ${body}`);
     }
   });
 
+  // Resilient Gemini generator with multiple fallback models, fast backoff, and instant model failover on 503/429 demand spikes
+  async function generateWithFallback(ai: any, params: any, candidateModels = ["gemini-3.1-flash-lite", "gemini-flash-latest", "gemini-3.7-flash"]) {
+    let lastError: any = null;
+    
+    for (const model of candidateModels) {
+      // Fast attempts per model on 503 demand spikes before switching to next candidate model
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const response = await ai.models.generateContent({
+            ...params,
+            model: model,
+          });
+          if (response && (response.text || response.candidates?.[0]?.content?.parts?.[0]?.text)) {
+            return response;
+          }
+        } catch (err: any) {
+          lastError = err;
+          const errStr = String(err?.message || err);
+          console.warn(`[Gemini Fallback] Model ${model} (attempt ${attempt + 1}) encountered error:`, errStr);
+          
+          // If model is not found (404), do not retry this model
+          if (errStr.includes("404") || errStr.includes("NOT_FOUND")) {
+            break;
+          }
+
+          // If quota exceeded or hard rate limit (429), switch immediately to next candidate model
+          if (errStr.includes("429") || errStr.includes("RESOURCE_EXHAUSTED") || errStr.includes("Quota exceeded") || errStr.includes("quota")) {
+            break;
+          }
+
+          // If 503 (high demand) or transient unavailable, pause briefly on attempt 0, then switch model on attempt 1
+          if (errStr.includes("503") || errStr.includes("UNAVAILABLE") || errStr.includes("high demand")) {
+            if (attempt === 0) {
+              const backoffMs = 500 + Math.floor(Math.random() * 300);
+              console.log(`[Gemini Retry] Model ${model} busy. Waiting ${backoffMs}ms before fast retry...`);
+              await new Promise(resolve => setTimeout(resolve, backoffMs));
+            } else {
+              // Switch immediately to next model in candidateModels
+              break;
+            }
+          } else {
+            // Other errors: proceed to next candidate
+            break;
+          }
+        }
+      }
+    }
+
+    const lastErrMessage = lastError?.message || String(lastError || "");
+    if (lastErrMessage.includes("429") || lastErrMessage.includes("RESOURCE_EXHAUSTED") || lastErrMessage.includes("Quota exceeded")) {
+      throw new Error("Se ha alcanzado temporalmente el límite de cuota de IA. Por favor reintenta en unos instantes.");
+    }
+    if (lastErrMessage.includes("503") || lastErrMessage.includes("UNAVAILABLE") || lastErrMessage.includes("high demand")) {
+      throw new Error("Los servidores de IA están experimentando alta demanda momentáneamente. Por favor reintenta en unos momentos.");
+    }
+
+    throw lastError || new Error("No se pudo obtener respuesta de ningún modelo de IA disponible.");
+  }
+
   // ===============================================================
-  // CareMed Invoice AI Reading endpoint
+  // CareMed Invoices AI OCR parsing endpoint
   // ===============================================================
   app.post("/api/caremed/parse-invoice", async (req, res) => {
-    const { fileData, fileName, fileType } = req.body;
-    if (!fileData) {
-      return res.status(400).json({ error: "No se proporcionaron datos de archivo" });
-    }
-
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      console.warn("GEMINI_API_KEY no configurado. Usando fallback de extracción simulada...");
-      const simulatedInvoice = "INV-" + Math.floor(100000 + Math.random() * 900000);
-      const simulatedAmount = 1250.00;
-      return res.json({
-        success: true,
-        simulated: true,
-        invoiceNumber: simulatedInvoice,
-        amount: simulatedAmount,
-        notes: "Modo de simulación (GEMINI_API_KEY no configurado). Se generaron datos de ejemplo."
-      });
-    }
-
     try {
+      const { fileData, fileName, fileType } = req.body || {};
+      if (!fileData) {
+        return res.status(400).json({ error: "No se proporcionaron datos de archivo" });
+      }
+
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) {
+        console.warn("GEMINI_API_KEY no configurado. Usando fallback de extracción simulada...");
+        const simulatedInvoice = "INV-" + Math.floor(100000 + Math.random() * 900000);
+        const simulatedAmount = 1250.00;
+        return res.json({
+          success: true,
+          simulated: true,
+          invoiceNumber: simulatedInvoice,
+          amount: simulatedAmount,
+          notes: "Modo de simulación (GEMINI_API_KEY no configurado). Se generaron datos de ejemplo."
+        });
+      }
+
       const { GoogleGenAI, Type } = await import("@google/genai");
       const ai = new GoogleGenAI({
         apiKey: apiKey,
@@ -436,8 +777,7 @@ ${body}`);
         text: "Analyze this CareMed invoice document (PDF or image). Extract the main invoice reference or number (look for invoice ID, reference, invoice#, etc.), and extract the grand total amount to pay (usually in USD or EUR, return as a number). Provide a short notes summary."
       };
 
-      const response = await ai.models.generateContent({
-        model: "gemini-3.5-flash",
+      const response = await generateWithFallback(ai, {
         contents: { parts: [filePart, promptPart] },
         config: {
           responseMimeType: "application/json",
@@ -462,12 +802,17 @@ ${body}`);
         }
       });
 
-      const bodyText = response.text;
+      const bodyText = response.text || response.candidates?.[0]?.content?.parts?.[0]?.text || "";
       if (!bodyText) {
         throw new Error("El modelo no devolvió ningún contenido");
       }
 
-      const parsed = JSON.parse(bodyText.trim());
+      let cleaned = bodyText.trim();
+      if (cleaned.startsWith("```")) {
+        cleaned = cleaned.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "").trim();
+      }
+
+      const parsed = JSON.parse(cleaned);
       res.json({
         success: true,
         invoiceNumber: parsed.invoiceNumber || "",
@@ -478,7 +823,207 @@ ${body}`);
     } catch (error: any) {
       console.error("Error parsing invoice with Gemini:", error);
       res.status(500).json({
-        error: "Fallo al procesar la factura con Gemini: " + error.message
+        error: "Fallo al procesar la factura con Gemini: " + (error.message || String(error))
+      });
+    }
+  });
+
+  // ===============================================================
+  // Bank Statement AI OCR parsing endpoint
+  // ===============================================================
+  app.post("/api/statement/parse-statement", async (req, res) => {
+    try {
+      const { fileData, fileName, fileType, currency } = req.body || {};
+      if (!fileData) {
+        return res.status(400).json({ error: "No se proporcionaron datos de archivo para el estado de cuenta" });
+      }
+
+      const apiKey = process.env.GEMINI_API_KEY;
+      if (!apiKey) {
+        console.warn("GEMINI_API_KEY no configurado en servidor. Generando datos de extracción...");
+        const today = new Date().toISOString().split('T')[0];
+        const sampleRecords = [
+          { date: today, description: "DEPÓSITO TRANSFERENCIA SPEI / CLIENTE", amount: 1500.00, type: "income" },
+          { date: today, description: "PAGO SERVICIOS Y COMISIÓN BANCARIA", amount: 120.50, type: "expense" },
+          { date: today, description: "ABONO PRIMA DE SEGURO INTERNACIONAL", amount: 890.00, type: "income" }
+        ];
+        return res.json({
+          success: true,
+          records: sampleRecords,
+          notes: "Modo simulado por ausencia de GEMINI_API_KEY."
+        });
+      }
+
+      const { GoogleGenAI, Type } = await import("@google/genai");
+      const ai = new GoogleGenAI({
+        apiKey: apiKey,
+        httpOptions: {
+          headers: {
+            'User-Agent': 'aistudio-build',
+          }
+        }
+      });
+
+      const filePart = {
+        inlineData: {
+          mimeType: fileType || "application/pdf",
+          data: fileData
+        }
+      };
+
+      const isUSD = currency === 'USD';
+
+      const promptPart = {
+        text: `Extract ALL individual financial transaction lines from this bank account statement (Estado de Cuenta Bancario / Bank Statement) document (PDF or image).
+${isUSD ? 'IMPORTANT: This is a US Dollar (USD / US$) account statement (e.g. US Banks like Chase, Bank of America, Wells Fargo, Citibank, Mercury, Wise, Stripe, or Mexican USD dollar accounts like Banorte USD, BBVA USD, Santander USD, Intercam USD).' : 'This is a Mexican Pesos (MXP / MXN) account statement.'}
+
+EXTRACTION INSTRUCTIONS:
+1. Transaction Classification:
+   - 'income': All money deposits / additions / credits entering the account. Look for terms in English or Spanish: Deposits, Credits, Electronic Deposits, Wires In, ACH Credit, Direct Deposit, Mobile Check Deposit, Transfers Received, Depósitos, Abonos, Créditos, Intereses a favor, Dividendos, Reembolsos, Devolución.
+   - 'expense': All money withdrawals / debits / charges leaving the account. Look for terms in English or Spanish: Withdrawals, Debits, Electronic Withdrawals, Checks Paid, Purchases, Debit Card / POS, Wires Out, ACH Debit, Bank Fees, Service Charge, Monthly Maintenance Fee, Cargos, Retiros, Egresos, Pagos a Proveedores, Comisiones, Cheques Cobrados, Transferencias enviadas.
+2. The 'amount' field:
+   - Must ALWAYS be a positive number greater than 0 (e.g. 1250.50).
+   - Strip all dollar/currency signs ($), commas (,), or negative signs (-).
+3. The 'date' field:
+   - Must be formatted as YYYY-MM-DD (e.g. 2026-08-15).
+   - For US bank statements with MM/DD/YYYY or MM/DD, convert accurately to YYYY-MM-DD.
+   - For Latin American bank statements with DD/MM/YYYY or DD/MM, convert accurately to YYYY-MM-DD.
+   - Infer the year from the statement header or statement date period if missing on individual lines.
+4. The 'description' field:
+   - Clean, concise text with the merchant name, beneficiary, or movement description.
+5. EXCLUSION:
+   - DO NOT include summary rows or balances (e.g. "Beginning balance", "Ending balance", "Total deposits", "Total withdrawals", "Saldo anterior", "Saldo actual", "Total abonos", "Total cargos"). Only extract individual line item transactions.
+
+Return the result as an array of JSON objects matching the schema.`
+      };
+
+      const response = await generateWithFallback(ai, {
+        contents: { parts: [filePart, promptPart] },
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                date: { type: Type.STRING },
+                description: { type: Type.STRING },
+                amount: { type: Type.NUMBER },
+                type: { type: Type.STRING, enum: ["income", "expense"] }
+              },
+              required: ["date", "description", "amount", "type"]
+            }
+          }
+        }
+      });
+
+      const bodyText = response.text || response.candidates?.[0]?.content?.parts?.[0]?.text || "";
+      if (!bodyText) {
+        throw new Error("El modelo no devolvió contenido");
+      }
+
+      let cleaned = bodyText.trim();
+      if (cleaned.startsWith("```")) {
+        cleaned = cleaned.replace(/^```(?:json)?\n?/, "").replace(/\n?```$/, "").trim();
+      }
+
+      let parsed: any;
+      try {
+        parsed = JSON.parse(cleaned);
+      } catch (parseErr) {
+        // Try finding the array inside text if surrounded by other characters
+        const firstBracket = cleaned.indexOf('[');
+        const lastBracket = cleaned.lastIndexOf(']');
+        if (firstBracket !== -1 && lastBracket !== -1 && lastBracket > firstBracket) {
+          parsed = JSON.parse(cleaned.substring(firstBracket, lastBracket + 1));
+        } else {
+          throw parseErr;
+        }
+      }
+
+      const rawRecords = Array.isArray(parsed) 
+        ? parsed 
+        : (parsed.records || parsed.transactions || parsed.movements || parsed.items || []);
+
+      // Clean, validate and normalize records
+      const currentYear = new Date().getFullYear();
+      const sanitizedRecords = (rawRecords || [])
+        .map((r: any) => {
+          let rawAmount = r.amount;
+          if (typeof rawAmount === 'string') {
+            rawAmount = rawAmount.replace(/[^0-9.-]/g, '');
+          }
+          const numAmount = Math.abs(parseFloat(rawAmount) || 0);
+
+          // Normalize Date
+          let dateStr = String(r.date || '').trim();
+          if (dateStr) {
+            // If MM/DD/YYYY (US style) or DD/MM/YYYY
+            const parts = dateStr.split(/[\/\-.]/);
+            if (parts.length === 3) {
+              if (parts[0].length === 4) {
+                // YYYY-MM-DD
+                dateStr = `${parts[0]}-${parts[1].padStart(2, '0')}-${parts[2].padStart(2, '0')}`;
+              } else if (parts[2].length === 4) {
+                if (isUSD) {
+                  // US format: MM/DD/YYYY
+                  let mm = parseInt(parts[0], 10);
+                  let dd = parseInt(parts[1], 10);
+                  if (mm > 12 && dd <= 12) {
+                    // Swap if day was first
+                    const temp = mm; mm = dd; dd = temp;
+                  }
+                  dateStr = `${parts[2]}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
+                } else {
+                  // LatAm format: DD/MM/YYYY
+                  let dd = parseInt(parts[0], 10);
+                  let mm = parseInt(parts[1], 10);
+                  if (mm > 12 && dd <= 12) {
+                    // Swap if month was first
+                    const temp = mm; mm = dd; dd = temp;
+                  }
+                  dateStr = `${parts[2]}-${String(mm).padStart(2, '0')}-${String(dd).padStart(2, '0')}`;
+                }
+              }
+            } else if (parts.length === 2) {
+              // MM/DD or DD/MM with inferred current year
+              const p1 = parseInt(parts[0], 10);
+              const p2 = parseInt(parts[1], 10);
+              if (isUSD) {
+                dateStr = `${currentYear}-${String(p1).padStart(2, '0')}-${String(p2).padStart(2, '0')}`;
+              } else {
+                dateStr = `${currentYear}-${String(p2).padStart(2, '0')}-${String(p1).padStart(2, '0')}`;
+              }
+            }
+          }
+
+          if (!dateStr || dateStr.length < 8) {
+            dateStr = new Date().toISOString().split('T')[0];
+          }
+
+          const rawType = String(r.type || '').toLowerCase();
+          const normType = (rawType.includes('exp') || rawType.includes('egr') || rawType.includes('deb') || rawType.includes('car') || rawType.includes('withdr')) 
+            ? 'expense' 
+            : 'income';
+
+          return {
+            date: dateStr,
+            description: String(r.description || 'Movimiento Bancario').trim(),
+            amount: Number(numAmount.toFixed(2)),
+            type: normType
+          };
+        })
+        .filter((r: any) => r.amount > 0 && r.description);
+
+      return res.json({
+        success: true,
+        records: sanitizedRecords
+      });
+
+    } catch (error: any) {
+      console.error("Error parsing bank statement with Gemini:", error);
+      res.status(500).json({
+        error: "Fallo al procesar el estado de cuenta con IA: " + (error.message || String(error))
       });
     }
   });
@@ -818,6 +1363,23 @@ ${body}`);
     return data;
   }
 
+  const extractDatabaseFromBackupDoc = async (data: any) => {
+    if (data.zippedData) {
+      try {
+        const inflated = zlib.inflateSync(Buffer.from(data.zippedData, 'base64')).toString('utf-8');
+        return JSON.parse(inflated);
+      } catch (_) {
+        const zip = new JSZip();
+        const zipContent = await zip.loadAsync(data.zippedData, { base64: true });
+        const jsonFileNames = Object.keys(zipContent.files).filter(name => name.endsWith('.json') && !zipContent.files[name].dir);
+        const target = jsonFileNames.includes('backup.json') ? 'backup.json' : jsonFileNames[0];
+        const jsonStr = await zipContent.files[target].async('string');
+        return JSON.parse(jsonStr);
+      }
+    }
+    return JSON.parse(data.databaseJson || "{}");
+  };
+
   async function runAutomaticBackup(triggeredBy: string) {
     console.log(`[BACKUP ENGINE] Initiating cloud backup requested by: ${triggeredBy}`);
     const backupData: Record<string, any[]> = {};
@@ -839,6 +1401,13 @@ ${body}`);
       }
     }
 
+    const rawJsonStr = JSON.stringify(backupData);
+    const compressedBuffer = zlib.deflateSync(rawJsonStr);
+    const zippedData = compressedBuffer.toString('base64');
+    const originalSize = Buffer.byteLength(rawJsonStr);
+    const compressedSize = compressedBuffer.length;
+    const ratio = Math.round((1 - compressedSize / originalSize) * 100);
+
     const backupDoc = {
       meta: {
         appId: "mi-seguro-internacional",
@@ -846,14 +1415,19 @@ ${body}`);
         exportedAt: new Date().toISOString(),
         exportedBy: triggeredBy,
         totalCollectionsCount: EXPORTABLE_COLLECTIONS_LIST.length,
-        recordCounts: recordCounts
+        recordCounts: recordCounts,
+        isCompressed: true,
+        originalSize,
+        compressedSize,
+        compressionRatio: `${ratio}%`
       },
-      databaseJson: JSON.stringify(backupData)
+      zippedData,
+      databaseJson: ""
     };
 
     const backupId = `backup_${Date.now()}`;
     await adminDb.collection("backups").doc(backupId).set(backupDoc);
-    console.log(`[BACKUP ENGINE] Successfully stored backup document: ${backupId}`);
+    console.log(`[BACKUP ENGINE] Successfully stored compressed backup document: ${backupId}`);
 
     // ROTATION LOGIC: Keep only last 5 backups
     try {
@@ -915,9 +1489,10 @@ ${body}`);
         return res.status(404).json({ error: "Copia de seguridad no encontrada" });
       }
       const data = backupSnap.data()!;
+      const database = await extractDatabaseFromBackupDoc(data);
       res.json({
         meta: data.meta,
-        database: JSON.parse(data.databaseJson || "{}")
+        database
       });
     } catch (err: any) {
       res.status(500).json({ error: err.message || "Error al obtener detalles del backup" });
@@ -944,7 +1519,7 @@ ${body}`);
         return res.status(404).json({ error: "Copia de seguridad no encontrada" });
       }
       const data = backupSnap.data()!;
-      const database = JSON.parse(data.databaseJson || "{}");
+      const database = await extractDatabaseFromBackupDoc(data);
       
       let restoredCount = 0;
       const collectionsToRestore = Object.keys(database);
@@ -1055,4 +1630,7 @@ ${body}`);
   });
 }
 
-startServer();
+startServer().catch((err) => {
+  console.error("Failed to start server:", err);
+  process.exit(1);
+});

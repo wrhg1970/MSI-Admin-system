@@ -7,6 +7,8 @@ import { format, isValid } from 'date-fns';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import ConfirmModal from './ConfirmModal';
+import { isCardPaymentMethod } from '../utils/paymentUtils';
+import { logInsuranceActivity } from '../utils/activityLogger';
 
 const isInsuranceClosed = (insurance: any) => {
   if (!insurance) return false;
@@ -42,7 +44,7 @@ interface TransactionModalProps {
   initialShowAddForm?: boolean;
 }
 
-export default function TransactionModal({ isOpen, onClose, insuranceId, clientEmail, title, exchangeRate = 17.5, initialShowAddForm = false }: TransactionModalProps) {
+export default function TransactionModal({ isOpen, onClose, insuranceId, clientEmail, title, exchangeRate = 17.55, initialShowAddForm = false }: TransactionModalProps) {
   const [payments, setPayments] = useState<Payment[]>([]);
   const [insurances, setInsurances] = useState<InsuranceRequest[]>([]);
   const [paymentMethods, setPaymentMethods] = useState<{ id: string; name: string }[]>([]);
@@ -73,6 +75,60 @@ export default function TransactionModal({ isOpen, onClose, insuranceId, clientE
     exchangeRate: '20.00',
     status: 'completed' as 'pending' | 'completed'
   });
+
+  // Pre-fill default values when currentInsurance is loaded and form is shown
+  useEffect(() => {
+    if (isOpen && currentInsurance && showAddForm) {
+      const fetchTodayRateAndSet = async () => {
+        const todayStr = format(new Date(), 'yyyy-MM-dd');
+        let rate = 20.00; // default/fallback rate
+
+        try {
+          // Try to get today's exchange rate from DB
+          const q = query(
+            collection(db, 'exchangeRates'),
+            where('date', '==', todayStr),
+            limit(1)
+          );
+          const snap = await getDocs(q);
+          if (!snap.empty) {
+            const rData = snap.docs[0].data();
+            if (rData && rData.rate) {
+              rate = parseFloat(rData.rate);
+            }
+          } else if (exchangeRate) {
+            rate = exchangeRate;
+          }
+        } catch (err) {
+          console.error("Error fetching today's exchange rate for prefill:", err);
+          if (exchangeRate) {
+            rate = exchangeRate;
+          }
+        }
+
+        const insurancePrice = currentInsurance.totalFinal !== undefined && currentInsurance.totalFinal !== null
+          ? currentInsurance.totalFinal
+          : (currentInsurance.totalPrice || 0);
+        
+        // Price * rate = Monto
+        const calculatedAmount = (insurancePrice * rate).toFixed(2);
+
+        setFormData({
+          amount: calculatedAmount,
+          currency: 'MXP',
+          type: 'client_payment',
+          paymentMethod: currentInsurance.paymentMethod || '',
+          receiptNumber: '',
+          notes: '',
+          date: todayStr,
+          exchangeRate: rate.toFixed(2),
+          status: 'completed'
+        });
+      };
+
+      fetchTodayRateAndSet();
+    }
+  }, [isOpen, currentInsurance, showAddForm, exchangeRate]);
 
   useEffect(() => {
     if (!isOpen) {
@@ -178,7 +234,7 @@ export default function TransactionModal({ isOpen, onClose, insuranceId, clientE
 
     try {
       const amountVal = parseFloat(formData.amount) || 0;
-      const rateVal = parseFloat(formData.exchangeRate) || exchangeRate || 17.5;
+      const rateVal = parseFloat(formData.exchangeRate) || exchangeRate || 17.55;
       
       // If currency is MXP, the amount parameter sent to Stripe should be in pesos.
       // If currency is USD, the amount parameter sent to Stripe should be in USD.
@@ -298,7 +354,7 @@ export default function TransactionModal({ isOpen, onClose, insuranceId, clientE
           : formData.type === 'provider_payment' 
           ? 'Pago a Proveedor' 
           : 'Comisión de Agente';
-        await addDoc(collection(db, 'insuranceActivities'), {
+        await logInsuranceActivity({
           insuranceId: insuranceId,
           type: 'automatic',
           description: `Se registró una transacción de tipo "${typeLabel}" por un valor de $${amountUSD.toLocaleString('es-MX', { minimumFractionDigits: 2 })} USD (${formData.paymentMethod}) con estado "${formData.status === 'completed' ? 'Completado' : 'Pendiente'}".`,
@@ -316,7 +372,7 @@ export default function TransactionModal({ isOpen, onClose, insuranceId, clientE
         if (insSnap.exists()) {
           const insData = insSnap.data() as InsuranceRequest;
           const isNewIns = !isAlreadyLoaded(insData);
-          const isCard = formData.paymentMethod === 'Tarjeta AMEX' || formData.paymentMethod === 'Tarjeta VISA/MC';
+          const isCard = isCardPaymentMethod(formData.paymentMethod);
 
           let updatedFields: any = {};
           
@@ -336,7 +392,7 @@ export default function TransactionModal({ isOpen, onClose, insuranceId, clientE
             const finalPaid = formData.status === 'completed' ? ((insData.totalPaid || 0) + amountUSD) : (insData.totalPaid || 0);
             
             let newStatus = insData.status;
-            if (finalPaid >= insTotalFinal) {
+            if ((insTotalFinal - finalPaid) < 2) {
               newStatus = 'paid';
             } else if (finalPaid > 0) {
               newStatus = 'partially_paid';
@@ -349,7 +405,7 @@ export default function TransactionModal({ isOpen, onClose, insuranceId, clientE
               const newTotalPaid = (insData.totalPaid || 0) + amountUSD;
               const totalPrice = insData.totalFinal || insData.totalPrice;
               let newStatus = insData.status;
-              if (newTotalPaid >= totalPrice) {
+              if ((totalPrice - newTotalPaid) < 2) {
                 newStatus = 'paid';
               } else if (newTotalPaid > 0) {
                 newStatus = 'partially_paid';
@@ -434,7 +490,7 @@ export default function TransactionModal({ isOpen, onClose, insuranceId, clientE
             : payment.type === 'provider_payment' 
             ? 'Pago a Proveedor' 
             : 'Comisión de Agente';
-          await addDoc(collection(db, 'insuranceActivities'), {
+          await logInsuranceActivity({
             insuranceId: payment.insuranceId,
             type: 'automatic',
             description: `Se eliminó la transacción de tipo "${typeLabel}" por un valor de $${payment.amount.toLocaleString('es-MX', { minimumFractionDigits: 2 })} USD (${payment.paymentMethod || '-'}).`,
@@ -458,7 +514,7 @@ export default function TransactionModal({ isOpen, onClose, insuranceId, clientE
           let newStatus = insData.status;
           if (newTotalPaid <= 0) {
             newStatus = 'pending';
-          } else if (newTotalPaid < totalPrice) {
+          } else if ((totalPrice - newTotalPaid) >= 2) {
             newStatus = 'partially_paid';
           } else {
             newStatus = 'paid';
@@ -516,7 +572,7 @@ export default function TransactionModal({ isOpen, onClose, insuranceId, clientE
             const totalPrice = insData.totalFinal || insData.totalPrice;
             
             let newStatus = insData.status;
-            if (newTotalPaid >= totalPrice) {
+            if ((totalPrice - newTotalPaid) < 2) {
               newStatus = 'paid';
             } else if (newTotalPaid > 0) {
               newStatus = 'partially_paid';
@@ -668,7 +724,7 @@ export default function TransactionModal({ isOpen, onClose, insuranceId, clientE
                     <div className="bg-white p-2.5 rounded-lg border border-blue-50/70 shadow-2xs">
                       <p className="text-[9px] font-bold text-gray-400 uppercase tracking-wider">Costo del Seguro</p>
                       <p className="text-sm font-black text-blue-600 mt-0.5">
-                        ${(currentInsurance.totalFinal || currentInsurance.totalPrice || 0).toLocaleString('es-MX', { minimumFractionDigits: 2 })} USD
+                        ${((currentInsurance.totalPrice || 0) - (currentInsurance.discount || 0) - (currentInsurance.adjustment || 0)).toLocaleString('es-MX', { minimumFractionDigits: 2 })} USD
                       </p>
                     </div>
 
@@ -1140,197 +1196,209 @@ export default function TransactionModal({ isOpen, onClose, insuranceId, clientE
         {/* Edit Payment Modal */}
         {editingPayment && (
           <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[70] p-4">
-            <div className="bg-white rounded-3xl shadow-2xl max-w-lg w-full overflow-hidden animate-in fade-in zoom-in duration-200">
-              <div className="bg-blue-600 p-6 text-white flex justify-between items-center">
+            <div className="bg-white rounded-3xl shadow-2xl max-w-2xl md:max-w-3xl w-full max-h-[90vh] flex flex-col overflow-hidden animate-in fade-in zoom-in-95 duration-200">
+              <div className="bg-blue-600 p-5 md:p-6 text-white flex justify-between items-center flex-shrink-0">
                 <div className="flex items-center gap-3">
-                  <Edit2 className="w-6 h-6" />
-                  <h3 className="text-xl font-bold">Editar Pago</h3>
+                  <div className="p-2 bg-white/15 rounded-xl">
+                    <Edit2 className="w-5 h-5 text-white" />
+                  </div>
+                  <h3 className="text-lg md:text-xl font-black tracking-tight">Editar Pago</h3>
                 </div>
-                <button onClick={() => setEditingPayment(null)} className="p-2 hover:bg-blue-500 rounded-full transition-colors">
-                  <X className="w-6 h-6" />
+                <button onClick={() => setEditingPayment(null)} className="p-2 hover:bg-white/10 rounded-xl transition-all cursor-pointer">
+                  <X className="w-5 h-5" />
                 </button>
               </div>
               
-              <form onSubmit={handleSaveEditedPayment} className="p-8 space-y-6">
-                <div className="grid grid-cols-1 gap-6">
-                  <div>
-                    <label className="block text-xs font-bold text-gray-400 uppercase mb-2">Moneda</label>
-                    <div className="flex bg-gray-100 p-1 rounded-xl">
-                      {(['USD', 'MXP'] as const).map(curr => (
-                        <button
-                          key={curr}
-                          type="button"
-                          onClick={() => setEditingPayment({ ...editingPayment, currency: curr })}
-                          className={`flex-1 py-2 rounded-lg text-sm font-bold transition-all ${
-                            editingPayment.currency === curr ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500'
-                          }`}
-                        >
-                          {curr}
-                        </button>
-                      ))}
+              <form onSubmit={handleSaveEditedPayment} className="flex-1 flex flex-col overflow-hidden">
+                <div className="flex-1 overflow-y-auto p-6 md:p-8 space-y-6">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-5 md:gap-6">
+                    <div>
+                      <label className="block text-xs font-bold text-gray-500 uppercase mb-2 tracking-wider">Moneda</label>
+                      <div className="flex bg-gray-100 p-1 rounded-xl">
+                        {(['USD', 'MXP'] as const).map(curr => (
+                          <button
+                            key={curr}
+                            type="button"
+                            onClick={() => setEditingPayment({ ...editingPayment, currency: curr })}
+                            className={`flex-1 py-2 rounded-lg text-xs font-black transition-all cursor-pointer ${
+                              editingPayment.currency === curr ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'
+                            }`}
+                          >
+                            {curr}
+                          </button>
+                        ))}
+                      </div>
                     </div>
-                  </div>
-                  <div>
-                    <label className="block text-xs font-bold text-gray-400 uppercase mb-2">Monto ({editingPayment.currency})</label>
-                    <input 
-                      type="number"
-                      step="0.01"
-                      value={editingPayment.currency === 'USD' ? editingPayment.amount : editingPayment.amountMXP}
-                      onChange={(e) => {
-                        const val = parseFloat(e.target.value) || 0;
-                        if (editingPayment.currency === 'USD') {
-                          setEditingPayment({ ...editingPayment, amount: val, amountMXP: val * (editingPayment.exchangeRate || exchangeRate) });
-                        } else {
-                          setEditingPayment({ ...editingPayment, amountMXP: val, amount: val / (editingPayment.exchangeRate || exchangeRate) });
-                        }
-                      }}
-                      className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none font-bold"
-                      required
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-bold text-gray-400 uppercase mb-2">Tipo de Cambio</label>
-                    <input 
-                      type="number"
-                      step="0.01"
-                      value={editingPayment.exchangeRate}
-                      onChange={(e) => {
-                        const rate = parseFloat(e.target.value) || 1;
-                        if (editingPayment.currency === 'USD') {
-                          setEditingPayment({ 
-                            ...editingPayment, 
-                            exchangeRate: rate,
-                            amountMXP: (editingPayment.amount || 0) * rate
-                          });
-                        } else {
-                          setEditingPayment({ 
-                            ...editingPayment, 
-                            exchangeRate: rate,
-                            amount: (editingPayment.amountMXP || 0) / rate
-                          });
-                        }
-                      }}
-                      className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
-                      required
-                    />
-                  </div>
-                  <div className="p-4 bg-blue-50 rounded-xl border border-blue-100 flex justify-between items-center">
-                    <span className="text-blue-700 font-bold">
-                      {editingPayment.currency === 'USD' ? 'Equivalente MXP:' : 'Equivalente USD:'}
-                    </span>
-                    <span className="text-xl font-black text-blue-800">
-                      {editingPayment.currency === 'USD' 
-                        ? `$${(editingPayment.amountMXP || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MXP`
-                        : `$${(editingPayment.amount || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD`
-                      }
-                    </span>
-                  </div>
-                  <div>
-                    <label className="block text-xs font-bold text-gray-400 uppercase mb-2">Fecha</label>
-                    <input 
-                      type="date"
-                      value={editingPayment.date as any}
-                      onChange={async (e) => {
-                        const newDate = e.target.value;
-                        setEditingPayment(prev => {
-                          if (!prev) return null;
-                          return { ...prev, date: newDate as any };
-                        });
-                        if (newDate) {
-                          try {
-                            const q = query(
-                              collection(db, 'exchangeRates'),
-                              where('date', '==', newDate),
-                              limit(1)
-                            );
-                            const snap = await getDocs(q);
-                            if (!snap.empty) {
-                              const data = snap.docs[0].data();
-                              if (data && data.rate) {
-                                const rate = parseFloat(data.rate);
-                                setEditingPayment(prev => {
-                                  if (!prev) return null;
-                                  if (prev.currency === 'USD') {
-                                    return {
-                                      ...prev,
-                                      exchangeRate: rate,
-                                      amountMXP: (prev.amount || 0) * rate
-                                    };
-                                  } else {
-                                    return {
-                                      ...prev,
-                                      exchangeRate: rate,
-                                      amount: (prev.amountMXP || 0) / rate
-                                    };
-                                  }
-                                });
-                              }
-                            }
-                          } catch (err) {
-                            console.error("Error fetching exchange rate during edit:", err);
+
+                    <div>
+                      <label className="block text-xs font-bold text-gray-500 uppercase mb-2 tracking-wider">Monto ({editingPayment.currency})</label>
+                      <input 
+                        type="number"
+                        step="0.01"
+                        value={editingPayment.currency === 'USD' ? editingPayment.amount : editingPayment.amountMXP}
+                        onChange={(e) => {
+                          const val = parseFloat(e.target.value) || 0;
+                          if (editingPayment.currency === 'USD') {
+                            setEditingPayment({ ...editingPayment, amount: val, amountMXP: val * (editingPayment.exchangeRate || exchangeRate) });
+                          } else {
+                            setEditingPayment({ ...editingPayment, amountMXP: val, amount: val / (editingPayment.exchangeRate || exchangeRate) });
                           }
+                        }}
+                        className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 focus:bg-white outline-none font-bold text-sm transition-all"
+                        required
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-bold text-gray-500 uppercase mb-2 tracking-wider">Tipo de Cambio</label>
+                      <input 
+                        type="number"
+                        step="0.0001"
+                        value={editingPayment.exchangeRate}
+                        onChange={(e) => {
+                          const rate = parseFloat(e.target.value) || 1;
+                          if (editingPayment.currency === 'USD') {
+                            setEditingPayment({ 
+                              ...editingPayment, 
+                              exchangeRate: rate,
+                              amountMXP: (editingPayment.amount || 0) * rate
+                            });
+                          } else {
+                            setEditingPayment({ 
+                              ...editingPayment, 
+                              exchangeRate: rate,
+                              amount: (editingPayment.amountMXP || 0) / rate
+                            });
+                          }
+                        }}
+                        className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 focus:bg-white outline-none text-sm transition-all font-medium"
+                        required
+                      />
+                    </div>
+
+                    <div className="p-4 bg-blue-50/70 rounded-xl border border-blue-100 flex justify-between items-center shadow-sm">
+                      <span className="text-blue-700 font-bold text-xs uppercase tracking-wider">
+                        {editingPayment.currency === 'USD' ? 'Equivalente MXP' : 'Equivalente USD'}
+                      </span>
+                      <span className="text-lg md:text-xl font-black text-blue-800">
+                        {editingPayment.currency === 'USD' 
+                          ? `$${(editingPayment.amountMXP || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MXP`
+                          : `$${(editingPayment.amount || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD`
                         }
-                      }}
-                      className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
-                      required
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-bold text-gray-400 uppercase mb-2">Método de Pago</label>
-                    <select 
-                      value={editingPayment.paymentMethod}
-                      onChange={(e) => setEditingPayment({ ...editingPayment, paymentMethod: e.target.value })}
-                      className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
-                    >
-                      <option value="">Seleccione un método...</option>
-                      {paymentMethods.length > 0 ? (
-                        paymentMethods.sort((a, b) => a.name.localeCompare(b.name)).map(m => (
-                          <option key={m.id} value={m.name}>{m.name}</option>
-                        ))
-                      ) : (
-                        <>
-                          <option value="Transferencia">Transferencia</option>
-                          <option value="Efectivo">Efectivo</option>
-                          <option value="Tarjeta">Tarjeta</option>
-                          <option value="Zelle">Zelle</option>
-                          <option value="PayPal">PayPal</option>
-                          <option value="Descuento comision">Descuento comisión</option>
-                        </>
-                      )}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-xs font-bold text-gray-400 uppercase mb-2">Recibo</label>
-                    <input 
-                      type="text"
-                      value={editingPayment.receiptNumber || ''}
-                      onChange={(e) => setEditingPayment({ ...editingPayment, receiptNumber: e.target.value })}
-                      className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none font-bold"
-                      placeholder="Número de Recibo"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-xs font-bold text-gray-400 uppercase mb-2">Notas</label>
-                    <textarea 
-                      value={editingPayment.notes || ''}
-                      onChange={(e) => setEditingPayment({ ...editingPayment, notes: e.target.value })}
-                      className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none min-h-[100px]"
-                    />
+                      </span>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-bold text-gray-500 uppercase mb-2 tracking-wider">Fecha</label>
+                      <input 
+                        type="date"
+                        value={editingPayment.date as any}
+                        onChange={async (e) => {
+                          const newDate = e.target.value;
+                          setEditingPayment(prev => {
+                            if (!prev) return null;
+                            return { ...prev, date: newDate as any };
+                          });
+                          if (newDate) {
+                            try {
+                              const q = query(
+                                collection(db, 'exchangeRates'),
+                                where('date', '==', newDate),
+                                limit(1)
+                              );
+                              const snap = await getDocs(q);
+                              if (!snap.empty) {
+                                const data = snap.docs[0].data();
+                                if (data && data.rate) {
+                                  const rate = parseFloat(data.rate);
+                                  setEditingPayment(prev => {
+                                    if (!prev) return null;
+                                    if (prev.currency === 'USD') {
+                                      return {
+                                        ...prev,
+                                        exchangeRate: rate,
+                                        amountMXP: (prev.amount || 0) * rate
+                                      };
+                                    } else {
+                                      return {
+                                        ...prev,
+                                        exchangeRate: rate,
+                                        amount: (prev.amountMXP || 0) / rate
+                                      };
+                                    }
+                                  });
+                                }
+                              }
+                            } catch (err) {
+                              console.error("Error fetching exchange rate during edit:", err);
+                            }
+                          }
+                        }}
+                        className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 focus:bg-white outline-none text-sm transition-all"
+                        required
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-bold text-gray-500 uppercase mb-2 tracking-wider">Método de Pago</label>
+                      <select 
+                        value={editingPayment.paymentMethod}
+                        onChange={(e) => setEditingPayment({ ...editingPayment, paymentMethod: e.target.value })}
+                        className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 focus:bg-white outline-none text-sm transition-all font-medium"
+                      >
+                        <option value="">Seleccione un método...</option>
+                        {paymentMethods.length > 0 ? (
+                          paymentMethods.sort((a, b) => a.name.localeCompare(b.name)).map(m => (
+                            <option key={m.id} value={m.name}>{m.name}</option>
+                          ))
+                        ) : (
+                          <>
+                            <option value="Transferencia">Transferencia</option>
+                            <option value="Efectivo">Efectivo</option>
+                            <option value="Tarjeta">Tarjeta</option>
+                            <option value="Zelle">Zelle</option>
+                            <option value="PayPal">PayPal</option>
+                            <option value="Descuento comision">Descuento comisión</option>
+                          </>
+                        )}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-bold text-gray-500 uppercase mb-2 tracking-wider">Recibo</label>
+                      <input 
+                        type="text"
+                        value={editingPayment.receiptNumber || ''}
+                        onChange={(e) => setEditingPayment({ ...editingPayment, receiptNumber: e.target.value })}
+                        className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 focus:bg-white outline-none font-bold text-sm transition-all"
+                        placeholder="Número de Recibo"
+                      />
+                    </div>
+
+                    <div className="col-span-1 md:col-span-2">
+                      <label className="block text-xs font-bold text-gray-500 uppercase mb-2 tracking-wider">Notas</label>
+                      <textarea 
+                        value={editingPayment.notes || ''}
+                        onChange={(e) => setEditingPayment({ ...editingPayment, notes: e.target.value })}
+                        className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 focus:bg-white outline-none min-h-[80px] text-sm transition-all"
+                        placeholder="Notas opcionales del pago..."
+                      />
+                    </div>
                   </div>
                 </div>
 
-                <div className="flex gap-3 pt-4">
+                <div className="flex gap-3 px-6 py-4 bg-gray-50 border-t border-gray-150 flex-shrink-0 justify-end">
                   <button
                     type="button"
                     onClick={() => setEditingPayment(null)}
-                    className="flex-1 px-6 py-3 border border-gray-200 text-gray-600 font-bold rounded-xl hover:bg-gray-50 transition-all"
+                    className="px-5 py-2.5 border border-gray-200 text-gray-600 font-bold text-xs rounded-xl hover:bg-gray-100 transition-all cursor-pointer"
                   >
                     Cancelar
                   </button>
                   <button
                     type="submit"
                     disabled={isSubmitting}
-                    className="flex-1 px-6 py-3 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-700 transition-all shadow-lg shadow-blue-200 disabled:opacity-50"
+                    className="px-5 py-2.5 bg-blue-600 text-white font-black text-xs rounded-xl hover:bg-blue-700 transition-all shadow-md shadow-blue-200 disabled:opacity-50 cursor-pointer"
                   >
                     {isSubmitting ? 'Guardando...' : 'Guardar Cambios'}
                   </button>

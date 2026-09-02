@@ -138,6 +138,7 @@ export interface InsuranceRequest {
   adjustment?: number;
   agentCommission?: number;
   comision?: number;
+  iva?: number;
   totalFinal?: number;
   totalPaid?: number;
   paymentMethod?: string;
@@ -158,6 +159,7 @@ export interface InsuranceRequest {
   closed?: boolean;
   notes?: string;
   imported?: boolean;
+  isCorrected?: boolean;
   externalId?: string;
   requestDate?: string;
   Caremed?: string;
@@ -165,6 +167,7 @@ export interface InsuranceRequest {
   stripePaymentLink?: string;
   phone?: string;
   policyNumber?: string;
+  exchangeRate?: number;
   createdAt: any;
 }
 
@@ -254,6 +257,8 @@ export interface StatementRecord {
 export interface ExchangeRate {
   id?: string;
   rate: number;
+  cardFee?: number;
+  cargoTarjeta?: number;
   date: string; // ISO date string YYYY-MM-DD
   createdAt: any;
 }
@@ -319,10 +324,15 @@ export interface Claim {
   id?: string;
   date: any;
   insuranceId: string;
+  reference?: string;
+  claimAmount?: number;
   description: string;
   documents: ClaimDocument[];
   sentToInsurerDate?: any;
-  insurerResponse?: string;
+  insurerResponse?: 'Pendiente' | 'Rechazado' | 'Aprobado' | string;
+  resolutionDate?: string;
+  resolutionDescription?: string;
+  reimbursedAmount?: number;
   isClosed: boolean;
   closedAt?: any;
   createdAt: any;
@@ -337,6 +347,8 @@ export interface Claim {
   isCompleteDate?: string;
   sentToInsurer?: boolean;
   sentToInsurerDateChecked?: string;
+  isExpedienteCompletoConfirmed?: boolean;
+  expedienteCompletoConfirmedAt?: string;
 }
 
 export interface ClaimActivity {

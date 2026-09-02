@@ -4,6 +4,10 @@ import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { db, storage, handleFirestoreError, OperationType, auth } from '../firebase';
 import { InsuranceRequest, UserProfile, Client, CustomRole } from '../types';
 import { useSearchParams } from 'react-router-dom';
+import jsPDF from 'jspdf';
+import autoTable from 'jspdf-autotable';
+import { format } from 'date-fns';
+import { useCompany } from '../App';
 import { 
   DollarSign, 
   CheckCircle, 
@@ -24,7 +28,8 @@ import {
   Briefcase,
   Percent,
   CheckSquare,
-  Square
+  Square,
+  Printer
 } from 'lucide-react';
 import TransactionModal from './TransactionModal';
 import InsuranceDetailModal from './InsuranceDetailModal';
@@ -32,6 +37,7 @@ import { usePermissions } from '../hooks/usePermissions';
 
 export default function CommissionsManager({ profile, rolePermissions }: { profile: UserProfile | null, rolePermissions: CustomRole | null }) {
   const { hasPermission } = usePermissions(profile, rolePermissions);
+  const { settings: companySettings } = useCompany();
   const [searchParams] = useSearchParams();
   const [commissions, setCommissions] = useState<InsuranceRequest[]>([]);
   const [clients, setClients] = useState<Record<string, Client>>({});
@@ -179,13 +185,198 @@ export default function CommissionsManager({ profile, rolePermissions }: { profi
 
   const handleSelectAllCommissions = (isChecked: boolean) => {
     if (isChecked) {
-      const confirmableIds = filteredCommissions
-        .filter(c => c.commissionStatus === 'confirmed' && c.id)
+      const allIds = filteredCommissions
+        .filter(c => c.id)
         .map(c => c.id as string);
-      setSelectedCommissionIds(confirmableIds);
+      setSelectedCommissionIds(allIds);
     } else {
       setSelectedCommissionIds([]);
     }
+  };
+
+  const handleGenerateReport = () => {
+    if (selectedCommissionIds.length === 0) return;
+
+    const selectedCommissions = commissions.filter(c => c.id && selectedCommissionIds.includes(c.id));
+    if (selectedCommissions.length === 0) return;
+
+    // Get Agent Name(s)
+    const agentNamesSet = new Set(selectedCommissions.map(c => getAgentName(c)).filter(Boolean));
+    const agentNamesList = Array.from(agentNamesSet);
+    const agentTitle = agentNamesList.length === 1 
+      ? agentNamesList[0] 
+      : agentNamesList.length > 1 
+      ? agentNamesList.join(', ') 
+      : 'General';
+
+    // Horizontal / Landscape A4
+    const doc = new jsPDF('l', 'mm', 'a4');
+    const pageWidth = doc.internal.pageSize.getWidth();
+
+    // Draw header background bar
+    doc.setFillColor(26, 33, 56); // #1A2138
+    doc.rect(0, 0, pageWidth, 26, 'F');
+
+    // Header Title
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(16);
+    doc.setTextColor(255, 255, 255);
+    doc.text('REPORTE DE COMISIONES', 14, 17);
+
+    // Add company logo if available
+    if (companySettings?.logoUrl) {
+      try {
+        doc.addImage(companySettings.logoUrl, 'PNG', pageWidth - 45, 3, 32, 20);
+      } catch (e) {
+        console.error('Error adding logo to PDF:', e);
+      }
+    }
+
+    // Subtitle / Agent info
+    doc.setTextColor(26, 33, 56);
+    doc.setFontSize(11);
+    doc.setFont('helvetica', 'bold');
+    doc.text(`Agente: ${agentTitle}`, 14, 34);
+
+    doc.setFontSize(8.5);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(100, 100, 100);
+    const todayStr = format(new Date(), 'dd/MM/yyyy HH:mm');
+    doc.text(`Fecha de emisión: ${todayStr}  |  Comisiones seleccionadas: ${selectedCommissions.length}`, 14, 39);
+
+    const formatDateStr = (dStr?: string) => {
+      if (!dStr) return '';
+      const parts = dStr.split('-');
+      if (parts.length === 3) return `${parts[2]}/${parts[1]}/${parts[0]}`;
+      return dStr;
+    };
+
+    // Calculate totals and format rows
+    let sumDias = 0;
+    let sumPrecioUSD = 0;
+    let sumComisionUSD = 0;
+    let sumPrecioMXP = 0;
+    let sumComisionMXP = 0;
+
+    const fmtUSD = (val: number) => `$${val.toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+    const fmtMXP = (val: number) => `$${val.toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+    const tableRows = selectedCommissions.map(c => {
+      const reqDateStr = getRequestDateStr(c);
+      const fechaSolicitud = formatDateStr(reqDateStr);
+      const tipoAccion = c.actionType || 'Emisión';
+      const asegurado = `${c.firstName || ''} ${c.lastName || ''}`.trim() || 'Sin Nombre';
+      const codigoOrigen = c.originCountry || '';
+      const codigoDestino = c.destinationCountry || '';
+      const fechaSalida = formatDateStr(c.startDate);
+      const fechaRegreso = formatDateStr(c.endDate);
+      const dias = c.days || 0;
+
+      const precioUSD = Number(c.totalPaid || c.totalPrice || 0);
+      const comisionUSD = Number(c.agentCommission || c.comision || 0);
+      const tc = Number(c.exchangeRate || 17.55);
+
+      const precioMXP = precioUSD * tc;
+      const comisionMXP = comisionUSD * tc;
+
+      sumDias += dias;
+      sumPrecioUSD += precioUSD;
+      sumComisionUSD += comisionUSD;
+      sumPrecioMXP += precioMXP;
+      sumComisionMXP += comisionMXP;
+
+      return [
+        fechaSolicitud,
+        tipoAccion,
+        asegurado,
+        codigoOrigen,
+        codigoDestino,
+        fechaSalida,
+        fechaRegreso,
+        dias.toString(),
+        fmtUSD(precioUSD),
+        fmtUSD(comisionUSD),
+        tc.toFixed(2),
+        fmtMXP(precioMXP),
+        fmtMXP(comisionMXP)
+      ];
+    });
+
+    // Append Summary / Total row
+    tableRows.push([
+      'TOTALES',
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      sumDias.toString(),
+      fmtUSD(sumPrecioUSD),
+      fmtUSD(sumComisionUSD),
+      '',
+      fmtMXP(sumPrecioMXP),
+      fmtMXP(sumComisionMXP)
+    ]);
+
+    autoTable(doc, {
+      startY: 44,
+      head: [[
+        'Fecha Solicitud',
+        'Tipo Acción',
+        'Asegurado',
+        'Código Origen',
+        'Código Destino',
+        'Fecha Salida',
+        'Fecha Regreso',
+        'Días',
+        'Precio',
+        'Comisión',
+        'TC',
+        'Precio MXP',
+        'Comisión MXP'
+      ]],
+      body: tableRows,
+      theme: 'grid',
+      headStyles: {
+        fillColor: [26, 33, 56],
+        textColor: [255, 255, 255],
+        fontSize: 8,
+        fontStyle: 'bold',
+        halign: 'center'
+      },
+      styles: {
+        fontSize: 7.5,
+        cellPadding: 2,
+        textColor: [50, 50, 50]
+      },
+      columnStyles: {
+        0: { halign: 'center' }, // Fecha Solicitud
+        1: { halign: 'center' }, // Tipo Accion
+        2: { halign: 'left' },   // Asegurado
+        3: { halign: 'center' }, // Codigo Origen
+        4: { halign: 'center' }, // Codigo Destino
+        5: { halign: 'center' }, // Fecha Salida
+        6: { halign: 'center' }, // Fecha Regreso
+        7: { halign: 'center' }, // Dias
+        8: { halign: 'right' },  // Precio
+        9: { halign: 'right' },  // Comision
+        10: { halign: 'center' }, // TC
+        11: { halign: 'right' }, // Precio MXP
+        12: { halign: 'right' }  // Comision MXP
+      },
+      didParseCell: (data) => {
+        // Highlight total row
+        if (data.row.index === tableRows.length - 1) {
+          data.cell.styles.fontStyle = 'bold';
+          data.cell.styles.fillColor = [243, 244, 246];
+          data.cell.styles.textColor = [26, 33, 56];
+        }
+      }
+    });
+
+    const sanitizedAgent = agentTitle.replace(/[^a-zA-Z0-9_-]/g, '_');
+    doc.save(`Reporte_Comisiones_${sanitizedAgent}_${format(new Date(), 'yyyyMMdd')}.pdf`);
   };
 
   const handleBulkFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -279,18 +470,42 @@ export default function CommissionsManager({ profile, rolePermissions }: { profi
     new Set(commissions.map((c) => getAgentName(c)).filter(Boolean))
   ).sort();
 
+  const getRequestDateStr = (c: InsuranceRequest): string => {
+    if (c.requestDate) return c.requestDate;
+    if (c.createdAt?.toDate) {
+      return c.createdAt.toDate().toISOString().split('T')[0];
+    }
+    if (c.createdAt) {
+      const d = new Date(c.createdAt);
+      if (!isNaN(d.getTime())) {
+        return d.toISOString().split('T')[0];
+      }
+    }
+    return '';
+  };
+
   const filteredCommissions = commissions.filter(c => {
+    if (profile?.role === 'agent') {
+      const isOwnerByUid = c.agentId === profile.uid;
+      const isOwnerByEmail = c.linkedAgentId?.toLowerCase() === profile.email?.toLowerCase();
+      const isOwnerByEmailInAgentId = c.agentId?.toLowerCase() === profile.email?.toLowerCase();
+      const isOwnerByUserId = c.userId === profile.uid;
+      if (!isOwnerByUid && !isOwnerByEmail && !isOwnerByEmailInAgentId && !isOwnerByUserId) return false;
+    }
+
     const matchesFilter = filter === 'all' || c.commissionStatus === filter;
     const agentName = getAgentName(c);
-    const matchesSearch = `${c.firstName || ''} ${c.lastName || ''}`.toLowerCase().includes(searchTerm.toLowerCase()) || 
-                          (c.email || '').toLowerCase().includes(searchTerm.toLowerCase()) ||
-                          agentName.toLowerCase().includes(searchTerm.toLowerCase());
+    const fullName = `${c.firstName || ''} ${c.lastName || ''}`.trim();
+    const searchTarget = `${fullName} ${c.firstName || ''} ${c.lastName || ''} ${c.email || ''} ${agentName}`.toLowerCase();
+    const searchTokens = searchTerm.toLowerCase().trim().split(/\s+/);
+    const matchesSearch = !searchTerm.trim() || searchTokens.every(token => searchTarget.includes(token));
     
     const matchesAgent = filterAgent === 'all' || agentName === filterAgent;
     const matchesPaymentMethod = filterPaymentMethod === 'all' || c.commissionPaymentMethod === filterPaymentMethod;
     
-    const matchesStartDate = !filterStartDate || (c.commissionPaymentDate && c.commissionPaymentDate >= filterStartDate);
-    const matchesEndDate = !filterEndDate || (c.commissionPaymentDate && c.commissionPaymentDate <= filterEndDate);
+    const reqDate = getRequestDateStr(c);
+    const matchesStartDate = !filterStartDate || (reqDate && reqDate >= filterStartDate);
+    const matchesEndDate = !filterEndDate || (reqDate && reqDate <= filterEndDate);
     const matchesDate = matchesStartDate && matchesEndDate;
 
     return matchesFilter && matchesSearch && matchesAgent && matchesPaymentMethod && matchesDate;
@@ -423,7 +638,7 @@ export default function CommissionsManager({ profile, rolePermissions }: { profi
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
             <div className="space-y-1">
-              <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">Fecha Pago (Desde)</label>
+              <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">Fecha Solicitud (Desde)</label>
               <div className="relative">
                 <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
                 <input 
@@ -436,7 +651,7 @@ export default function CommissionsManager({ profile, rolePermissions }: { profi
             </div>
 
             <div className="space-y-1">
-              <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">Fecha Pago (Hasta)</label>
+              <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest ml-1">Fecha Solicitud (Hasta)</label>
               <div className="relative">
                 <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
                 <input 
@@ -502,17 +717,17 @@ export default function CommissionsManager({ profile, rolePermissions }: { profi
 
       {/* Bulk operation controls */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-        {filteredCommissions.filter(c => c.commissionStatus === 'confirmed').length > 0 && (
+        {filteredCommissions.length > 0 && (
           <div className="flex items-center gap-3">
             <button
               type="button"
               onClick={() => {
-                const someSelected = selectedCommissionIds.length > 0;
-                handleSelectAllCommissions(!someSelected);
+                const isAllSelected = selectedCommissionIds.length === filteredCommissions.length;
+                handleSelectAllCommissions(!isAllSelected);
               }}
               className="text-xs font-bold text-indigo-600 hover:text-indigo-800 transition-colors flex items-center gap-2 px-3 py-1.5 bg-indigo-50 hover:bg-indigo-100 rounded-xl cursor-pointer"
             >
-              {selectedCommissionIds.length > 0 ? (
+              {selectedCommissionIds.length === filteredCommissions.length && filteredCommissions.length > 0 ? (
                 <>
                   <CheckSquare className="w-4 h-4" />
                   Deseleccionar Todas ({selectedCommissionIds.length})
@@ -520,7 +735,7 @@ export default function CommissionsManager({ profile, rolePermissions }: { profi
               ) : (
                 <>
                   <Square className="w-4 h-4" />
-                  Seleccionar Todas ({filteredCommissions.filter(c => c.commissionStatus === 'confirmed').length})
+                  Seleccionar Todas ({filteredCommissions.length})
                 </>
               )}
             </button>
@@ -538,25 +753,35 @@ export default function CommissionsManager({ profile, rolePermissions }: { profi
               <CheckSquare className="w-6 h-6" />
             </div>
             <div>
-              <p className="text-sm font-black text-white uppercase tracking-wider">Pago Masivo de Comisiones</p>
-              <p className="text-xs text-gray-400">Hay <span className="font-bold text-indigo-400 text-sm">{selectedCommissionIds.length}</span> comisiones seleccionadas por pagar en lote.</p>
+              <p className="text-sm font-black text-white uppercase tracking-wider">Comisiones Seleccionadas</p>
+              <p className="text-xs text-gray-400">Hay <span className="font-bold text-indigo-400 text-sm">{selectedCommissionIds.length}</span> comisión(es) seleccionada(s).</p>
             </div>
           </div>
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-3">
+            <button
+              type="button"
+              onClick={handleGenerateReport}
+              className="px-5 py-3 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black rounded-xl transition-all shadow-lg shadow-emerald-600/20 uppercase tracking-widest flex items-center gap-2 cursor-pointer"
+            >
+              <FileText className="w-4 h-4" />
+              Generar Reporte
+            </button>
+            {selectedCommissionIds.some(id => commissions.find(c => c.id === id)?.commissionStatus === 'confirmed') && (
+              <button
+                type="button"
+                onClick={() => setShowBulkPaymentModal(true)}
+                className="px-5 py-3 bg-indigo-500 hover:bg-indigo-600 text-white text-xs font-black rounded-xl transition-all shadow-lg shadow-indigo-500/20 uppercase tracking-widest flex items-center gap-2 cursor-pointer"
+              >
+                Pagar Seleccionadas
+                <ArrowUpRight className="w-4.5 h-4.5" />
+              </button>
+            )}
             <button
               type="button"
               onClick={() => setSelectedCommissionIds([])}
               className="px-4 py-2 text-xs font-bold text-gray-400 hover:text-white transition-all cursor-pointer"
             >
               Cancelar
-            </button>
-            <button
-              type="button"
-              onClick={() => setShowBulkPaymentModal(true)}
-              className="px-5 py-3 bg-indigo-500 hover:bg-indigo-600 text-white text-xs font-black rounded-xl transition-all shadow-lg shadow-indigo-500/20 uppercase tracking-widest flex items-center gap-2 cursor-pointer"
-            >
-              Pagar Seleccionadas
-              <ArrowUpRight className="w-4.5 h-4.5" />
             </button>
           </div>
         </div>
@@ -582,11 +807,12 @@ export default function CommissionsManager({ profile, rolePermissions }: { profi
               <div className="flex-1 grid grid-cols-1 md:grid-cols-3 gap-6">
                 {/* Agent & Client */}
                 <div className="flex items-start gap-3">
-                  {c.commissionStatus === 'confirmed' && c.id && (
+                  {c.id && (
                     <button
                       type="button"
                       onClick={() => handleToggleSelectCommission(c.id!)}
                       className="mt-2.5 mr-1 text-gray-400 hover:text-indigo-600 transition-colors focus:outline-none cursor-pointer shrink-0"
+                      title={selectedCommissionIds.includes(c.id) ? "Deseleccionar" : "Seleccionar"}
                     >
                       {selectedCommissionIds.includes(c.id) ? (
                         <CheckSquare className="w-5.5 h-5.5 text-indigo-600 fill-indigo-50" />
@@ -594,9 +820,6 @@ export default function CommissionsManager({ profile, rolePermissions }: { profi
                         <Square className="w-5.5 h-5.5 text-gray-300 hover:border-indigo-400" />
                       )}
                     </button>
-                  )}
-                  {c.commissionStatus !== 'confirmed' && (
-                    <div className="w-5.5 mr-1 shrink-0" />
                   )}
                   
                   <div className="p-3 bg-purple-50 rounded-xl shrink-0">
@@ -944,7 +1167,7 @@ export default function CommissionsManager({ profile, rolePermissions }: { profi
               >
                 {selectedCommission.commissionStatus === 'paid' ? 'Cerrar' : 'Cancelar'}
               </button>
-              {selectedCommission.commissionStatus !== 'paid' && (
+              {selectedCommission.commissionStatus !== 'paid' && profile?.role !== 'agent' && (
                 <button 
                   onClick={handleMarkAsPaid}
                   disabled={saving || uploadingReceipt}

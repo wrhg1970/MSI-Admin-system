@@ -1,0 +1,62 @@
+# MiSeguroInternacional (MSI) Admin — Cursor AI Rules & Project Skill
+# Coloca este archivo como `.cursorrules` en la raíz de tu proyecto en Cursor
+
+## 1. Identidad y Contexto del Proyecto
+Este proyecto es **MiSeguroInternacional Admin**, un ERP/CRM corporativo especializado en emisión, cobranza, comisiones y conciliación bancaria inteligente de seguros internacionales y asistencias de viaje (B2B, B2B2C, B2C).
+
+### Stack Tecnológico:
+- **Frontend**: React 18+, TypeScript, Tailwind CSS, Lucide React, Recharts.
+- **Backend / API**: Node.js + Express (`server.ts`) servido vía Vite en desarrollo y empaquetado con `esbuild` en producción (`dist/server.cjs`).
+- **Base de Datos & Auth**: Firebase Firestore y Firebase Authentication.
+- **IA / Visión / OCR**: `@google/genai` TypeScript SDK con Gemini Vision (Modelos: `gemini-3.1-flash-lite`, `gemini-flash-latest`, `gemini-3.7-flash`).
+
+---
+
+## 2. Reglas Críticas de Desarrollo y Arquitectura
+
+### A. Dualidad de Monedas (USD / MXP)
+- **NUNCA** asumas una sola divisa. Todas las transacciones, pólizas, facturas y pagos deben manejar explícitamente `currency: 'USD' | 'MXP'`.
+- En cálculos y comparaciones de conciliación, compara siempre importes contra la moneda de origen (`amount` para USD y `amountMXP` para pesos).
+- Al guardar fechas en Firestore relacionadas con pagos o pólizas, normaliza la hora a medio día local (`12:00:00`) o usa `Timestamp.fromDate(...)` para evitar desfases de un día por conversiones UTC.
+
+### B. Firebase Firestore & Consultas
+- Usa las funciones modulares del SDK v9+: `collection`, `doc`, `getDocs`, `addDoc`, `updateDoc`, `deleteDoc`, `query`, `where`, `orderBy`, `Timestamp`, `writeBatch`.
+- Colecciones principales:
+  - `insurances`: Pólizas y cotizaciones con desglose de precios (`totalPrice`, `totalCost`, `comision`, `discount`, `adjustment`, `totalFinal`, `totalPaid`, `balance`).
+  - `clients`: Expedientes de clientes y pasajeros.
+  - `providers`: Aseguradoras y proveedores de asistencia.
+  - `payments`: Registro granular de abonos (`client_payment`, `provider_payment`, `commission_payment`).
+  - `statementUploads`: Archivos de estados de cuenta subidos y metadatos de conciliación.
+  - `claims`: Siniestros y reclamaciones médicas.
+  - `users`: Perfiles de usuario y roles RBAC.
+
+### C. Patrones de Servidor y Rutas API (`server.ts`)
+- **Seguridad de API Keys**: Las llamadas al SDK de Gemini, Stripe, y credenciales de terceros se ejecutan **exclusivamente en el backend** (`/api/*`). NUNCA expongas claves en el cliente (`VITE_`).
+- **Resiliencia de IA (Fallback Automático)**:
+  - Cuando implementes o modifiques endpoints que usen Gemini, utiliza la función `generateWithFallback` con failover en cascada:
+    1. `gemini-3.1-flash-lite` (Prioridad principal, alta velocidad y cuota).
+    2. `gemini-flash-latest` (Respaldo inmediato).
+    3. `gemini-3.7-flash` (Respaldo avanzado).
+  - Maneja errores 503 (alta demanda) y 429 (cuota) con conmutación inmediata de modelo.
+
+### D. Componentes e Interfaz (UI/UX)
+- Usa **Tailwind CSS** para todos los estilos.
+- Todos los iconos deben provenir de `lucide-react`.
+- Formato de dinero en vistas: Usa `.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })` acompañado del sufijo de divisa (ej. `$1,250.00 USD` o `$24,500.00 MXP`).
+- Los botones y modales deben incluir confirmaciones claras y estados de carga (`processing`, `disabled`, `animate-spin`).
+
+---
+
+## 3. Guía de Archivos Clave para Consultar
+- `src/types.ts`: Tipos globales, interfaces (`Insurance`, `Client`, `Payment`, `StatementRecord`, `StatementUpload`, `UserProfile`).
+- `src/components/StatementOCRManager.tsx`: Motor de conciliación bancaria y OCR de estados de cuenta.
+- `src/components/AdminPanel.tsx` & `src/components/PoliciesManager.tsx`: Lógica central de pólizas y cobros.
+- `src/components/InsuranceDetailModal.tsx`: Edición de pólizas, descuentos, abonos y comisiones.
+- `server.ts`: Endpoints Express para OCR de estados de cuenta (`/api/parse-bank-statement`), facturas (`/api/parse-caremed-invoice`) y webhooks.
+
+---
+
+## 4. Flujo de Trabajo con Cursor
+- Antes de proponer una modificación de código, inspecciona los tipos en `src/types.ts`.
+- Mantén la coherencia de datos financieros (siempre recalcula `balance = totalFinal - totalPaid`).
+- Escribe código TypeScript estricto, sin `any` innecesarios y sin dejar stubs o funciones vacías.

@@ -1,10 +1,15 @@
 import React, { useState, useEffect } from 'react';
-import { Mail, XCircle, Send, Loader2, Paperclip, CheckCircle2 } from 'lucide-react';
+import { Mail, XCircle, Send, Loader2, Paperclip, CheckCircle2, Files, FileStack } from 'lucide-react';
 import { InsuranceRequest, Policy, PolicyLetter } from '../types';
-import { generatePDF } from '../lib/pdfGenerator';
+import { generatePDF, generateMergedLettersPDF } from '../lib/pdfGenerator';
 import { format, parseISO, isValid } from 'date-fns';
+import { getPolicyNumber, getAvailableLettersForInsurance, findPolicyPrioritized, formatDisplayDate } from '../lib/policyUtils';
+import { COUNTRIES } from '../constants';
+import { collection, getDocs, addDoc } from 'firebase/firestore';
+import { db, auth } from '../firebase';
+import { logInsuranceActivity } from '../utils/activityLogger';
 
-const LANGUAGE_ORDER = ['es', 'en', 'policy', 'covid', 'fr', 'it', 'de'];
+const LANGUAGE_ORDER = ['es', 'en', 'es_spain', 'embajada_spain', 'policy', 'covid', 'fr', 'it', 'de'];
 
 const sortLettersByLanguage = <T extends { language: string }>(letters: T[]): T[] => {
   return [...letters].sort((a, b) => {
@@ -39,6 +44,24 @@ export default function EmailModal({ isOpen, onClose, insurance, policies, polic
   const [sent, setSent] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [selectedLetters, setSelectedLetters] = useState<PolicyLetter[]>([]);
+  const [pdfMergeMode, setPdfMergeMode] = useState<'separate' | 'merged'>('separate');
+  const [countriesList, setCountriesList] = useState<any[]>([]);
+
+  useEffect(() => {
+    getDocs(collection(db, 'countries')).then(snap => {
+      setCountriesList(snap.docs.map(d => d.data()));
+    }).catch(err => {
+      console.error("Error fetching countries in EmailModal:", err);
+    });
+  }, []);
+
+  const getCountryName = (code: string) => {
+    if (!code) return '';
+    const found = countriesList.find((c: any) => c.code === code) || COUNTRIES.find(c => c.code === code);
+    return found ? found.name : code;
+  };
+
+  const policy = insurance ? findPolicyPrioritized(insurance.policyId, policies) : undefined;
 
   useEffect(() => {
     const emails = ccInput
@@ -57,20 +80,14 @@ export default function EmailModal({ isOpen, onClose, insurance, policies, polic
       const fullName = `${insurance.firstName} ${insurance.lastName}`;
       setSubject(`Póliza de Seguro - ${fullName}`);
       
-      const policy = policies.find(p => p.id === insurance.policyId || (p.CodigoPoliza && p.CodigoPoliza === insurance.policyId) || p.name === insurance.policyId);
-      const policyCode = policy?.CodigoPoliza || policy?.id || insurance.policyId || '';
+      const policyCode = insurance.policyNumber || getPolicyNumber(policy, insurance.age) || policy?.id || insurance.policyId || '';
       const policyName = policy?.name || policy?.NombrePoliza || insurance.policyName || '';
       const policyInfo = policyCode && policyName ? `${policyCode} - ${policyName}` : (policyCode || policyName || '');
 
       const formatToShow = (dateVal: any) => {
         if (!dateVal) return '';
-        try {
-          const parsed = parseISO(dateVal);
-          if (isValid(parsed)) return format(parsed, 'dd/MM/yyyy');
-          const d = new Date(dateVal);
-          if (isValid(d)) return format(d, 'dd/MM/yyyy');
-        } catch (e) {}
-        return String(dateVal);
+        const formatted = formatDisplayDate(dateVal);
+        return formatted === '-' ? '' : formatted;
       };
 
       const defaultTemplate = `Hola {nombre}
@@ -119,10 +136,10 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
         .replace(/{poliza_info}/g, policyInfo)
         .replace(/{poliza}/g, policyInfo)
         .replace(/{Poliza}/g, policyInfo)
-        .replace(/{Pais Origen}/g, insurance.originCountry || 'México')
-        .replace(/{origen}/g, insurance.originCountry || 'México')
-        .replace(/{Pais Destino}/g, insurance.destinationCountry || '')
-        .replace(/{destino}/g, insurance.destinationCountry || '')
+        .replace(/{Pais Origen}/g, getCountryName(insurance.originCountry) || 'México')
+        .replace(/{origen}/g, getCountryName(insurance.originCountry) || 'México')
+        .replace(/{Pais Destino}/g, getCountryName(insurance.destinationCountry) || '')
+        .replace(/{destino}/g, getCountryName(insurance.destinationCountry) || '')
         .replace(/{Fecha_inicio}/g, formatToShow(insurance.startDate))
         .replace(/{fecha_inicio}/g, formatToShow(insurance.startDate))
         .replace(/{Fecha_Final}/g, formatToShow(insurance.endDate))
@@ -130,15 +147,18 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
 
       setBody(parsedBody);
       
-      // Auto-select relevant letters
+      // Auto-select relevant letters (select Español, Inglés, and Policy by default)
       const relevant = sortLettersByLanguage(
-        policyLetters.filter(l => l.policyId === (policy?.id || insurance.policyId))
+        getAvailableLettersForInsurance(insurance, policyLetters, policies)
       );
-      if (relevant.length > 0) {
-        setSelectedLetters([relevant[0]]); // Select first one by default
+      const defaultSelected = relevant.filter(l => ['es', 'en', 'es_spain', 'embajada_spain', 'policy'].includes(l.language));
+      if (defaultSelected.length > 0) {
+        setSelectedLetters(defaultSelected);
+      } else if (relevant.length > 0) {
+        setSelectedLetters([relevant[0]]); // Fallback to first one
       }
     }
-  }, [insurance, isOpen, policies, policyLetters]);
+  }, [insurance, isOpen, policies, policyLetters, countriesList]);
 
   const handleSend = async () => {
     if (!insurance) return;
@@ -156,7 +176,16 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
           filename: `Certificado_Seguro_${insurance.lastName}.pdf`,
           data: base64
         });
+      } else if (pdfMergeMode === 'merged' && selectedLetters.length > 1) {
+        // Consolidated single PDF with all selected letters
+        const doc: any = await generateMergedLettersPDF(insurance, selectedLetters, policies, companySettings?.logoUrl, true);
+        const base64 = doc.output('datauristring').split(',')[1];
+        pdfs.push({
+          filename: `Certificado_Integrado_${insurance.firstName}_${insurance.lastName}.pdf`,
+          data: base64
+        });
       } else {
+        // Separate individual PDFs
         for (const letter of selectedLetters) {
           const doc: any = await generatePDF(insurance, letter, policies, companySettings?.logoUrl, true);
           const base64 = doc.output('datauristring').split(',')[1];
@@ -201,6 +230,28 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
 
       if (!response.ok) {
         throw new Error(errMessage);
+      }
+
+      // Log email dispatch to policy's activity log (bitácora)
+      try {
+        const now = new Date();
+        const userEmail = auth.currentUser?.email || 'Sistema';
+        const isMerged = pdfMergeMode === 'merged' && selectedLetters.length > 1;
+        const attachDesc = isMerged
+          ? `(${selectedLetters.length} cartas integradas en 1 solo PDF)`
+          : selectedLetters.length > 1
+            ? `(${selectedLetters.length} cartas en PDFs separados)`
+            : '';
+
+        await logInsuranceActivity({
+          insuranceId: insurance.id,
+          type: 'automatic',
+          description: `Póliza de seguro enviada por correo electrónico a: ${to} ${attachDesc}. Enviado el día ${format(now, 'dd/MM/yyyy')} a las ${format(now, 'HH:mm:ss')} por el usuario ${userEmail}.`,
+          date: now,
+          createdBy: userEmail
+        });
+      } catch (logErr) {
+        console.error("Error logging email sending to bitacora:", logErr);
       }
 
       setSent(true);
@@ -291,13 +342,13 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
                   <div>
                     <label className="block text-[10px] font-black text-gray-400 uppercase tracking-wider mb-1">Adjuntos (Seleccionar Cartas)</label>
                     <div className="space-y-2 max-h-[350px] overflow-y-auto pr-2">
-                      {policyLetters.filter(l => l.policyId === (policies.find(p => p.id === insurance.policyId)?.id || insurance.policyId)).length === 0 ? (
+                      {getAvailableLettersForInsurance(insurance, policyLetters, policies).length === 0 ? (
                         <div className="p-4 bg-gray-50 rounded-xl border border-dashed border-gray-200 text-center">
                           <p className="text-[10px] text-gray-400 italic">No hay cartas específicas. Se adjuntará el formato por defecto.</p>
                         </div>
                       ) : (
                         sortLettersByLanguage(
-                          policyLetters.filter(l => l.policyId === (policies.find(p => p.id === insurance.policyId)?.id || insurance.policyId))
+                          getAvailableLettersForInsurance(insurance, policyLetters, policies)
                         ).map(letter => (
                             <label key={letter.id} className="flex items-center gap-3 p-3 rounded-xl border border-gray-100 hover:bg-gray-50 cursor-pointer transition-all">
                               <input
@@ -323,6 +374,7 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
                                    letter.language === 'it' ? 'Italiano' : 
                                    letter.language === 'de' ? 'Alemán' : 
                                    letter.language === 'es_spain' ? 'España' : 
+                                   letter.language === 'embajada_spain' ? 'Embajada España' : 
                                    letter.language.toUpperCase()}
                                 </p>
                               </div>
@@ -332,6 +384,57 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
                       )}
                     </div>
                   </div>
+
+                  {selectedLetters.length > 1 && (
+                    <div className="pt-3 border-t border-gray-100 animate-in fade-in duration-200">
+                      <label className="block text-[10px] font-black text-gray-500 uppercase tracking-wider mb-2">
+                        Formato de Envío de Adjuntos
+                      </label>
+                      <div className="grid grid-cols-2 gap-2">
+                        <button
+                          type="button"
+                          onClick={() => setPdfMergeMode('separate')}
+                          className={`p-3 rounded-xl border text-left transition-all flex flex-col gap-1 cursor-pointer ${
+                            pdfMergeMode === 'separate'
+                              ? 'bg-blue-50/80 border-blue-500 ring-2 ring-blue-500/20 text-blue-900 shadow-sm'
+                              : 'bg-gray-50/70 border-gray-200 text-gray-600 hover:bg-gray-100/70'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-bold flex items-center gap-1.5">
+                              <Files className="w-3.5 h-3.5 text-blue-600" />
+                              Por Separado
+                            </span>
+                            {pdfMergeMode === 'separate' && <CheckCircle2 className="w-3.5 h-3.5 text-blue-600" />}
+                          </div>
+                          <p className="text-[10px] text-gray-500 leading-tight">
+                            {selectedLetters.length} archivos PDF individuales
+                          </p>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => setPdfMergeMode('merged')}
+                          className={`p-3 rounded-xl border text-left transition-all flex flex-col gap-1 cursor-pointer ${
+                            pdfMergeMode === 'merged'
+                              ? 'bg-blue-50/80 border-blue-500 ring-2 ring-blue-500/20 text-blue-900 shadow-sm'
+                              : 'bg-gray-50/70 border-gray-200 text-gray-600 hover:bg-gray-100/70'
+                          }`}
+                        >
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-bold flex items-center gap-1.5">
+                              <FileStack className="w-3.5 h-3.5 text-blue-600" />
+                              Un Solo PDF
+                            </span>
+                            {pdfMergeMode === 'merged' && <CheckCircle2 className="w-3.5 h-3.5 text-blue-600" />}
+                          </div>
+                          <p className="text-[10px] text-gray-500 leading-tight">
+                            Integrar {selectedLetters.length} cartas en 1 solo PDF
+                          </p>
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
 

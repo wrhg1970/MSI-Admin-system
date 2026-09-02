@@ -7,31 +7,59 @@ import { UserProfile, CustomRole } from './types';
 import { INITIAL_POLICIES, COUNTRIES } from './constants';
 import firebaseConfig from '../firebase-applet-config.json';
 import Layout from './components/Layout';
+import AppSafeFallback from './components/AppSafeFallback';
 import { createContext, useContext } from 'react';
+import { FirestoreDataProvider } from './context/FirestoreDataContext';
 
 // Create a context for company settings
 export const CompanyContext = createContext<{ settings: any }>({ settings: null });
 export const useCompany = () => useContext(CompanyContext);
 
-// Lazy load components
-const Home = lazy(() => import('./components/Home'));
-const Dashboard = lazy(() => import('./components/Dashboard'));
-const InsuranceForm = lazy(() => import('./components/InsuranceForm'));
-const AdminPanel = lazy(() => import('./components/AdminPanel'));
-const PoliciesManager = lazy(() => import('./components/PoliciesManager'));
-const ClientsManager = lazy(() => import('./components/ClientsManager'));
-const CatalogsManager = lazy(() => import('./components/CatalogsManager'));
-const CommissionsManager = lazy(() => import('./components/CommissionsManager'));
-const InsurancePlansManager = lazy(() => import('./components/InsurancePlansManager'));
-const ClaimsManager = lazy(() => import('./components/ClaimsManager'));
-const ProvidersManager = lazy(() => import('./components/ProvidersManager'));
-const ReportsManager = lazy(() => import('./components/ReportsManager'));
-const ConfigPanel = lazy(() => import('./components/ConfigPanel'));
-const NotificationsManager = lazy(() => import('./components/NotificationsManager'));
-const HistoricoManager = lazy(() => import('./components/HistoricoManager'));
-const QuoteForm = lazy(() => import('./components/QuoteForm'));
-const Auth = lazy(() => import('./components/Auth'));
-const ErrorBoundary = lazy(() => import('./components/ErrorBoundary'));
+// Helper function to auto-retry lazy loading when a dynamic import fails (e.g. after build updates or dev server changes)
+function lazyWithRetry<T extends React.ComponentType<any>>(
+  componentImport: () => Promise<{ default: T }>
+) {
+  return lazy(async () => {
+    try {
+      const component = await componentImport();
+      window.sessionStorage.removeItem('retry-lazy-refreshed');
+      return component;
+    } catch (error: any) {
+      const isDynamicImportError =
+        error?.message?.includes('dynamically imported module') ||
+        error?.message?.includes('Importing a module script failed') ||
+        error?.message?.includes('Failed to fetch') ||
+        error?.name === 'ChunkLoadError';
+
+      const refreshed = window.sessionStorage.getItem('retry-lazy-refreshed');
+      if (isDynamicImportError && !refreshed) {
+        window.sessionStorage.setItem('retry-lazy-refreshed', 'true');
+        window.location.reload();
+        return new Promise<{ default: T }>(() => {});
+      }
+      throw error;
+    }
+  });
+}
+
+// Lazy load components with retry
+const Home = lazyWithRetry(() => import('./components/Home'));
+const Dashboard = lazyWithRetry(() => import('./components/Dashboard'));
+const InsuranceForm = lazyWithRetry(() => import('./components/InsuranceForm'));
+const AdminPanel = lazyWithRetry(() => import('./components/AdminPanel'));
+const PoliciesManager = lazyWithRetry(() => import('./components/PoliciesManager'));
+const ClientsManager = lazyWithRetry(() => import('./components/ClientsManager'));
+const CatalogsManager = lazyWithRetry(() => import('./components/CatalogsManager'));
+const CommissionsManager = lazyWithRetry(() => import('./components/CommissionsManager'));
+const InsurancePlansManager = lazyWithRetry(() => import('./components/InsurancePlansManager'));
+const ClaimsManager = lazyWithRetry(() => import('./components/ClaimsManager'));
+const ProvidersManager = lazyWithRetry(() => import('./components/ProvidersManager'));
+const ReportsManager = lazyWithRetry(() => import('./components/ReportsManager'));
+const ConfigPanel = lazyWithRetry(() => import('./components/ConfigPanel'));
+const NotificationsManager = lazyWithRetry(() => import('./components/NotificationsManager'));
+const HistoricoManager = lazyWithRetry(() => import('./components/HistoricoManager'));
+const QuoteForm = lazyWithRetry(() => import('./components/QuoteForm'));
+const Auth = lazyWithRetry(() => import('./components/Auth'));
 
 function LoadingScreen() {
   return (
@@ -270,7 +298,7 @@ export default function App() {
               userProfile.email = verifiedEmail;
               await updateDoc(docRef, { email: verifiedEmail });
             }
-          } else {
+                  } else {
             // Check if there's a pre-registered user by email
             const usersRef = collection(db, 'users');
             const q = query(usersRef, where('email', '==', verifiedEmail || ''));
@@ -290,6 +318,21 @@ export default function App() {
                   console.warn("Error deleting pre-registered doc:", e);
                 }
               }
+            } else if (!isSuperAdmin) {
+              // User is NOT pre-registered AND NOT a super admin! Block them!
+              console.warn(`Blocking login for unregistered user: ${verifiedEmail}`);
+              localStorage.setItem('auth_error', 'Acceso denegado. Su cuenta no está dada de alta en el sistema. Por favor, contacte a un administrador.');
+              localStorage.removeItem('verified_email');
+              
+              if (unsubCompany) { unsubCompany(); unsubCompany = null; }
+              if (unsubProfile) { unsubProfile(); unsubProfile = null; }
+              if (unsubRole) { unsubRole(); unsubRole = null; }
+              
+              await auth.signOut();
+              setUser(null);
+              setProfile(null);
+              setLoading(false);
+              return;
             }
 
             // Create profile for new users
@@ -393,7 +436,7 @@ export default function App() {
       if (profile?.role === 'seguros') return ['dashboard', 'request', 'clients', 'policies', 'catalogs', 'insurance-plans', 'providers', 'claims', 'historico'].includes(menuId);
       if (profile?.role === 'administracion') return ['dashboard', 'reports', 'commissions', 'providers', 'historico'].includes(menuId);
       if (profile?.role === 'agent') {
-        if (['dashboard', 'request', 'clients', 'policies', 'historico'].includes(menuId)) return action === 'view' || action === 'create' || action === 'edit';
+        if (['dashboard', 'request', 'clients', 'policies', 'commissions', 'historico'].includes(menuId)) return action === 'view' || action === 'create' || action === 'edit';
         return false;
       }
       if (profile?.role === 'client') {
@@ -407,34 +450,36 @@ export default function App() {
   };
 
   return (
-    <ErrorBoundary>
+    <AppSafeFallback>
       <CompanyContext.Provider value={{ settings: companySettings }}>
-        <Router>
-          <Layout profile={profile} rolePermissions={rolePermissions} companySettings={companySettings}>
-            <Suspense fallback={<LoadingScreen />}>
-              <Routes>
-                <Route path="/" element={<Home profile={profile} rolePermissions={rolePermissions} />} />
-                <Route path="/dashboard" element={hasPermission('dashboard') ? <Dashboard profile={profile} /> : <Navigate to="/" />} />
-                <Route path="/request" element={hasPermission('request') ? <InsuranceForm profile={profile} /> : <Navigate to="/" />} />
-                <Route path="/quote" element={hasPermission('request') ? <QuoteForm profile={profile} /> : <Navigate to="/" />} />
-                <Route path="/clients" element={hasPermission('clients') ? <ClientsManager profile={profile} rolePermissions={rolePermissions} /> : <Navigate to="/" />} />
-                <Route path="/providers" element={hasPermission('providers') ? <ProvidersManager profile={profile} rolePermissions={rolePermissions} /> : <Navigate to="/" />} />
-                <Route path="/policies" element={hasPermission('policies') ? <PoliciesManager profile={profile} rolePermissions={rolePermissions} /> : <Navigate to="/" />} />
-                <Route path="/historico" element={hasPermission('historico') ? <HistoricoManager profile={profile} /> : <Navigate to="/" />} />
-                <Route path="/catalogs" element={hasPermission('catalogs') ? <CatalogsManager profile={profile} rolePermissions={rolePermissions} /> : <Navigate to="/" />} />
-                <Route path="/admin" element={hasPermission('admin') ? <AdminPanel profile={profile} rolePermissions={rolePermissions} /> : <Navigate to="/" />} />
-                <Route path="/commissions" element={hasPermission('commissions') ? <CommissionsManager profile={profile} rolePermissions={rolePermissions} /> : <Navigate to="/" />} />
-                <Route path="/reports" element={hasPermission('reports') ? <ReportsManager profile={profile} rolePermissions={rolePermissions} /> : <Navigate to="/" />} />
-                <Route path="/insurance-plans" element={hasPermission('insurance-plans') ? <InsurancePlansManager profile={profile} rolePermissions={rolePermissions} /> : <Navigate to="/" />} />
-                <Route path="/claims" element={hasPermission('claims') ? <ClaimsManager profile={profile} rolePermissions={rolePermissions} /> : <Navigate to="/" />} />
-                <Route path="/notifications" element={hasPermission('notifications') ? <NotificationsManager profile={profile} rolePermissions={rolePermissions} /> : <Navigate to="/" />} />
-                <Route path="/config" element={hasPermission('config') ? <ConfigPanel profile={profile} rolePermissions={rolePermissions} /> : <Navigate to="/" />} />
-                <Route path="*" element={<Navigate to="/" />} />
-              </Routes>
-            </Suspense>
-          </Layout>
-        </Router>
+        <FirestoreDataProvider userId={user?.uid}>
+          <Router>
+            <Layout profile={profile} rolePermissions={rolePermissions} companySettings={companySettings}>
+              <Suspense fallback={<LoadingScreen />}>
+                <Routes>
+                  <Route path="/" element={<Home profile={profile} rolePermissions={rolePermissions} />} />
+                  <Route path="/dashboard" element={hasPermission('dashboard') ? <Dashboard profile={profile} /> : <Navigate to="/" />} />
+                  <Route path="/request" element={hasPermission('request') ? <InsuranceForm profile={profile} /> : <Navigate to="/" />} />
+                  <Route path="/quote" element={hasPermission('request') ? <QuoteForm profile={profile} /> : <Navigate to="/" />} />
+                  <Route path="/clients" element={hasPermission('clients') ? <ClientsManager profile={profile} rolePermissions={rolePermissions} /> : <Navigate to="/" />} />
+                  <Route path="/providers" element={hasPermission('providers') ? <ProvidersManager profile={profile} rolePermissions={rolePermissions} /> : <Navigate to="/" />} />
+                  <Route path="/policies" element={hasPermission('policies') ? <PoliciesManager profile={profile} rolePermissions={rolePermissions} /> : <Navigate to="/" />} />
+                  <Route path="/historico" element={hasPermission('historico') ? <HistoricoManager profile={profile} /> : <Navigate to="/" />} />
+                  <Route path="/catalogs" element={hasPermission('catalogs') ? <CatalogsManager profile={profile} rolePermissions={rolePermissions} /> : <Navigate to="/" />} />
+                  <Route path="/admin" element={hasPermission('admin') ? <AdminPanel profile={profile} rolePermissions={rolePermissions} /> : <Navigate to="/" />} />
+                  <Route path="/commissions" element={hasPermission('commissions') ? <CommissionsManager profile={profile} rolePermissions={rolePermissions} /> : <Navigate to="/" />} />
+                  <Route path="/reports" element={hasPermission('reports') ? <ReportsManager profile={profile} rolePermissions={rolePermissions} /> : <Navigate to="/" />} />
+                  <Route path="/insurance-plans" element={hasPermission('insurance-plans') ? <InsurancePlansManager profile={profile} rolePermissions={rolePermissions} /> : <Navigate to="/" />} />
+                  <Route path="/claims" element={hasPermission('claims') ? <ClaimsManager profile={profile} rolePermissions={rolePermissions} /> : <Navigate to="/" />} />
+                  <Route path="/notifications" element={hasPermission('notifications') ? <NotificationsManager profile={profile} rolePermissions={rolePermissions} /> : <Navigate to="/" />} />
+                  <Route path="/config" element={hasPermission('config') ? <ConfigPanel profile={profile} rolePermissions={rolePermissions} /> : <Navigate to="/" />} />
+                  <Route path="*" element={<Navigate to="/" />} />
+                </Routes>
+              </Suspense>
+            </Layout>
+          </Router>
+        </FirestoreDataProvider>
       </CompanyContext.Provider>
-    </ErrorBoundary>
+    </AppSafeFallback>
   );
 }

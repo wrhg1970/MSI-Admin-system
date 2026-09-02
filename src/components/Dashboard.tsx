@@ -1,6 +1,4 @@
-import { useState, useEffect, useMemo } from 'react';
-import { collection, query, onSnapshot, orderBy, limit, where } from 'firebase/firestore';
-import { db, handleFirestoreError, OperationType } from '../firebase';
+import { useState, useMemo } from 'react';
 import { InsuranceRequest, UserProfile, Policy, Payment } from '../types';
 import { 
   BarChart, 
@@ -21,19 +19,23 @@ import {
 } from 'recharts';
 import { TrendingUp, Users, DollarSign, Briefcase, Receipt, Calendar, Filter, ShieldCheck, PieChart as PieIcon, ArrowUpRight, ArrowDownRight, Scale } from 'lucide-react';
 import TransactionModal from './TransactionModal';
-import { format, startOfMonth, endOfMonth, isWithinInterval } from 'date-fns';
-import { getDocs } from 'firebase/firestore';
+import { format, startOfMonth, endOfMonth } from 'date-fns';
+import { useFirestoreData } from '../context/FirestoreDataContext';
+import { getNormalizedYYYYMMDD } from '../lib/policyUtils';
 
 interface DashboardProps {
   profile: UserProfile | null;
 }
 
 export default function Dashboard({ profile }: DashboardProps) {
-  const [insurances, setInsurances] = useState<InsuranceRequest[]>([]);
-  const [policies, setPolicies] = useState<Policy[]>([]);
-  const [payments, setPayments] = useState<Payment[]>([]);
-  const [exchangeRate, setExchangeRate] = useState<number>(17.5);
-  const [loading, setLoading] = useState(true);
+  const { 
+    insurances: contextInsurances, 
+    policies, 
+    payments: contextPayments, 
+    latestExchangeRate: exchangeRate,
+    loading: contextLoading
+  } = useFirestoreData();
+
   const [selectedInsuranceForTransactions, setSelectedInsuranceForTransactions] = useState<string | null>(null);
   
   // Filters
@@ -44,72 +46,33 @@ export default function Dashboard({ profile }: DashboardProps) {
   const [planFilter, setPlanFilter] = useState('all');
   const [clientTypeFilter, setClientTypeFilter] = useState('all');
 
-  useEffect(() => {
-    if (!profile) return;
+  const isAdmin = profile ? ['super_admin', 'director', 'seguros', 'administracion', 'admin'].includes(profile.role) : false;
 
-    const isAdmin = ['super_admin', 'director', 'seguros', 'administracion', 'admin'].includes(profile.role);
-    
-    // For performance, we could limit the initial query to something reasonable like 1000 items
-    // or better yet, query only within the current selected date range in Firestore.
-    // However, since we want global stats potentially, we'll keep it for now but optimize the calculations.
-    let q;
+  const insurances = useMemo(() => {
+    if (!profile) return [];
     if (isAdmin) {
-      q = query(collection(db, 'insurances'), orderBy('createdAt', 'desc'));
+      return contextInsurances;
     } else if (profile.role === 'agent') {
-      q = query(collection(db, 'insurances'), where('agentId', '==', profile.uid), orderBy('createdAt', 'desc'));
+      return contextInsurances.filter(i => i.agentId === profile.uid);
     } else {
-      q = query(collection(db, 'insurances'), where('email', '==', profile.email), orderBy('createdAt', 'desc'));
+      return contextInsurances.filter(i => i.email === profile.email);
     }
+  }, [contextInsurances, profile, isAdmin]);
 
-    const unsubscribe = onSnapshot(q, (snapshot) => {
-      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as InsuranceRequest));
-      setInsurances(data);
-      setLoading(false);
-    }, (error) => {
-      handleFirestoreError(error, OperationType.GET, 'insurances');
-    });
-
-    const fetchPolicies = async () => {
-      try {
-        const snap = await getDocs(collection(db, 'policies'));
-        setPolicies(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Policy)));
-      } catch (error) {
-        console.error("Error fetching policies:", error);
-      }
-    };
-    fetchPolicies();
-
-    let unsubscribePayments: (() => void) | undefined;
-    let unsubscribeRate: (() => void) | undefined;
-
+  const payments = useMemo(() => {
+    if (!profile) return [];
     if (isAdmin) {
-      // Subscribe to active exchange rate
-      const qRate = query(collection(db, 'exchangeRates'), orderBy('date', 'desc'), limit(1));
-      unsubscribeRate = onSnapshot(qRate, (snap) => {
-        if (!snap.empty) {
-          const rateVal = snap.docs[0].data().rate;
-          if (rateVal) setExchangeRate(rateVal);
-        }
-      }, (error) => {
-        console.error("Error fetching exchangeRate in Dashboard:", error);
-      });
-
-      // Subscribe to all payments for global cash flow view
-      const qPayments = query(collection(db, 'payments'));
-      unsubscribePayments = onSnapshot(qPayments, (snap) => {
-        const pData = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Payment));
-        setPayments(pData);
-      }, (error) => {
-        console.error("Error fetching payments in Dashboard:", error);
-      });
+      return contextPayments;
     }
+    // Non-admins don't see payments or can have filtered view. If there are payments associated with their insurances:
+    const insuranceIds = new Set(insurances.map(i => i.id));
+    return contextPayments.filter(p => insuranceIds.has(p.insuranceId));
+  }, [contextPayments, insurances, isAdmin, profile]);
 
-    return () => {
-      unsubscribe();
-      if (unsubscribePayments) unsubscribePayments();
-      if (unsubscribeRate) unsubscribeRate();
-    };
-  }, [profile]);
+  const loading = useMemo(() => {
+    if (!profile) return true;
+    return contextLoading.insurances || contextLoading.policies || (isAdmin && contextLoading.payments);
+  }, [contextLoading, profile, isAdmin]);
 
   const getPlanLabel = (plan: string) => {
     const mapping: Record<string, string> = {
@@ -140,9 +103,9 @@ export default function Dashboard({ profile }: DashboardProps) {
 
   const filteredInsurances = useMemo(() => {
     return insurances.filter(ins => {
-      const date = ins.createdAt?.toDate ? ins.createdAt.toDate() : new Date(ins.createdAt);
-      const matchesDate = (!dateRange.start || date >= new Date(dateRange.start)) &&
-                          (!dateRange.end || date <= new Date(dateRange.end));
+      const actualRequestDate = getNormalizedYYYYMMDD(ins.requestDate) || getNormalizedYYYYMMDD(ins.createdAt);
+      const matchesDate = (!dateRange.start || actualRequestDate >= dateRange.start) &&
+                          (!dateRange.end || actualRequestDate <= dateRange.end);
       
       const policy = policies.find(p => p.id === ins.policyId);
       const plan = ins.plan || policy?.plan || ins.policyId.split('-')[0];
@@ -154,45 +117,74 @@ export default function Dashboard({ profile }: DashboardProps) {
     });
   }, [insurances, dateRange, planFilter, clientTypeFilter, policies]);
 
-  const stats = useMemo(() => [
-    { 
-      name: 'Número de Pólizas', 
-      value: filteredInsurances.length.toLocaleString(), 
-      icon: ShieldCheck, 
-      color: 'bg-blue-500' 
-    },
-    { 
-      name: 'Ventas Totales', 
-      value: `$${filteredInsurances.reduce((acc, curr) => acc + (curr.totalFinal || curr.totalPrice), 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, 
-      icon: DollarSign, 
-      color: 'bg-green-500' 
-    },
-    { 
-      name: 'Costos Totales', 
-      value: `$${filteredInsurances.reduce((acc, curr) => acc + (curr.totalCost || 0), 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, 
-      icon: TrendingUp, 
-      color: 'bg-red-500' 
-    },
-    { 
-      name: 'Margen Total', 
-      value: `$${filteredInsurances.reduce((acc, curr) => acc + ((curr.totalFinal || curr.totalPrice) - (curr.totalCost || 0)), 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, 
-      icon: TrendingUp, 
-      color: 'bg-amber-500' 
-    },
-    { 
-      name: 'Comisiones', 
-      value: `$${filteredInsurances.reduce((acc, curr) => acc + (curr.agentCommission || 0), 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, 
-      icon: DollarSign, 
-      color: 'bg-indigo-500' 
-    }
-  ], [filteredInsurances]);
+  const stats = useMemo(() => {
+    let count = 0;
+    let ventas = 0;
+    let costo = 0;
+    let comisiones = 0;
+
+    filteredInsurances.forEach(curr => {
+      count++;
+      const isCan = curr.actionType?.toUpperCase() === 'CAN';
+      const p = curr.totalFinal || curr.totalPrice || 0;
+      const c = curr.totalCost || 0;
+      const com = curr.agentCommission || 0;
+
+      ventas += isCan ? -Math.abs(p) : Math.abs(p);
+      costo += isCan ? -Math.abs(c) : Math.abs(c);
+      comisiones += isCan ? -Math.abs(com) : Math.abs(com);
+    });
+
+    const margen = ventas - costo;
+
+    return [
+      { 
+        name: 'Número de Pólizas', 
+        value: count.toLocaleString(), 
+        icon: ShieldCheck, 
+        color: 'bg-blue-500' 
+      },
+      { 
+        name: 'Ventas Totales', 
+        value: `$${ventas.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, 
+        icon: DollarSign, 
+        color: 'bg-green-500' 
+      },
+      { 
+        name: 'Costos Totales', 
+        value: `$${costo.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, 
+        icon: TrendingUp, 
+        color: 'bg-red-500' 
+      },
+      { 
+        name: 'Margen Total', 
+        value: `$${margen.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, 
+        icon: TrendingUp, 
+        color: 'bg-amber-500' 
+      },
+      { 
+        name: 'Comisiones', 
+        value: `$${comisiones.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`, 
+        icon: DollarSign, 
+        color: 'bg-indigo-500' 
+      }
+    ];
+  }, [filteredInsurances]);
 
   const chartData = useMemo(() => ['Individual', 'Agent', 'Corporate'].map(type => {
     const typeInsurances = filteredInsurances.filter(i => i.clientType === type);
     return {
       name: type === 'Individual' ? 'B2C (Ind)' : type === 'Agent' ? 'B2B2C (Ag)' : 'B2B (Corp)',
-      venta: typeInsurances.reduce((acc, curr) => acc + (curr.totalFinal || curr.totalPrice), 0),
-      costo: typeInsurances.reduce((acc, curr) => acc + (curr.totalCost || 0), 0)
+      venta: typeInsurances.reduce((acc, curr) => {
+        const isCan = curr.actionType?.toUpperCase() === 'CAN';
+        const val = curr.totalFinal || curr.totalPrice || 0;
+        return acc + (isCan ? -Math.abs(val) : Math.abs(val));
+      }, 0),
+      costo: typeInsurances.reduce((acc, curr) => {
+        const isCan = curr.actionType?.toUpperCase() === 'CAN';
+        const val = curr.totalCost || 0;
+        return acc + (isCan ? -Math.abs(val) : Math.abs(val));
+      }, 0)
     };
   }), [filteredInsurances]);
 
@@ -203,10 +195,6 @@ export default function Dashboard({ profile }: DashboardProps) {
       value: filteredInsurances.filter(i => (i.plan || i.policyId.split('-')[0]) === plan).length
     })).sort((a, b) => b.value - a.value);
   }, [filteredInsurances]);
-
-  const isAdmin = useMemo(() => {
-    return ['super_admin', 'director', 'seguros', 'administracion', 'admin'].includes(profile?.role || '');
-  }, [profile]);
 
   const filteredPayments = useMemo(() => {
     if (!isAdmin) return [];
@@ -260,7 +248,7 @@ export default function Dashboard({ profile }: DashboardProps) {
         monthlyFlows[monthKey] = { month: monthKey, ingresos: 0, egresos: 0, neto: 0 };
       }
       
-      const tc = p.exchangeRate || exchangeRate || 17.5;
+      const tc = p.exchangeRate || exchangeRate || 17.55;
       const amount = p.currency === 'USD' ? p.amount : (p.amountMXP || 0) / tc;
       
       if (p.type === 'client_payment') {

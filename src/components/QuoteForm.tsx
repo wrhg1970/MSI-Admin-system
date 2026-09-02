@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { collection, getDocs, query, where, orderBy, onSnapshot, addDoc, deleteDoc, doc } from 'firebase/firestore';
 import { db } from '../firebase';
-import { UserProfile, Policy, Country } from '../types';
+import { UserProfile, Policy, Country, PolicyLetter } from '../types';
 import { differenceInYears, differenceInDays, parseISO, format, addDays } from 'date-fns';
 import { 
   FileText, Mail, Calendar, Phone, User, Users, Globe, 
@@ -12,7 +12,9 @@ import {
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { COUNTRIES, APP_LOGO } from '../constants';
+import { formatDisplayDate, getAvailableLettersForInsurance } from '../lib/policyUtils';
 import { useCompany } from '../App';
+import { useFirestoreData } from '../context/FirestoreDataContext';
 
 interface QuoteFormProps {
   profile: UserProfile | null;
@@ -32,13 +34,39 @@ interface QuoteFormData {
   notes: string;
   discountType: 'percent' | 'flat';
   discountValue: number;
+  quoteMode: 'compare' | 'sum';
 }
 
 export default function QuoteForm({ profile }: QuoteFormProps) {
   const { settings: companySettings } = useCompany();
+  const { countries: firestoreCountries, policies: firestorePolicies, policyLetters: firestoreLetters } = useFirestoreData();
   const [policies, setPolicies] = useState<Policy[]>([]);
   const [agents, setAgents] = useState<UserProfile[]>([]);
+  const [insuranceTypes, setInsuranceTypes] = useState<{name: string, minAge: number, maxAge: number}[]>([]);
   const [selectedPolicyIds, setSelectedPolicyIds] = useState<string[]>([]);
+  const [attachBenefits, setAttachBenefits] = useState(true);
+  const [policyLetters, setPolicyLetters] = useState<PolicyLetter[]>([]);
+  
+  // Combine static full countries list with any custom countries configured in Firestore
+  const allCountries = useMemo(() => {
+    const map = new Map<string, Country>();
+    COUNTRIES.forEach(c => map.set(c.code, c));
+    if (firestoreCountries && firestoreCountries.length > 0) {
+      firestoreCountries.forEach(c => {
+        if (c && c.code) {
+          const existing = map.get(c.code);
+          map.set(c.code, existing ? { ...existing, ...c } : c);
+        }
+      });
+    }
+    return Array.from(map.values()).sort((a, b) => (a.name || '').localeCompare(b.name || '', 'es', { sensitivity: 'base' }));
+  }, [firestoreCountries]);
+
+  const getCountryName = (code: string) => {
+    if (!code) return '';
+    const found = allCountries.find(c => c.code.toUpperCase() === code.toUpperCase());
+    return found?.name || code;
+  };
   
   const [formData, setFormData] = useState<QuoteFormData>({
     firstName: '',
@@ -53,7 +81,8 @@ export default function QuoteForm({ profile }: QuoteFormProps) {
     destinationCountry: 'US',
     notes: '',
     discountType: 'percent',
-    discountValue: 0
+    discountValue: 0,
+    quoteMode: 'compare'
   });
 
   const [loading, setLoading] = useState(true);
@@ -171,16 +200,40 @@ export default function QuoteForm({ profile }: QuoteFormProps) {
         const loadedPolicies = policiesSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Policy));
         setPolicies(loadedPolicies);
 
-        // Load agents
-        const agentsSnap = await getDocs(query(collection(db, 'users'), where('role', '==', 'agent')));
-        const loadedAgents = agentsSnap.docs.map(doc => ({ uid: doc.id, ...doc.data() } as UserProfile));
-        setAgents(loadedAgents);
+        // Load agents or corporates from clients collection
+        const clientsSnap = await getDocs(collection(db, 'clients'));
+        const loadedClients = clientsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as any));
+        
+        // Filter those of type 'Agent' or 'Corporate'
+        const filteredAgents = loadedClients.filter((c: any) => c.type === 'Agent' || c.type === 'Corporate');
+        
+        // Map them to the agent format:
+        const mappedAgents = filteredAgents.map((c: any) => ({
+          uid: c.id,
+          email: c.email || '',
+          displayName: c.commercialName || c.legalName || c.mainContact || 'Agente Sin Nombre',
+          role: 'agent' as any,
+          createdAt: c.createdAt || null
+        }));
+        
+        setAgents(mappedAgents);
 
-        // Pre-select current user if they are an agent
+        // Load insurance types to dynamically handle birthDate filtering
+        const typesSnap = await getDocs(query(collection(db, 'insuranceTypes'), orderBy('minAge')));
+        const loadedTypes = typesSnap.docs.map(doc => doc.data() as any);
+        setInsuranceTypes(loadedTypes);
+
+        // Load policy letters where language is policy or es
+        const lettersSnap = await getDocs(query(collection(db, 'policyLetters'), where('language', 'in', ['policy', 'es'])));
+        const loadedLetters = lettersSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as PolicyLetter));
+        setPolicyLetters(loadedLetters);
+
+        // Pre-select current user if they are an agent or if not, preselect first loaded agent
         if (profile && profile.role === 'agent') {
-          setFormData(prev => ({ ...prev, agentId: profile.uid }));
-        } else if (loadedAgents.length > 0) {
-          setFormData(prev => ({ ...prev, agentId: loadedAgents[0].uid }));
+          const matchingAgent = mappedAgents.find(a => a.email.toLowerCase() === profile.email.toLowerCase() || a.uid === profile.uid);
+          setFormData(prev => ({ ...prev, agentId: matchingAgent?.uid || profile.uid }));
+        } else if (mappedAgents.length > 0) {
+          setFormData(prev => ({ ...prev, agentId: mappedAgents[0].uid }));
         }
       } catch (err) {
         console.error("Error loading Quote Form data:", err);
@@ -192,33 +245,81 @@ export default function QuoteForm({ profile }: QuoteFormProps) {
     fetchData();
   }, [profile]);
 
-  // Calculate age based on birth date
+  // Calculate age based on birth date at start of insurance
   const age = useMemo(() => {
     if (!formData.birthDate) return null;
     try {
-      return differenceInYears(new Date(), parseISO(formData.birthDate));
+      const refDate = formData.startDate ? parseISO(formData.startDate) : new Date();
+      return Math.max(0, differenceInYears(refDate, parseISO(formData.birthDate)));
     } catch {
       return null;
     }
-  }, [formData.birthDate]);
+  }, [formData.birthDate, formData.startDate]);
 
-  // Determine current PlanType category based on age
+  // Determine current PlanType category based on age at start of insurance
   const calculatedPlanType = useMemo(() => {
     if (age === null) return 'Traveler'; // fallback default
-    if (age >= 6 && age <= 25) return 'Student';
+    if (age >= 0 && age <= 6) return 'U6';
+    if (age >= 7 && age <= 25) return 'Student';
     if (age >= 26 && age <= 69) return 'Traveler';
-    if (age >= 0 && age < 6) return 'U6';
     if (age >= 70) return 'O70';
+
+    if (insuranceTypes && insuranceTypes.length > 0) {
+      const matchedType = insuranceTypes.find(t => age >= Number(t.minAge) && age <= Number(t.maxAge));
+      if (matchedType) return matchedType.name as any;
+    }
     return 'Traveler';
-  }, [age]);
+  }, [age, insuranceTypes]);
 
   // Determine destination region based on destination country
   const destinationRegion = useMemo(() => {
-    if (formData.destinationCountry && ['US', 'CA', 'WW'].includes(formData.destinationCountry.toUpperCase())) {
+    if (!formData.destinationCountry) return 2;
+    const targetCode = formData.destinationCountry.toUpperCase();
+    if (['US', 'CA', 'WW', 'PR', 'VI', 'GU'].includes(targetCode)) {
       return 1; // Zona 1
     }
-    return 2; // Zona 2
-  }, [formData.destinationCountry]);
+    const found = allCountries.find(c => c.code.toUpperCase() === targetCode);
+    return found?.region === 1 ? 1 : 2; // Zona 1 o Zona 2
+  }, [formData.destinationCountry, allCountries]);
+
+  // Helper to get age range for a plan
+  const getAgeRangeForPlan = (planName: string, loadedTypes: any[] = []) => {
+    const matchedType = loadedTypes.find(t => t.name.toLowerCase() === (planName || '').trim().toLowerCase());
+    if (matchedType) {
+      return `${matchedType.minAge}-${matchedType.maxAge} años`;
+    }
+    if (planName === 'U6') return '0-6 años';
+    if (planName === 'Student') return '7-25 años';
+    if (planName === 'Traveler' || planName === 'Traveller') return '26-69 años';
+    if (planName === 'Platinum') return '0-69 años';
+    if (planName === 'O70') return '70-85 años';
+    if (planName === 'Xtreme') return '7-69 años';
+    return 'Cualquier edad';
+  };
+
+  // Helper to check if a policy is recommended based on client age
+  const isPolicyRecommendedForAge = (p: Policy, clientAge: number | null, loadedTypes: any[] = []) => {
+    if (clientAge === null) return false;
+    const planName = (p.plan || '').trim();
+    const policyName = (p.name || '').trim().toLowerCase();
+
+    // Database insuranceTypes match
+    const matchedType = loadedTypes.find(t => t.name.toLowerCase() === planName.toLowerCase());
+    if (matchedType) {
+      return clientAge >= Number(matchedType.minAge) && clientAge <= Number(matchedType.maxAge);
+    }
+
+    if (planName === 'Platinum' || policyName.includes('platinum') || policyName.includes('platino')) {
+      return clientAge >= 0 && clientAge <= 69;
+    }
+    if (planName === 'U6') return clientAge >= 0 && clientAge <= 6;
+    if (planName === 'Student') return clientAge >= 7 && clientAge <= 25;
+    if (planName === 'Traveler' || planName === 'Traveller') return clientAge >= 26 && clientAge <= 69;
+    if (planName === 'O70') return clientAge >= 70 && clientAge <= 85;
+    if (planName === 'Xtreme') return clientAge >= 7 && clientAge <= 69;
+
+    return false;
+  };
 
   // Compute unique plans and unique policy names for the selector
   const uniqueSelectorPlans = useMemo(() => {
@@ -267,39 +368,71 @@ export default function QuoteForm({ profile }: QuoteFormProps) {
     }
   }, [formData.startDate, formData.endDate]);
 
-  const months = useMemo(() => {
-    if (days <= 39) return 0;
-    return Math.ceil(days / 30.4);
+  const durationBreakdown = useMemo(() => {
+    if (days <= 0) return { billedMonths: 0, billedDays: 0, calculatedMonths: 0, additionalDays: 0 };
+    
+    if (days < 40) {
+      return { billedMonths: 0, billedDays: days, calculatedMonths: 0, additionalDays: days };
+    }
+
+    const calculatedMonths = Math.floor(days / 30.4);
+    const additionalDays = Math.max(0, days - Math.round(calculatedMonths * 30.4));
+    
+    let billedMonths = calculatedMonths;
+    let billedDays = additionalDays;
+    
+    if (additionalDays > 15) {
+      billedMonths = calculatedMonths + 1;
+      billedDays = 0;
+    }
+    return { billedMonths, billedDays, calculatedMonths, additionalDays };
   }, [days]);
+
+  const months = useMemo(() => {
+    return durationBreakdown.billedMonths;
+  }, [durationBreakdown]);
 
   // Filter and prioritize recommended policies first
   const sortedPoliciesList = useMemo(() => {
     let list = policies.filter(p => p.region === destinationRegion && p.status === 'active');
+    
     if (selectorPlanFilter) {
       list = list.filter(p => p.plan === selectorPlanFilter);
     }
     if (selectorPolicyNameFilter) {
       list = list.filter(p => p.name === selectorPolicyNameFilter);
     }
-    return list.sort((a, b) => {
-      const isARecommended = a.plan === calculatedPlanType;
-      const isBRecommended = b.plan === calculatedPlanType;
-      if (isARecommended && !isBRecommended) return -1;
-      if (!isARecommended && isBRecommended) return 1;
-      return a.name.localeCompare(b.name);
+
+    // Deduplicate by name and price to avoid duplicate choices in the interface
+    const seen = new Set<string>();
+    const deduplicatedList: Policy[] = [];
+    list.forEach(p => {
+      const key = `${p.name}-${p.plan}-${p.region}-${p.pricePerDay}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        deduplicatedList.push(p);
+      }
     });
-  }, [policies, calculatedPlanType, destinationRegion, selectorPlanFilter, selectorPolicyNameFilter]);
+
+    return deduplicatedList.sort((a, b) => {
+      return a.name.localeCompare(b.name) || a.plan.localeCompare(b.plan);
+    });
+  }, [policies, destinationRegion, selectorPlanFilter, selectorPolicyNameFilter]);
 
   // Calculate exact prices for each policy
   const calculatePolicyPrice = (policy: Policy) => {
     if (days <= 0) return 0;
-    let basePrice = 0;
-    if (days <= 39) {
-      basePrice = policy.pricePerDay * days;
-    } else {
-      const pricePerMonth = policy.pricePerMonth || (policy.pricePerDay * 30);
-      basePrice = pricePerMonth * months;
+    const pricePerDay = policy.pricePerDay || 0;
+    const pricePerMonth = policy.pricePerMonth || (pricePerDay * 30);
+    
+    const { billedMonths, billedDays } = durationBreakdown;
+    
+    let monthlyRate = pricePerMonth;
+    if (billedMonths >= 4) {
+      monthlyRate = pricePerMonth * 0.8;
     }
+    
+    const basePrice = (billedMonths * monthlyRate) + (billedDays * pricePerDay);
     return Math.round(basePrice * 100) / 100;
   };
 
@@ -308,13 +441,23 @@ export default function QuoteForm({ profile }: QuoteFormProps) {
     return policies.filter(p => selectedPolicyIds.includes(p.id));
   }, [policies, selectedPolicyIds]);
 
-  // Calculate subtotals, discount and total price
+  // Calculate subtotals, discount and total price based on quoteMode
   const totals = useMemo(() => {
     let subtotal = 0;
     const items = selectedPolicies.map(p => {
-      const price = calculatePolicyPrice(p);
-      subtotal += price;
-      return { policy: p, price };
+      const basePrice = calculatePolicyPrice(p);
+      let itemDiscount = 0;
+      if (formData.discountType === 'percent' && formData.discountValue > 0) {
+        itemDiscount = Math.min(basePrice, Math.round(basePrice * (formData.discountValue / 100) * 100) / 100);
+      }
+      const price = Math.max(0, Math.round((basePrice - itemDiscount) * 100) / 100);
+      subtotal += basePrice;
+      return { 
+        policy: p, 
+        basePrice,
+        price: formData.quoteMode === 'compare' ? price : basePrice,
+        itemDiscount
+      };
     });
 
     let discountAmount = 0;
@@ -327,13 +470,18 @@ export default function QuoteForm({ profile }: QuoteFormProps) {
     discountAmount = Math.min(Math.round(discountAmount * 100) / 100, subtotal);
     const grandTotal = Math.max(0, Math.round((subtotal - discountAmount) * 100) / 100);
 
+    const minPrice = items.length > 0 ? Math.min(...items.map(i => i.price)) : 0;
+    const maxPrice = items.length > 0 ? Math.max(...items.map(i => i.price)) : 0;
+
     return {
       subtotal,
       discountAmount,
       grandTotal,
+      minPrice,
+      maxPrice,
       items
     };
-  }, [selectedPolicies, days, months, formData.discountType, formData.discountValue]);
+  }, [selectedPolicies, days, months, formData.discountType, formData.discountValue, formData.quoteMode]);
 
   const handleTogglePolicy = (policyId: string) => {
     setSelectedPolicyIds(prev => {
@@ -408,6 +556,7 @@ export default function QuoteForm({ profile }: QuoteFormProps) {
     const qDiscountAmount = historicQuote ? (historicQuote.discountAmount || 0) : totals.discountAmount;
     const qSubtotal = historicQuote ? (historicQuote.subtotal || 0) : totals.subtotal;
     const qGrandTotal = historicQuote ? (historicQuote.grandTotal || 0) : totals.grandTotal;
+    const qQuoteMode = historicQuote ? (historicQuote.quoteMode || 'compare') : formData.quoteMode;
 
     const agent = historicQuote 
       ? { displayName: historicQuote.agentName || 'Asesor Comercial', email: historicQuote.agentEmail || 'ventas@misegurointernacional.com' } 
@@ -520,7 +669,7 @@ export default function QuoteForm({ profile }: QuoteFormProps) {
     doc.setFont('helvetica', 'bold');
     doc.text('COTIZACIÓN', 145, 18);
     doc.setFont('helvetica', 'normal');
-    doc.text(`Fecha: ${historicQuote ? format(parseISO(historicQuote.createdAt), 'dd/MM/yyyy') : format(new Date(), 'dd/MM/yyyy')}`, 145, 24);
+    doc.text(`Fecha: ${historicQuote ? formatDisplayDate(historicQuote.createdAt) : formatDisplayDate(new Date())}`, 145, 24);
     doc.text(`Válida por: 30 días`, 145, 30);
 
     // Decorative Separator Line
@@ -540,7 +689,14 @@ export default function QuoteForm({ profile }: QuoteFormProps) {
     doc.text(`Nombre: ${qFirstName} ${qLastName}`, 14, 60);
     doc.text(`Email: ${qEmail || 'N/A'}`, 14, 66);
     doc.text(`Teléfono: ${qPhone || 'N/A'}`, 14, 72);
-    doc.text(`Fecha Nacimiento: ${qBirthDate ? format(parseISO(qBirthDate), 'dd/MM/yyyy') : 'N/A'} (Edad: ${qAge !== null ? `${qAge} años` : 'N/A'})`, 14, 78);
+    if (qBirthDate) {
+      try {
+        const formattedBirth = formatDisplayDate(qBirthDate);
+        doc.text(`Fecha Nacimiento: ${formattedBirth} (Edad: ${qAge !== null ? `${qAge} años` : 'N/A'})`, 14, 78);
+      } catch (err) {
+        // Skip safely on parsing error
+      }
+    }
 
     // Trip Details Section (Top Right)
     doc.setTextColor(26, 60, 114);
@@ -551,42 +707,66 @@ export default function QuoteForm({ profile }: QuoteFormProps) {
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(10);
     doc.setTextColor(55, 65, 81);
-    const originCountryName = COUNTRIES.find(c => c.code === qOriginCountry)?.name || qOriginCountry;
-    const destCountryName = COUNTRIES.find(c => c.code === qDestinationCountry)?.name || qDestinationCountry;
+    const originCountryName = getCountryName(qOriginCountry);
+    const destCountryName = getCountryName(qDestinationCountry);
 
     doc.text(`País Origen: ${originCountryName}`, 110, 60);
     doc.text(`País Destino: ${destCountryName} (Zona ${qDestinationRegion})`, 110, 66);
-    doc.text(`Periodo: ${qStartDate ? format(parseISO(qStartDate), 'dd/MM/yyyy') : 'N/A'} al ${qEndDate ? format(parseISO(qEndDate), 'dd/MM/yyyy') : 'N/A'}`, 110, 72);
+    doc.text(`Periodo: ${qStartDate ? formatDisplayDate(qStartDate) : 'N/A'} al ${qEndDate ? formatDisplayDate(qEndDate) : 'N/A'}`, 110, 72);
     doc.text(`Duración Total: ${qDays} días ${qMonths > 0 ? `(~${qMonths} meses)` : ''}`, 110, 78);
 
     // Policies/Plans Detailed Breakdown
     doc.setTextColor(26, 60, 114);
     doc.setFontSize(12);
     doc.setFont('helvetica', 'bold');
-    doc.text('PLANES SELECCIONADOS', 14, 92);
+    doc.text(qQuoteMode === 'compare' ? 'OPCIONES DE PLANES COTIZADOS (A ELEGIR)' : 'PLANES SELECCIONADOS (PAQUETE)', 14, 92);
 
     // Map policies correctly for tableBody
     const resolvedItems = historicQuote 
-      ? (historicQuote.selectedPolicies || []).map((p: any) => ({
-          name: p.name || 'Seguro Internacional',
-          plan: p.plan || 'Traveler',
-          rateLabel: qDays <= 39
-            ? `$${(p.pricePerDay || 0).toFixed(2)} / día`
-            : `$${(p.pricePerMonth || (p.pricePerDay || 0) * 30).toFixed(2)} / mes`,
-          isMatch: p.plan === qPlanType && p.region === qDestinationRegion,
-          price: p.price || 0
-        }))
-      : totals.items.map(item => {
-          const p = item.policy;
-          const isMatch = p.plan === calculatedPlanType && p.region === destinationRegion;
-          const rateLabel = days <= 39 
-            ? `$${p.pricePerDay.toFixed(2)} / día` 
-            : `$${(p.pricePerMonth || p.pricePerDay * 30).toFixed(2)} / mes`;
+      ? (historicQuote.selectedPolicies || []).map((p: any) => {
+          const calculatedMonths = Math.floor(qDays / 30.4);
+          const additionalDays = Math.max(0, qDays - Math.round(calculatedMonths * 30.4));
+          let bMonths = calculatedMonths;
+          let bDays = additionalDays;
+          if (additionalDays > 15) {
+            bMonths = calculatedMonths + 1;
+            bDays = 0;
+          }
+          if (qDays < 40) {
+            bMonths = 0;
+            bDays = qDays;
+          }
+          const rateLabel = bMonths === 0
+            ? `$${(p.pricePerDay || 0).toFixed(2)}/día`
+            : `$${(p.pricePerMonth || (p.pricePerDay || 0) * 30).toFixed(2)}/mes${bDays > 0 ? ` + $${(p.pricePerDay || 0).toFixed(2)}/día (${bDays}d)` : ''}`;
           return {
+            id: p.id,
+            policy: p,
             name: p.name || 'Seguro Internacional',
             plan: p.plan || 'Traveler',
+            region: p.region,
+            deductible: p.deductible,
+            rateLabel,
+            ageRange: getAgeRangeForPlan(p.plan || 'Traveler', insuranceTypes),
+            price: p.price || 0
+          };
+        })
+      : totals.items.map(item => {
+          const p = item.policy;
+          const bMonths = durationBreakdown.billedMonths;
+          const bDays = durationBreakdown.billedDays;
+          const rateLabel = bMonths === 0
+            ? `$${p.pricePerDay.toFixed(2)}/día`
+            : `$${(p.pricePerMonth || p.pricePerDay * 30).toFixed(2)}/mes${bDays > 0 ? ` + $${p.pricePerDay.toFixed(2)}/día (${bDays}d)` : ''}`;
+          return {
+            id: p.id,
+            policy: p,
+            name: p.name || 'Seguro Internacional',
+            plan: p.plan || 'Traveler',
+            region: p.region,
+            deductible: p.deductible,
             rateLabel: rateLabel,
-            isMatch: isMatch,
+            ageRange: getAgeRangeForPlan(p.plan || 'Traveler', insuranceTypes),
             price: item.price
           };
         });
@@ -597,14 +777,21 @@ export default function QuoteForm({ profile }: QuoteFormProps) {
         item.name,
         item.plan,
         item.rateLabel,
-        item.isMatch ? 'Recomendado' : 'Estándar',
+        item.ageRange,
         `$${item.price.toFixed(2)} USD`
       ];
     });
 
     autoTable(doc, {
       startY: 96,
-      head: [['#', 'Plan de Seguro', 'Categoría', 'Tarifa Aplicada', 'Estado Plan', 'Precio']],
+      head: [[
+        '#', 
+        qQuoteMode === 'compare' ? 'Opción / Póliza' : 'Póliza', 
+        'Categoría', 
+        'Tarifa Aplicada', 
+        'Rango de Edades', 
+        qQuoteMode === 'compare' ? 'Precio Unitario' : 'Precio'
+      ]],
       body: tableBody,
       headStyles: { fillColor: [26, 60, 114], fontStyle: 'bold' },
       theme: 'striped',
@@ -629,34 +816,73 @@ export default function QuoteForm({ profile }: QuoteFormProps) {
       doc.setFont('helvetica', 'normal');
       doc.setFontSize(9);
       doc.setTextColor(107, 114, 128); // gray-500
-      const splitNotes = doc.splitTextToSize(qNotes, 120);
+      const splitNotes = doc.splitTextToSize(qNotes, 110);
       doc.text(splitNotes, 14, currentY + 5);
     }
 
     // Totals Box (Right Aligned)
     doc.setFillColor(249, 250, 251); // gray-50
-    doc.rect(130, currentY - 5, 66, 32, 'F');
+    doc.rect(126, currentY - 5, 70, 36, 'F');
     doc.setDrawColor(229, 231, 235); // gray-200
     doc.setLineWidth(0.5);
-    doc.rect(130, currentY - 5, 66, 32, 'S');
+    doc.rect(126, currentY - 5, 70, 36, 'S');
 
-    doc.setFontSize(9);
-    doc.setFont('helvetica', 'normal');
-    doc.setTextColor(107, 114, 128);
-    doc.text('Subtotal:', 134, currentY + 1);
-    doc.text(`$${qSubtotal.toFixed(2)} USD`, 190, currentY + 1, { align: 'right' });
+    if (qQuoteMode === 'compare') {
+      doc.setFontSize(8.5);
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(107, 114, 128);
+      doc.text('Modalidad:', 130, currentY + 1);
+      doc.text('Opciones a Elegir', 192, currentY + 1, { align: 'right' });
 
-    doc.text(`Descuento (${qDiscountType === 'percent' ? `${qDiscountValue}%` : 'Fijo'}):`, 134, currentY + 7);
-    doc.text(`-$${qDiscountAmount.toFixed(2)} USD`, 190, currentY + 7, { align: 'right' });
+      doc.text('Planes Cotizados:', 130, currentY + 7);
+      doc.text(`${resolvedItems.length} opciones`, 192, currentY + 7, { align: 'right' });
 
-    doc.setDrawColor(229, 231, 235);
-    doc.line(134, currentY + 12, 192, currentY + 12);
+      if (qDiscountValue > 0) {
+        doc.text(`Descuento:`, 130, currentY + 12);
+        const discLabel = qDiscountType === 'percent' ? `${qDiscountValue}% en c/u` : `-$${qDiscountAmount.toFixed(2)}`;
+        doc.text(discLabel, 192, currentY + 12, { align: 'right' });
+      }
 
-    doc.setFontSize(11);
-    doc.setFont('helvetica', 'bold');
-    doc.setTextColor(26, 60, 114);
-    doc.text('Total Cotizado:', 134, currentY + 19);
-    doc.text(`$${qGrandTotal.toFixed(2)} USD`, 190, currentY + 19, { align: 'right' });
+      doc.setDrawColor(229, 231, 235);
+      doc.line(130, currentY + 14, 192, currentY + 14);
+
+      doc.setFontSize(10);
+      doc.setFont('helvetica', 'bold');
+      doc.setTextColor(26, 60, 114);
+      const minP = resolvedItems.length > 0 ? Math.min(...resolvedItems.map((i: any) => i.price)) : 0;
+      const maxP = resolvedItems.length > 0 ? Math.max(...resolvedItems.map((i: any) => i.price)) : 0;
+      const priceText = minP === maxP ? `$${minP.toFixed(2)} USD` : `$${minP.toFixed(2)} - $${maxP.toFixed(2)} USD`;
+      doc.text('Precios:', 130, currentY + 21);
+      doc.text(priceText, 192, currentY + 21, { align: 'right' });
+
+      doc.setFontSize(7);
+      doc.setFont('helvetica', 'italic');
+      doc.setTextColor(107, 114, 128);
+      doc.text('*Precios independientes a elegir (no sumados)', 130, currentY + 27);
+    } else {
+      doc.setFontSize(9);
+      doc.setFont('helvetica', 'normal');
+      doc.setTextColor(107, 114, 128);
+      doc.text('Subtotal:', 130, currentY + 1);
+      doc.text(`$${qSubtotal.toFixed(2)} USD`, 192, currentY + 1, { align: 'right' });
+
+      doc.text(`Descuento (${qDiscountType === 'percent' ? `${qDiscountValue}%` : 'Fijo'}):`, 130, currentY + 7);
+      doc.text(`-$${qDiscountAmount.toFixed(2)} USD`, 192, currentY + 7, { align: 'right' });
+
+      doc.setDrawColor(229, 231, 235);
+      doc.line(130, currentY + 12, 192, currentY + 12);
+
+      doc.setFontSize(11);
+      doc.setFont('helvetica', 'bold');
+      doc.setTextColor(26, 60, 114);
+      doc.text('Total Cotizado:', 130, currentY + 19);
+      doc.text(`$${qGrandTotal.toFixed(2)} USD`, 192, currentY + 19, { align: 'right' });
+
+      doc.setFontSize(7);
+      doc.setFont('helvetica', 'italic');
+      doc.setTextColor(107, 114, 128);
+      doc.text('*Suma total acumulada de todas las pólizas', 130, currentY + 25);
+    }
 
     // Agent Signature Footer
     const footerY = 260;
@@ -677,6 +903,214 @@ export default function QuoteForm({ profile }: QuoteFormProps) {
     doc.setTextColor(156, 163, 175); // gray-400
     doc.text('Esta es una cotización informativa y no constituye una póliza activa.', 110, footerY + 5);
     doc.text('Sujeta a términos y condiciones generales de la compañía aseguradora.', 110, footerY + 9);
+
+    const shouldAttachBenefits = historicQuote ? (historicQuote.attachBenefits ?? false) : attachBenefits;
+
+    if (shouldAttachBenefits) {
+      // Gather all policy letters available
+      const allLetters = (firestoreLetters && firestoreLetters.length > 0) ? firestoreLetters : policyLetters;
+      const allPoliciesList = (firestorePolicies && firestorePolicies.length > 0) ? firestorePolicies : policies;
+
+      resolvedItems.forEach((item: any) => {
+        // Resolve exact policy object
+        const p = item.policy || allPoliciesList.find((pol: Policy) => pol.id === item.id) || allPoliciesList.find((pol: Policy) => pol.name === item.name && pol.plan === item.plan) || item;
+
+        // Use getAvailableLettersForInsurance for exact, robust matching
+        const availableLetters = getAvailableLettersForInsurance(
+          {
+            policyId: p.id,
+            policyNumber: p.CodigoPoliza || p.policyNumber,
+            policyName: p.name || p.NombrePoliza,
+            plan: p.plan,
+            deductible: p.deductible,
+            region: p.region
+          } as any,
+          allLetters,
+          allPoliciesList
+        );
+
+        // Find Spanish 'es' letter first, fallback to 'policy' letter, or first available
+        let matchedLetter = availableLetters.find(l => l.language === 'es') ||
+                            availableLetters.find(l => l.language === 'policy') ||
+                            availableLetters.find(l => l.language === 'es_spain') ||
+                            availableLetters[0];
+
+        // Fallback to direct search if not matched
+        if (!matchedLetter) {
+          matchedLetter = allLetters.find(l => 
+            (l.language === 'es' || l.language === 'policy') && (
+              l.policyId === p.id || 
+              (p.CodigoPoliza && l.policyId === p.CodigoPoliza) ||
+              l.policyId === p.name
+            )
+          );
+        }
+
+        const fallbackLetter = allLetters.find(l => 
+          l.language === 'policy' && (
+            l.policyId === p.id || 
+            (p.CodigoPoliza && l.policyId === p.CodigoPoliza) ||
+            l.policyId === p.name
+          )
+        );
+
+        if (matchedLetter) {
+          // Get benefits from current letter, or fallback to 'policy' letter benefits if empty
+          const benefitsList = (matchedLetter.benefits && matchedLetter.benefits.length > 0)
+            ? matchedLetter.benefits
+            : (fallbackLetter?.benefits || []);
+
+          doc.addPage();
+          
+          // Draw a beautiful header on the new page
+          doc.setFillColor(243, 244, 246); // gray-100
+          doc.rect(0, 0, 210, 42, 'F');
+          
+          if (logoData) {
+            const ratio = logoData.width / logoData.height;
+            const renderHeight = 22;
+            const renderWidth = renderHeight * ratio;
+            doc.addImage(logoData.url, 'PNG', 14, (42 - renderHeight) / 2, renderWidth, renderHeight);
+            
+            const textX = 14 + renderWidth + 6;
+            doc.setTextColor(26, 60, 114); // Primary blue
+            doc.setFont('helvetica', 'bold');
+            doc.setFontSize(14);
+            doc.text('MI SEGURO INTERNACIONAL', textX, 21);
+            doc.setFontSize(9);
+            doc.setFont('helvetica', 'normal');
+            doc.setTextColor(107, 114, 128); // gray-500
+            doc.text(`Características del Seguro / Schedule of Benefits - ${p.name || ''} (${p.plan || ''})`, textX, 28);
+          } else {
+            drawPdfLogo(doc, 14, 12);
+            doc.setTextColor(26, 60, 114); // Primary blue
+            doc.setFont('helvetica', 'bold');
+            doc.setFontSize(14);
+            doc.text('MI SEGURO INTERNACIONAL', 34, 21);
+            doc.setFontSize(9);
+            doc.setFont('helvetica', 'normal');
+            doc.setTextColor(107, 114, 128); // gray-500
+            doc.text(`Características del Seguro / Schedule of Benefits - ${p.name || ''} (${p.plan || ''})`, 34, 28);
+          }
+          
+          // Line separator
+          doc.setDrawColor(26, 60, 114);
+          doc.setLineWidth(1);
+          doc.line(14, 42, 196, 42);
+          
+          let cleanedContent = matchedLetter.content || '';
+          cleanedContent = cleanedContent
+            .replace(/{nombre_completo}/gi, '____________________')
+            .replace(/{nombre}/gi, '____________________')
+            .replace(/{name}/gi, '____________________')
+            .replace(/{apellidos}/gi, '____________________')
+            .replace(/{apellido}/gi, '____________________')
+            .replace(/{pasaporte}/gi, '____________________')
+            .replace(/{passport}/gi, '____________________')
+            .replace(/{fecha_nacimiento}/gi, '____________________')
+            .replace(/{dob}/gi, '____________________')
+            .replace(/{date_of_birth}/gi, '____________________')
+            .replace(/{pais}/gi, 'País Destino / Destination Country')
+            .replace(/{country}/gi, 'País Destino / Destination Country')
+            .replace(/{destino}/gi, 'País Destino / Destination Country')
+            .replace(/{destination}/gi, 'País Destino / Destination Country')
+            .replace(/{fechas}/gi, 'Período del Viaje / Trip Dates')
+            .replace(/{dates}/gi, 'Período del Viaje / Trip Dates')
+            .replace(/{fecha_inicio}/gi, 'Fecha Inicio / Start Date')
+            .replace(/{start_date}/gi, 'Fecha Inicio / Start Date')
+            .replace(/{fecha_fin}/gi, 'Fecha Fin / End Date')
+            .replace(/{end_date}/gi, 'Fecha Fin / End Date')
+            .replace(/{dias}/gi, 'Días de Viaje / Trip Days')
+            .replace(/{days}/gi, 'Días de Viaje / Trip Days')
+            .replace(/{duracion}/gi, 'Días de Viaje / Trip Days')
+            .replace(/{duration}/gi, 'Días de Viaje / Trip Days')
+            .replace(/{policy}/gi, 'Número de Póliza / Policy Number')
+            .replace(/{poliza}/gi, 'Número de Póliza / Policy Number')
+            .replace(/{email}/gi, '____________________')
+            .replace(/{telefono}/gi, '____________________')
+            .replace(/{phone}/gi, '____________________')
+            .replace(/{agente}/gi, '____________________')
+            .replace(/{agent}/gi, '____________________')
+            .replace(/{plan}/gi, p.plan || '');
+
+          doc.setFontSize(9);
+          doc.setFont('helvetica', 'bold');
+          doc.setTextColor(26, 60, 114);
+          doc.text((matchedLetter.title || 'INFORMACIÓN DE COBERTURA / INSURANCE CONFIRMATION').toUpperCase(), 14, 52);
+          
+          doc.setFont('helvetica', 'normal');
+          doc.setFontSize(8);
+          doc.setTextColor(55, 65, 81);
+          const splitText = doc.splitTextToSize(cleanedContent, 182);
+          doc.text(splitText, 14, 58);
+          
+          const textHeight = splitText.length * 4;
+          const tableStartY = 58 + textHeight + 6;
+          
+          if (benefitsList && benefitsList.length > 0) {
+            doc.setFontSize(9);
+            doc.setFont('helvetica', 'bold');
+            doc.setTextColor(26, 60, 114);
+            doc.text('TABLA DE BENEFICIOS / SCHEDULE OF BENEFITS', 14, tableStartY);
+
+            const body = benefitsList.map((b: any) => [b.label, b.value]);
+            
+            autoTable(doc, {
+              startY: tableStartY + 3,
+              margin: { left: 14, right: 14 },
+              styles: { 
+                fontSize: 7.0, 
+                cellPadding: 1.2, 
+                minCellHeight: 3.5,
+                textColor: [51, 65, 85], // slate-700
+                lineColor: [241, 245, 249], // slate-100 table lines
+                lineWidth: 0.1 
+              },
+              columnStyles: { 
+                0: { cellWidth: 125 }, 
+                1: { cellWidth: 57, halign: 'right', fontStyle: 'bold', textColor: [15, 23, 42] } 
+              },
+              body: body,
+              theme: 'striped',
+              alternateRowStyles: {
+                fillColor: [248, 250, 252] // slate-50 subtle stripes
+              },
+              didParseCell: (data) => {
+                if (data.section === 'body') {
+                  const b = benefitsList[data.row.index];
+                  if (b.isBold) {
+                    data.cell.styles.fontStyle = 'bold';
+                    data.cell.styles.textColor = [15, 23, 42]; // slate-900
+                  }
+                  const shadedLabels = [
+                    'Travel Health Insurance (HA)',
+                    'Travel Accident Insurance (I)',
+                    'Travel Assistance (T)',
+                    'Travel Luggage Insurance (L)',
+                    'Travel Third Party Liability Insurance (3)'
+                  ];
+                  if (shadedLabels.some(s => b.label.includes(s))) {
+                    data.cell.styles.fillColor = [219, 234, 254]; // blue-100 highlight banner
+                    data.cell.styles.fontStyle = 'bold';
+                    data.cell.styles.textColor = [30, 58, 138]; // blue-900
+                  }
+                }
+              }
+            });
+          }
+          
+          // Page number / footer on benefits pages
+          const pFY = 265;
+          doc.setDrawColor(220, 220, 220);
+          doc.setLineWidth(0.5);
+          doc.line(14, pFY - 2, 196, pFY - 2);
+          doc.setFontSize(7);
+          doc.setTextColor(150, 150, 150);
+          doc.text('Esta es una descripción resumida de beneficios informativos para fines de cotización.', 14, pFY + 2);
+          doc.text('Mi Seguro Internacional', 196, pFY + 2, { align: 'right' });
+        }
+      });
+    }
 
     return doc;
   };
@@ -711,10 +1145,12 @@ export default function QuoteForm({ profile }: QuoteFormProps) {
         discountAmount: totals.discountAmount,
         subtotal: totals.subtotal,
         grandTotal: totals.grandTotal,
+        quoteMode: formData.quoteMode,
         agentId: selectedAgent?.uid || profile?.uid || '',
         agentName: selectedAgent?.displayName || profile?.displayName || 'Asesor Comercial',
         agentEmail: selectedAgent?.email || profile?.email || '',
         selectedPolicies: selectedPoliciesData,
+        attachBenefits: attachBenefits,
         status: status,
         createdAt: new Date().toISOString()
       };
@@ -778,7 +1214,8 @@ export default function QuoteForm({ profile }: QuoteFormProps) {
       destinationCountry: quote.destinationCountry || 'US',
       notes: quote.notes || '',
       discountType: quote.discountType || 'percent',
-      discountValue: quote.discountValue || 0
+      discountValue: quote.discountValue || 0,
+      quoteMode: quote.quoteMode || 'compare'
     });
     
     if (quote.selectedPolicies) {
@@ -811,13 +1248,31 @@ export default function QuoteForm({ profile }: QuoteFormProps) {
       const docPdf = await buildPdfDocument();
       const pdfBase64 = docPdf.output('datauristring').split(',')[1];
 
+      const optionsDetails = totals.items.map((item, index) => {
+        const p = item.policy;
+        const ageRange = getAgeRangeForPlan(p.plan, insuranceTypes);
+        const deductibleStr = p.deductible ? 'Con deducible' : 'Sin deducible';
+        const label = formData.quoteMode === 'compare' ? `Opción ${index + 1}` : `Póliza ${index + 1}`;
+        return `${label}: ${p.name}\n` +
+               `  • Plan: ${p.plan}\n` +
+               `  • Rango de Edades: ${ageRange}\n` +
+               `  • Cobertura: ${deductibleStr}\n` +
+               `  • Precio: $${item.price.toFixed(2)} USD`;
+      }).join('\n\n');
+
+      const summaryNote = formData.quoteMode === 'compare'
+        ? `* Nota: Los precios anteriores se presentan como alternativas independientes para que elijas la opción que mejor se adapte a tus necesidades.`
+        : `* Total del Paquete Cotizado: $${totals.grandTotal.toFixed(2)} USD (Suma de las ${totals.items.length} pólizas seleccionadas).`;
+
       const mailBody = `Hola ${formData.firstName},\n\n` +
         `Es un placer saludarte. Adjunto a este correo encontrarás la cotización para tu seguro de viaje internacional.\n\n` +
         `Detalles de tu viaje:\n` +
         `- Duración: ${days} días\n` +
-        `- Destino: ${COUNTRIES.find(c => c.code === formData.destinationCountry)?.name || formData.destinationCountry}\n` +
-        `- Total: $${totals.grandTotal.toFixed(2)} USD\n\n` +
-        (formData.notes ? `Nota: ${formData.notes}\n\n` : '') +
+        `- Destino: ${getCountryName(formData.destinationCountry)}\n\n` +
+        `${formData.quoteMode === 'compare' ? 'Opciones Cotizadas a Elegir:' : 'Pólizas Cotizadas:'}\n` +
+        `${optionsDetails}\n\n` +
+        `${summaryNote}\n\n` +
+        (formData.notes ? `Observaciones: ${formData.notes}\n\n` : '') +
         `Si tienes alguna duda o deseas proceder con la contratación, por favor no dudes en contactarme.\n\n` +
         `Atentamente,\n` +
         `${selectedAgent?.displayName || 'Asesor Comercial'}\n` +
@@ -952,6 +1407,7 @@ export default function QuoteForm({ profile }: QuoteFormProps) {
                     onChange={handleInputChange}
                     placeholder="cliente@ejemplo.com"
                     className="pl-11 w-full bg-gray-50 border border-gray-200 rounded-2xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all font-bold"
+                    required
                   />
                 </div>
               </div>
@@ -969,26 +1425,6 @@ export default function QuoteForm({ profile }: QuoteFormProps) {
                     className="pl-11 w-full bg-gray-50 border border-gray-200 rounded-2xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all font-bold"
                   />
                 </div>
-              </div>
-
-              <div>
-                <label className="block text-xs font-black text-gray-700 uppercase tracking-wide mb-2">Fecha Nacimiento</label>
-                <div className="relative">
-                  <Calendar className="absolute left-4 top-3.5 w-4 h-4 text-gray-400" />
-                  <input
-                    type="date"
-                    name="birthDate"
-                    value={formData.birthDate}
-                    onChange={handleInputChange}
-                    className="pl-11 w-full bg-gray-50 border border-gray-200 rounded-2xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all font-bold"
-                  />
-                </div>
-                {age !== null && (
-                  <p className="text-xs text-blue-600 font-bold mt-1.5 flex items-center gap-1">
-                    <Info className="w-3.5 h-3.5" />
-                    Edad calculada: {age} años (Categoría: {calculatedPlanType === 'U6' ? 'Menor de 6 años' : calculatedPlanType === 'Student' ? 'Estudiante' : calculatedPlanType === 'Traveler' ? 'Viajero' : 'Mayor de 70 años'})
-                  </p>
-                )}
               </div>
 
               <div>
@@ -1034,7 +1470,7 @@ export default function QuoteForm({ profile }: QuoteFormProps) {
                     onChange={handleInputChange}
                     className="pl-11 w-full bg-gray-50 border border-gray-200 rounded-2xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all font-bold appearance-none"
                   >
-                    {COUNTRIES.map(c => (
+                    {allCountries.map(c => (
                       <option key={c.code} value={c.code}>{c.name}</option>
                     ))}
                   </select>
@@ -1052,7 +1488,7 @@ export default function QuoteForm({ profile }: QuoteFormProps) {
                     onChange={handleInputChange}
                     className="pl-11 w-full bg-gray-50 border border-gray-200 rounded-2xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all font-bold appearance-none"
                   >
-                    {COUNTRIES.map(c => (
+                    {allCountries.map(c => (
                       <option key={c.code} value={c.code}>{c.name}</option>
                     ))}
                   </select>
@@ -1098,9 +1534,11 @@ export default function QuoteForm({ profile }: QuoteFormProps) {
                   <p className="text-xs font-black text-indigo-800 uppercase tracking-wider mb-0.5">Duración Calculada</p>
                   <p className="text-lg font-black text-indigo-900">{days} días en total</p>
                 </div>
-                {months > 0 && (
+                {(durationBreakdown.billedMonths > 0 || durationBreakdown.billedDays > 0) && (
                   <div className="bg-indigo-600/10 text-indigo-700 font-bold text-xs px-3 py-1.5 rounded-xl border border-indigo-200">
-                    Cálculo Mensual: {months} {months === 1 ? 'Mes' : 'Meses'}
+                    Cálculo: {durationBreakdown.billedMonths > 0 ? `${durationBreakdown.billedMonths} ${durationBreakdown.billedMonths === 1 ? 'Mes' : 'Meses'}` : ''}
+                    {durationBreakdown.billedMonths > 0 && durationBreakdown.billedDays > 0 ? ' + ' : ''}
+                    {durationBreakdown.billedDays > 0 ? `${durationBreakdown.billedDays} ${durationBreakdown.billedDays === 1 ? 'Día' : 'Días'}` : ''}
                   </div>
                 )}
               </div>
@@ -1114,6 +1552,51 @@ export default function QuoteForm({ profile }: QuoteFormProps) {
 
           {/* Insurance Selector Grid */}
           <div className="bg-white rounded-3xl p-6 sm:p-8 border border-gray-100 shadow-md">
+            {/* Modalidad de Cotización: Comparar vs Sumar */}
+            <div className="mb-6 p-4 rounded-2xl bg-gradient-to-r from-blue-50/80 to-indigo-50/80 border border-blue-100/80">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div>
+                  <h3 className="text-xs font-black text-blue-950 uppercase tracking-wider flex items-center gap-1.5">
+                    <span>Modalidad de Cotización</span>
+                  </h3>
+                  <p className="text-xs text-blue-700 font-medium mt-0.5">
+                    ¿Deseas presentar las pólizas como opciones independientes a elegir o sumarlas en un total conjunto?
+                  </p>
+                </div>
+                <div className="flex items-center gap-1 bg-white/90 p-1 rounded-xl border border-blue-200/80 shadow-sm shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setFormData(prev => ({ ...prev, quoteMode: 'compare' }))}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-extrabold transition-all ${
+                      formData.quoteMode === 'compare'
+                        ? 'bg-blue-600 text-white shadow-sm'
+                        : 'text-blue-900 hover:bg-blue-50'
+                    }`}
+                  >
+                    Opciones / Comparativa
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setFormData(prev => ({ ...prev, quoteMode: 'sum' }))}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-extrabold transition-all ${
+                      formData.quoteMode === 'sum'
+                        ? 'bg-indigo-600 text-white shadow-sm'
+                        : 'text-indigo-900 hover:bg-indigo-50'
+                    }`}
+                  >
+                    Sumar Paquete
+                  </button>
+                </div>
+              </div>
+              <div className="mt-2 text-[11px] text-blue-800 font-semibold bg-white/60 px-3 py-1.5 rounded-lg">
+                {formData.quoteMode === 'compare' ? (
+                  <span>💡 <strong>Modo Opciones:</strong> Cada póliza muestra su propio precio unitario en el PDF y correo para que el cliente elija una. No se suman.</span>
+                ) : (
+                  <span>📦 <strong>Modo Sumar Paquete:</strong> Se calcula y muestra la suma total acumulada de todas las pólizas seleccionadas.</span>
+                )}
+              </div>
+            </div>
+
             <div className="border-b border-gray-100 pb-4 mb-6 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <h2 className="text-lg font-black text-gray-900 flex items-center gap-2">
                 <CheckCircle2 className="w-5 h-5 text-emerald-600" />
@@ -1186,7 +1669,7 @@ export default function QuoteForm({ profile }: QuoteFormProps) {
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {sortedPoliciesList.map((p) => {
                   const isSelected = selectedPolicyIds.includes(p.id);
-                  const isRecommended = p.plan === calculatedPlanType && p.region === destinationRegion;
+                  const isRecommended = isPolicyRecommendedForAge(p, age, insuranceTypes) && p.region === destinationRegion;
                   const calculatedPrice = calculatePolicyPrice(p);
 
                   return (
@@ -1215,7 +1698,7 @@ export default function QuoteForm({ profile }: QuoteFormProps) {
                             )}
                           </div>
                           <span className="text-[10px] bg-gray-100 text-gray-500 border border-gray-200 font-extrabold px-2 py-0.5 rounded-md mt-1.5 inline-block">
-                            Plan: {p.plan} • {p.deductible ? 'Con deducible' : 'Sin deducible'} • Zona {p.region}
+                            Plan: {p.plan} • Edades: {getAgeRangeForPlan(p.plan, insuranceTypes)} • {p.deductible ? 'Con deducible' : 'Sin deducible'} • Zona {p.region}
                           </span>
                         </div>
                         <input
@@ -1231,10 +1714,18 @@ export default function QuoteForm({ profile }: QuoteFormProps) {
                         <div>
                           <span className="text-[10px] text-gray-400 font-bold block uppercase tracking-wider">Tarifa base</span>
                           <span className="text-xs text-gray-600 font-black">
-                            {days <= 39 
-                              ? `$${p.pricePerDay.toFixed(2)} / día` 
-                              : `$${(p.pricePerMonth || p.pricePerDay * 30).toFixed(2)} / mes`
-                            }
+                            {durationBreakdown.billedMonths === 0 ? (
+                              `$${p.pricePerDay.toFixed(2)} / día`
+                            ) : (
+                              <>
+                                <span>${(p.pricePerMonth || p.pricePerDay * 30).toFixed(2)} / mes</span>
+                                {durationBreakdown.billedDays > 0 && (
+                                  <span className="text-[10px] text-gray-500 font-semibold block">
+                                    + ${p.pricePerDay.toFixed(2)}/día ({durationBreakdown.billedDays} {durationBreakdown.billedDays === 1 ? 'día' : 'días'})
+                                  </span>
+                                )}
+                              </>
+                            )}
                           </span>
                         </div>
                         <div className="text-right">
@@ -1333,27 +1824,117 @@ export default function QuoteForm({ profile }: QuoteFormProps) {
               <span>Resumen de Costos</span>
             </h2>
 
+            {/* Selected policies list */}
+            {totals.items.length > 0 && (
+              <div className="border-b border-gray-800 pb-4 mb-4 max-h-48 overflow-y-auto space-y-2 pr-1 custom-scrollbar">
+                <p className="text-[10px] text-gray-500 font-bold uppercase tracking-wider mb-2">Planes Seleccionados</p>
+                {totals.items.map(({ policy, price }) => (
+                  <div key={policy.id} className="flex justify-between items-start text-xs bg-gray-800/40 border border-gray-800/60 p-2 rounded-xl">
+                    <div className="flex-1 min-w-0 mr-2">
+                      <p className="font-extrabold text-gray-200 truncate">{policy.name}</p>
+                      <p className="text-[10px] text-gray-400 font-medium">
+                        Plan: {policy.plan} • Edades: {getAgeRangeForPlan(policy.plan, insuranceTypes)}
+                      </p>
+                    </div>
+                    <div className="text-right flex-shrink-0">
+                      <p className="font-extrabold text-emerald-400">${price.toFixed(2)}</p>
+                      <p className="text-[9px] text-gray-500">USD</p>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
             <div className="space-y-4">
-              <div className="flex items-center justify-between text-sm">
-                <span className="text-gray-400 font-bold">Subtotal ({selectedPolicyIds.length} planes)</span>
-                <span className="font-extrabold text-gray-100">${totals.subtotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD</span>
-              </div>
+              {formData.quoteMode === 'compare' ? (
+                <>
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-gray-400 font-bold">Planes cotizados</span>
+                    <span className="font-extrabold text-blue-400">{selectedPolicyIds.length} opciones independientes</span>
+                  </div>
 
-              <div className="flex items-center justify-between text-sm">
-                <span className="text-gray-400 font-bold">Descuento aplicado</span>
-                <span className="font-extrabold text-amber-400">-${totals.discountAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD</span>
-              </div>
+                  {formData.discountValue > 0 && (
+                    <div className="flex items-center justify-between text-sm">
+                      <span className="text-gray-400 font-bold">Descuento aplicado</span>
+                      <span className="font-extrabold text-amber-400">
+                        {formData.discountType === 'percent' ? `${formData.discountValue}% a c/u` : `-$${totals.discountAmount.toFixed(2)} USD`}
+                      </span>
+                    </div>
+                  )}
 
-              <div className="border-t border-gray-800 pt-4 flex items-end justify-between">
-                <div>
-                  <span className="text-xs text-gray-400 font-black uppercase tracking-wider block">Total Neto</span>
-                  <span className="text-gray-400 text-[10px] font-medium block">Válido en Dólares (USD)</span>
-                </div>
-                <div className="text-right">
-                  <span className="text-3xl font-black text-emerald-400">${totals.grandTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
-                  <span className="text-xs font-black text-emerald-400 ml-1">USD</span>
-                </div>
-              </div>
+                  {/* Opción de adjuntar características */}
+                  <div className="flex items-start gap-2.5 border-t border-gray-800 pt-4">
+                    <input
+                      type="checkbox"
+                      id="attachBenefits"
+                      checked={attachBenefits}
+                      onChange={(e) => setAttachBenefits(e.target.checked)}
+                      className="mt-0.5 w-4 h-4 text-emerald-500 bg-gray-800 border-gray-700 rounded focus:ring-emerald-500 focus:ring-offset-gray-900 focus:outline-none"
+                    />
+                    <label htmlFor="attachBenefits" className="text-xs text-gray-300 font-bold leading-normal cursor-pointer select-none">
+                      Adjuntar características de los seguros (Schedule of Benefits)
+                    </label>
+                  </div>
+
+                  <div className="border-t border-gray-800 pt-4 flex items-end justify-between">
+                    <div>
+                      <span className="text-xs text-gray-400 font-black uppercase tracking-wider block">Rango de Precios</span>
+                      <span className="text-gray-400 text-[10px] font-medium block">Precios unitarios por plan</span>
+                    </div>
+                    <div className="text-right">
+                      {totals.items.length > 0 ? (
+                        <div>
+                          <span className="text-2xl font-black text-emerald-400">
+                            {Math.min(...totals.items.map(i => i.price)) === Math.max(...totals.items.map(i => i.price))
+                              ? `$${Math.min(...totals.items.map(i => i.price)).toFixed(2)}`
+                              : `$${Math.min(...totals.items.map(i => i.price)).toFixed(2)} - $${Math.max(...totals.items.map(i => i.price)).toFixed(2)}`}
+                          </span>
+                          <span className="text-xs font-black text-emerald-400 ml-1">USD</span>
+                        </div>
+                      ) : (
+                        <span className="text-2xl font-black text-gray-500">$0.00</span>
+                      )}
+                    </div>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-gray-400 font-bold">Subtotal ({selectedPolicyIds.length} planes)</span>
+                    <span className="font-extrabold text-gray-100">${totals.subtotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD</span>
+                  </div>
+
+                  <div className="flex items-center justify-between text-sm">
+                    <span className="text-gray-400 font-bold">Descuento aplicado</span>
+                    <span className="font-extrabold text-amber-400">-${totals.discountAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD</span>
+                  </div>
+
+                  {/* Opción de adjuntar características */}
+                  <div className="flex items-start gap-2.5 border-t border-gray-800 pt-4">
+                    <input
+                      type="checkbox"
+                      id="attachBenefits"
+                      checked={attachBenefits}
+                      onChange={(e) => setAttachBenefits(e.target.checked)}
+                      className="mt-0.5 w-4 h-4 text-emerald-500 bg-gray-800 border-gray-700 rounded focus:ring-emerald-500 focus:ring-offset-gray-900 focus:outline-none"
+                    />
+                    <label htmlFor="attachBenefits" className="text-xs text-gray-300 font-bold leading-normal cursor-pointer select-none">
+                      Adjuntar características de los seguros (Schedule of Benefits)
+                    </label>
+                  </div>
+
+                  <div className="border-t border-gray-800 pt-4 flex items-end justify-between">
+                    <div>
+                      <span className="text-xs text-gray-400 font-black uppercase tracking-wider block">Total Neto (Paquete)</span>
+                      <span className="text-gray-400 text-[10px] font-medium block">Suma de todos los seguros</span>
+                    </div>
+                    <div className="text-right">
+                      <span className="text-3xl font-black text-emerald-400">${totals.grandTotal.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                      <span className="text-xs font-black text-emerald-400 ml-1">USD</span>
+                    </div>
+                  </div>
+                </>
+              )}
             </div>
 
             {/* Action Buttons */}
@@ -1512,11 +2093,11 @@ export default function QuoteForm({ profile }: QuoteFormProps) {
               <tbody className="divide-y divide-gray-100 text-xs font-bold text-gray-700 bg-white">
                 {filteredQuotesHistory.map((quote) => {
                   const formattedDate = quote.createdAt 
-                    ? format(parseISO(quote.createdAt), 'dd/MM/yyyy HH:mm')
+                    ? formatDisplayDate(quote.createdAt)
                     : 'N/A';
                   
-                  const originName = COUNTRIES.find(c => c.code === quote.originCountry)?.name || quote.originCountry;
-                  const destName = COUNTRIES.find(c => c.code === quote.destinationCountry)?.name || quote.destinationCountry;
+                  const originName = getCountryName(quote.originCountry);
+                  const destName = getCountryName(quote.destinationCountry);
 
                   return (
                     <tr key={quote.id} className="hover:bg-gray-50/40 transition-colors">
@@ -1545,7 +2126,7 @@ export default function QuoteForm({ profile }: QuoteFormProps) {
                       <td className="px-6 py-4 whitespace-nowrap">
                         <div>{quote.days} días</div>
                         <div className="text-[10px] text-gray-400 font-medium mt-0.5">
-                          {quote.startDate && format(parseISO(quote.startDate), 'dd/MM/yyyy')} - {quote.endDate && format(parseISO(quote.endDate), 'dd/MM/yyyy')}
+                          {quote.startDate && formatDisplayDate(quote.startDate)} - {quote.endDate && formatDisplayDate(quote.endDate)}
                         </div>
                       </td>
                       <td className="px-6 py-4 max-w-xs">

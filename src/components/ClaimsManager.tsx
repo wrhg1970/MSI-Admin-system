@@ -17,7 +17,8 @@ import {
   InsuranceRequest, 
   UserProfile, 
   CustomRole,
-  ClaimDocument
+  ClaimDocument,
+  Policy
 } from '../types';
 import { 
   AlertCircle, 
@@ -26,6 +27,7 @@ import {
   Calendar, 
   User, 
   ChevronRight, 
+  ChevronDown,
   FileText, 
   MessageSquare, 
   Clock, 
@@ -43,10 +45,18 @@ import {
   Mail,
   Trash2,
   CheckCircle,
+  FolderCheck,
+  UploadCloud,
+  Download,
+  Loader2,
+  Paperclip,
 } from 'lucide-react';
 import { format } from 'date-fns';
 import { es } from 'date-fns/locale';
 import ConfirmModal from './ConfirmModal';
+import ClaimEmailModal from './ClaimEmailModal';
+import { getNormalizedYYYYMMDD } from '../lib/policyUtils';
+import { useCompany } from '../App';
 
 interface ClaimsManagerProps {
   profile: UserProfile | null;
@@ -54,6 +64,9 @@ interface ClaimsManagerProps {
 }
 
 export default function ClaimsManager({ profile, rolePermissions }: ClaimsManagerProps) {
+  const { settings: companySettings } = useCompany();
+  const [policies, setPolicies] = useState<Policy[]>([]);
+  const [isEmailModalOpen, setIsEmailModalOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<'claims' | 'dashboard'>('claims');
   const [modalTab, setModalTab] = useState<'details' | 'activity'>('details');
   const [claims, setClaims] = useState<Claim[]>([]);
@@ -64,14 +77,21 @@ export default function ClaimsManager({ profile, rolePermissions }: ClaimsManage
   const [showModal, setShowModal] = useState(false);
   const [selectedClaim, setSelectedClaim] = useState<Claim | null>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [insuredSearchQuery, setInsuredSearchQuery] = useState('');
+  const [isInsuredSearchOpen, setIsInsuredSearchOpen] = useState(false);
   
   const [formData, setFormData] = useState<Partial<Claim>>({
     date: format(new Date(), 'yyyy-MM-dd'),
     insuranceId: '',
+    reference: '',
+    claimAmount: undefined,
     description: '',
     documents: [],
     sentToInsurerDate: '',
-    insurerResponse: '',
+    insurerResponse: 'Pendiente',
+    resolutionDate: '',
+    resolutionDescription: '',
+    reimbursedAmount: undefined,
     isClosed: false,
     calledCentral: false,
     calledCentralDate: '',
@@ -80,7 +100,9 @@ export default function ClaimsManager({ profile, rolePermissions }: ClaimsManage
     isComplete: false,
     isCompleteDate: '',
     sentToInsurer: false,
-    sentToInsurerDateChecked: ''
+    sentToInsurerDateChecked: '',
+    isExpedienteCompletoConfirmed: false,
+    expedienteCompletoConfirmedAt: ''
   });
 
   const [newActivity, setNewActivity] = useState({
@@ -118,10 +140,19 @@ export default function ClaimsManager({ profile, rolePermissions }: ClaimsManage
       (error) => handleFirestoreError(error, OperationType.GET, 'claimActivities')
     );
 
+    const unsubPolicies = onSnapshot(
+      collection(db, 'policies'),
+      (snapshot) => {
+        setPolicies(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Policy)));
+      },
+      (error) => handleFirestoreError(error, OperationType.GET, 'policies')
+    );
+
     return () => {
       unsubClaims();
       unsubInsurances();
       unsubActivities();
+      unsubPolicies();
     };
   }, []);
 
@@ -130,8 +161,14 @@ export default function ClaimsManager({ profile, rolePermissions }: ClaimsManage
     if (!formData.insuranceId || !formData.date) return;
 
     try {
+      const parsedClaimAmount = formData.claimAmount !== undefined && formData.claimAmount !== null && formData.claimAmount !== ('' as any) && !isNaN(Number(formData.claimAmount))
+        ? Number(formData.claimAmount)
+        : null;
+
       const claimData: any = {
         ...formData,
+        reference: formData.reference || '',
+        claimAmount: parsedClaimAmount,
         updatedAt: serverTimestamp(),
       };
 
@@ -185,11 +222,16 @@ export default function ClaimsManager({ profile, rolePermissions }: ClaimsManage
         const cleanClaimData = {
           date: formData.date,
           insuranceId: formData.insuranceId,
+          reference: formData.reference || '',
+          claimAmount: parsedClaimAmount,
           description: formData.description,
           isClosed: false,
           documents: formData.documents || [],
           sentToInsurerDate: formData.sentToInsurerDate || '',
-          insurerResponse: formData.insurerResponse || '',
+          insurerResponse: formData.insurerResponse || 'Pendiente',
+          resolutionDate: formData.resolutionDate || '',
+          resolutionDescription: formData.resolutionDescription || '',
+          reimbursedAmount: formData.reimbursedAmount !== undefined && formData.reimbursedAmount !== null && !isNaN(Number(formData.reimbursedAmount)) ? Number(formData.reimbursedAmount) : null,
           calledCentral: formData.calledCentral || false,
           calledCentralDate: formData.calledCentralDate || '',
           docsDelivered: formData.docsDelivered || false,
@@ -198,6 +240,8 @@ export default function ClaimsManager({ profile, rolePermissions }: ClaimsManage
           isCompleteDate: formData.isCompleteDate || '',
           sentToInsurer: formData.sentToInsurer || false,
           sentToInsurerDateChecked: formData.sentToInsurerDateChecked || '',
+          isExpedienteCompletoConfirmed: formData.isExpedienteCompletoConfirmed || false,
+          expedienteCompletoConfirmedAt: formData.expedienteCompletoConfirmedAt || '',
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
           createdBy: profile?.email || profile?.uid
@@ -226,10 +270,15 @@ export default function ClaimsManager({ profile, rolePermissions }: ClaimsManage
     setFormData({
       date: format(new Date(), 'yyyy-MM-dd'),
       insuranceId: '',
+      reference: '',
+      claimAmount: undefined,
       description: '',
       documents: [],
       sentToInsurerDate: '',
-      insurerResponse: '',
+      insurerResponse: 'Pendiente',
+      resolutionDate: '',
+      resolutionDescription: '',
+      reimbursedAmount: undefined,
       isClosed: false,
       calledCentral: false,
       calledCentralDate: '',
@@ -238,10 +287,14 @@ export default function ClaimsManager({ profile, rolePermissions }: ClaimsManage
       isComplete: false,
       isCompleteDate: '',
       sentToInsurer: false,
-      sentToInsurerDateChecked: ''
+      sentToInsurerDateChecked: '',
+      isExpedienteCompletoConfirmed: false,
+      expedienteCompletoConfirmedAt: ''
     });
     setSelectedClaim(null);
     setModalTab('details');
+    setInsuredSearchQuery('');
+    setIsInsuredSearchOpen(false);
   };
 
   const handleDeleteClaim = async () => {
@@ -274,45 +327,174 @@ export default function ClaimsManager({ profile, rolePermissions }: ClaimsManage
     }
   };
 
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  const [isDragging, setIsDragging] = useState(false);
+  const [uploadingStatus, setUploadingStatus] = useState<string | null>(null);
 
-    // Check file size (approx 500KB limit to be safe given other fields in doc)
-    if (file.size > 500 * 1024) {
-      alert('El archivo es demasiado grande. Por favor suba archivos menores a 500KB para evitar límites de almacenamiento de la base de datos.');
+  // Compress image using HTML canvas if file is image
+  const compressImage = (file: File, maxWidth = 1600, maxHeight = 1600, quality = 0.82): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.readAsDataURL(file);
+      reader.onload = (e) => {
+        const img = new Image();
+        img.src = e.target?.result as string;
+        img.onload = () => {
+          let width = img.width;
+          let height = img.height;
+
+          if (width > maxWidth || height > maxHeight) {
+            if (width > height) {
+              height = Math.round((height * maxWidth) / width);
+              width = maxWidth;
+            } else {
+              width = Math.round((width * maxHeight) / height);
+              height = maxHeight;
+            }
+          }
+
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            resolve(e.target?.result as string);
+            return;
+          }
+          ctx.drawImage(img, 0, 0, width, height);
+          const compressedDataUrl = canvas.toDataURL('image/jpeg', quality);
+          resolve(compressedDataUrl);
+        };
+        img.onerror = () => resolve(e.target?.result as string);
+      };
+      reader.onerror = (err) => reject(err);
+    });
+  };
+
+  const readFileAsDataUrl = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (e) => resolve(e.target?.result as string);
+      reader.onerror = (err) => reject(err);
+      reader.readAsDataURL(file);
+    });
+  };
+
+  const processFiles = async (files: File[]) => {
+    if (!files || files.length === 0) return;
+
+    if (formData.isClosed && !isSuperAdmin) {
+      alert('El siniestro está cerrado. No se pueden adjuntar más documentos.');
       return;
     }
 
-    const reader = new FileReader();
-    reader.onload = async (event) => {
-      const newDoc: ClaimDocument = {
-        id: Math.random().toString(36).substr(2, 9),
-        name: file.name,
-        url: event.target?.result as string,
-        description: '',
-        date: format(new Date(), 'yyyy-MM-dd HH:mm')
-      };
-      
-      const updatedDocs = [...(formData.documents || []), newDoc];
+    setUploadingStatus(`Cargando ${files.length} archivo(s)...`);
+    const newDocs: ClaimDocument[] = [];
+    const uploadedNames: string[] = [];
+
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      setUploadingStatus(`Procesando ${i + 1} de ${files.length}: ${file.name}`);
+
+      try {
+        let dataUrl = '';
+        if (file.type.startsWith('image/')) {
+          dataUrl = await compressImage(file);
+        } else {
+          if (file.size > 2 * 1024 * 1024) {
+            alert(`El archivo "${file.name}" supera 2 MB (${(file.size / (1024 * 1024)).toFixed(1)} MB). Te recomendamos usar archivos comprimidos para asegurar un rápido rendimiento.`);
+          }
+          dataUrl = await readFileAsDataUrl(file);
+        }
+
+        newDocs.push({
+          id: Math.random().toString(36).substr(2, 9),
+          name: file.name,
+          url: dataUrl,
+          description: '',
+          date: format(new Date(), 'yyyy-MM-dd HH:mm')
+        });
+        uploadedNames.push(file.name);
+      } catch (err) {
+        console.error(`Error procesando archivo ${file.name}:`, err);
+      }
+    }
+
+    if (newDocs.length > 0) {
       setFormData(prev => ({
         ...prev,
-        documents: updatedDocs
+        documents: [...(prev.documents || []), ...newDocs]
       }));
 
-      // If we are editing an existing claim, log it right away
+      // If editing an existing claim, log activity right away
       if (selectedClaim?.id) {
         await addDoc(collection(db, 'claimActivities'), {
           claimId: selectedClaim.id,
           type: 'automatic',
-          description: `📤 Documento cargado: ${file.name}`,
+          description: `📤 ${newDocs.length} documento(s) cargado(s): ${uploadedNames.join(', ')}`,
           date: new Date(),
           createdBy: profile?.email || profile?.uid,
           createdAt: serverTimestamp()
-        });
+        }).catch(console.error);
       }
-    };
-    reader.readAsDataURL(file);
+    }
+
+    setUploadingStatus(null);
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!isDragging) setIsDragging(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+  };
+
+  const handleDrop = async (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      const filesArray = Array.from(e.dataTransfer.files);
+      await processFiles(filesArray);
+    }
+  };
+
+  const handleFileInputChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files && e.target.files.length > 0) {
+      const filesArray = Array.from(e.target.files);
+      await processFiles(filesArray);
+      e.target.value = ''; // Reset input
+    }
+  };
+
+  const getFileTypeBadge = (fileName: string) => {
+    const ext = fileName.split('.').pop()?.toLowerCase() || '';
+    if (['pdf'].includes(ext)) {
+      return { label: 'PDF', bg: 'bg-red-50 text-red-700 border-red-200' };
+    } else if (['jpg', 'jpeg', 'png', 'webp', 'gif'].includes(ext)) {
+      return { label: ext.toUpperCase(), bg: 'bg-blue-50 text-blue-700 border-blue-200' };
+    } else if (['doc', 'docx', 'txt'].includes(ext)) {
+      return { label: ext.toUpperCase(), bg: 'bg-indigo-50 text-indigo-700 border-indigo-200' };
+    } else if (['zip', 'rar', '7z'].includes(ext)) {
+      return { label: ext.toUpperCase(), bg: 'bg-amber-50 text-amber-700 border-amber-200' };
+    }
+    return { label: ext.toUpperCase() || 'FILE', bg: 'bg-gray-50 text-gray-700 border-gray-200' };
+  };
+
+  const downloadDocument = (doc: ClaimDocument) => {
+    if (doc.url) {
+      const a = document.createElement('a');
+      a.href = doc.url;
+      a.download = doc.name || 'documento';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+    }
   };
 
   // Dashboard Stats Calculations
@@ -334,11 +516,76 @@ export default function ClaimsManager({ profile, rolePermissions }: ClaimsManage
     }, 0) / (claims.filter(c => !c.isClosed).length || 1)).toFixed(1)
   };
 
+  const getInsuranceDaysInfo = (ins: InsuranceRequest) => {
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    const endYMD = getNormalizedYYYYMMDD(ins.endDate);
+    if (!endYMD) {
+      return { isActive: true, daysSinceEnd: 0, endYMD: '' };
+    }
+
+    const [year, month, day] = endYMD.split('-').map(Number);
+    const endDateObj = new Date(year, month - 1, day);
+    endDateObj.setHours(0, 0, 0, 0);
+
+    if (endDateObj >= today) {
+      return { isActive: true, daysSinceEnd: 0, endYMD };
+    }
+
+    const diffMs = today.getTime() - endDateObj.getTime();
+    const diffDays = Math.floor(diffMs / (1000 * 60 * 60 * 24));
+    return { isActive: false, daysSinceEnd: diffDays, endYMD };
+  };
+
+  const eligibleInsurances = React.useMemo(() => {
+    const list = insurances.filter(ins => {
+      // Always include currently selected insurance if editing an existing claim
+      if (formData.insuranceId && ins.id === formData.insuranceId) {
+        return true;
+      }
+
+      if (ins.status === 'cancelled') {
+        return false;
+      }
+
+      const { isActive, daysSinceEnd } = getInsuranceDaysInfo(ins);
+      return isActive || daysSinceEnd <= 90;
+    });
+
+    return list.sort((a, b) => {
+      const nameA = `${a.firstName || ''} ${a.lastName || ''}`.trim();
+      const nameB = `${b.firstName || ''} ${b.lastName || ''}`.trim();
+      return nameA.localeCompare(nameB, 'es', { sensitivity: 'base' });
+    });
+  }, [insurances, formData.insuranceId]);
+
+  const filteredInsurancesList = React.useMemo(() => {
+    const query = insuredSearchQuery.trim().toLowerCase();
+    if (!query) return eligibleInsurances;
+
+    return eligibleInsurances.filter(ins => {
+      const fullName = `${ins.firstName || ''} ${ins.lastName || ''}`.toLowerCase();
+      const email = (ins.email || '').toLowerCase();
+      const id = (ins.id || '').toLowerCase();
+      const idSeg = (ins.IDseg || '').toLowerCase();
+      const policyNum = (ins.policyNumber || '').toLowerCase();
+      const policyName = (ins.policyName || ins.plan || '').toLowerCase();
+
+      return fullName.includes(query) || 
+             email.includes(query) || 
+             id.includes(query) || 
+             idSeg.includes(query) || 
+             policyNum.includes(query) || 
+             policyName.includes(query);
+    });
+  }, [eligibleInsurances, insuredSearchQuery]);
+
   const selectedInsurance = insurances.find(i => i.id === formData.insuranceId);
 
   const filteredClaims = claims.filter(c => {
     const ins = insurances.find(i => i.id === c.insuranceId);
-    const searchString = `${ins?.firstName} ${ins?.lastName} ${c.description} ${c.id}`.toLowerCase();
+    const searchString = `${ins?.firstName} ${ins?.lastName} ${c.description} ${c.reference || ''} ${c.id}`.toLowerCase();
     return searchString.includes(searchTerm.toLowerCase());
   });
 
@@ -433,11 +680,40 @@ export default function ClaimsManager({ profile, rolePermissions }: ClaimsManage
                     className="bg-white p-6 rounded-2xl border border-gray-100 hover:shadow-xl transition-all cursor-pointer group"
                   >
                     <div className="flex justify-between items-start mb-4">
-                      {getStatusBadge(claim)}
-                      <span className="text-[10px] text-gray-400 font-mono">#{claim.id?.substring(0, 8)}</span>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        {getStatusBadge(claim)}
+                        {claim.insurerResponse && (
+                          <span className={`px-2.5 py-1 rounded-full text-[10px] font-black border ${
+                            claim.insurerResponse === 'Aprobado'
+                              ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                              : claim.insurerResponse === 'Rechazado'
+                              ? 'bg-rose-50 text-rose-700 border-rose-200'
+                              : 'bg-amber-50 text-amber-700 border-amber-200'
+                          }`}>
+                            {claim.insurerResponse === 'Aprobado' ? '✅ Aprobado' : claim.insurerResponse === 'Rechazado' ? '❌ Rechazado' : '⏳ Pendiente'}
+                          </span>
+                        )}
+                      </div>
+                      <span className="text-[10px] text-gray-400 font-mono shrink-0">#{claim.id?.substring(0, 8)}</span>
                     </div>
                     
                     <h3 className="font-bold text-gray-900 mb-1">{ins?.firstName} {ins?.lastName}</h3>
+                    
+                    <div className="space-y-1 mb-3">
+                      {claim.reference && (
+                        <p className="text-xs font-bold text-rose-600 flex items-center gap-1.5">
+                          <span className="text-[10px] text-gray-400 uppercase font-black tracking-wider">Ref (EN):</span>
+                          <span>{claim.reference}</span>
+                        </p>
+                      )}
+                      {claim.claimAmount !== undefined && claim.claimAmount !== null && (
+                        <p className="text-xs font-bold text-emerald-700 flex items-center gap-1.5">
+                          <span className="text-[10px] text-gray-400 uppercase font-black tracking-wider">Reclamo:</span>
+                          <span>${Number(claim.claimAmount).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD</span>
+                        </p>
+                      )}
+                    </div>
+
                     <p className="text-xs text-gray-500 line-clamp-2 mb-4">{claim.description}</p>
                     
                     <div className="flex flex-wrap items-center gap-4 text-[10px] text-gray-400 font-bold uppercase">
@@ -460,9 +736,26 @@ export default function ClaimsManager({ profile, rolePermissions }: ClaimsManage
                       </div>
                     </div>
 
-                    <div className="mt-4 pt-4 border-t border-gray-50 flex items-center justify-between text-rose-600">
-                      <span className="text-xs font-bold">Ver Detalles</span>
-                      <ChevronRight className="w-4 h-4 group-hover:translate-x-1 transition-transform" />
+                    <div className="mt-4 pt-4 border-t border-gray-50 flex items-center justify-between">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setSelectedClaim(claim);
+                          setFormData(claim);
+                          setModalTab('details');
+                          setShowModal(true);
+                        }}
+                        className="px-3 py-1.5 bg-rose-50 text-rose-600 hover:bg-rose-100 rounded-xl text-[10px] font-extrabold flex items-center gap-1.5 transition-colors"
+                      >
+                        <UploadCloud className="w-3.5 h-3.5" />
+                        <span>Adjuntar Archivos</span>
+                      </button>
+
+                      <div className="flex items-center gap-1 text-rose-600 font-bold text-xs group-hover:translate-x-0.5 transition-transform">
+                        <span>Ver Detalles</span>
+                        <ChevronRight className="w-4 h-4" />
+                      </div>
                     </div>
                   </div>
                 );
@@ -615,21 +908,126 @@ export default function ClaimsManager({ profile, rolePermissions }: ClaimsManage
                       </div>
 
                       <div>
-                        <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-2">Asegurado</label>
+                        <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-2">
+                          Asegurado ({eligibleInsurances.length} disponibles)
+                        </label>
                         <div className="relative">
-                          <User className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-rose-600" />
-                          <select
-                            value={formData.insuranceId}
-                            onChange={(e) => setFormData({...formData, insuranceId: e.target.value})}
-                            required
-                            disabled={formData.isClosed && !isSuperAdmin}
-                            className="w-full pl-12 pr-4 py-3 bg-gray-50 border border-gray-100 rounded-2xl focus:ring-2 focus:ring-rose-500 outline-none font-bold appearance-none"
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (formData.isClosed && !isSuperAdmin) return;
+                              setIsInsuredSearchOpen(!isInsuredSearchOpen);
+                            }}
+                            className={`w-full flex items-center justify-between pl-12 pr-4 py-3 bg-gray-50 border border-gray-100 rounded-2xl cursor-pointer hover:bg-gray-100 transition-all text-left font-bold text-sm ${
+                              formData.isClosed && !isSuperAdmin ? 'opacity-60 cursor-not-allowed' : ''
+                            }`}
                           >
-                            <option value="">Seleccionar Póliza...</option>
-                            {insurances.map(i => (
-                              <option key={i.id} value={i.id}>{i.firstName} {i.lastName} ({i.id})</option>
-                            ))}
-                          </select>
+                            <User className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-rose-600" />
+                            {selectedInsurance ? (
+                              <div className="flex items-center gap-2 truncate">
+                                <span className="text-gray-900 font-bold truncate">
+                                  {selectedInsurance.firstName} {selectedInsurance.lastName}
+                                </span>
+                                <span className="text-xs text-gray-500 font-normal truncate">
+                                  ({selectedInsurance.policyName || selectedInsurance.plan || selectedInsurance.id})
+                                </span>
+                                {(() => {
+                                  const { isActive, daysSinceEnd } = getInsuranceDaysInfo(selectedInsurance);
+                                  if (isActive) {
+                                    return <span className="px-2 py-0.5 bg-green-100 text-green-800 text-[10px] font-bold rounded-full flex-shrink-0">Activo</span>;
+                                  }
+                                  return <span className="px-2 py-0.5 bg-amber-100 text-amber-800 text-[10px] font-bold rounded-full flex-shrink-0">Terminado ({daysSinceEnd}d)</span>;
+                                })()}
+                              </div>
+                            ) : (
+                              <span className="text-gray-400 font-medium text-xs">Buscar y seleccionar asegurado...</span>
+                            )}
+                            <ChevronDown className={`w-4 h-4 text-gray-400 ml-2 flex-shrink-0 transition-transform ${isInsuredSearchOpen ? 'rotate-180' : ''}`} />
+                          </button>
+
+                          {isInsuredSearchOpen && (
+                            <>
+                              <div 
+                                className="fixed inset-0 z-20" 
+                                onClick={() => setIsInsuredSearchOpen(false)} 
+                              />
+                              <div className="absolute top-full left-0 right-0 mt-2 bg-white border border-gray-200 rounded-2xl shadow-xl z-30 p-3 space-y-2">
+                                <div className="relative">
+                                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                                  <input
+                                    type="text"
+                                    autoFocus
+                                    placeholder="Escriba para buscar asegurado..."
+                                    value={insuredSearchQuery}
+                                    onChange={(e) => setInsuredSearchQuery(e.target.value)}
+                                    className="w-full pl-9 pr-8 py-2 bg-gray-50 border border-gray-200 rounded-xl text-xs font-bold outline-none focus:ring-2 focus:ring-rose-500"
+                                  />
+                                  {insuredSearchQuery && (
+                                    <button
+                                      type="button"
+                                      onClick={() => setInsuredSearchQuery('')}
+                                      className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                                    >
+                                      <X className="w-3.5 h-3.5" />
+                                    </button>
+                                  )}
+                                </div>
+
+                                <div className="flex items-center justify-between px-2 text-[10px] font-black text-gray-400 uppercase tracking-widest border-b border-gray-100 pb-1.5">
+                                  <span>Resultados ({filteredInsurancesList.length})</span>
+                                  <span>Activos / Terminado &lt;90d</span>
+                                </div>
+
+                                <div className="max-h-60 overflow-y-auto space-y-1 pr-1">
+                                  {filteredInsurancesList.length === 0 ? (
+                                    <div className="p-4 text-center text-xs text-gray-400 italic">
+                                      No se encontraron asegurados activos o finalizados en los últimos 90 días.
+                                    </div>
+                                  ) : (
+                                    filteredInsurancesList.map((ins) => {
+                                      const isSelected = ins.id === formData.insuranceId;
+                                      const { isActive, daysSinceEnd } = getInsuranceDaysInfo(ins);
+
+                                      return (
+                                        <div
+                                          key={ins.id}
+                                          onClick={() => {
+                                            setFormData(prev => ({ ...prev, insuranceId: ins.id || '' }));
+                                            setIsInsuredSearchOpen(false);
+                                            setInsuredSearchQuery('');
+                                          }}
+                                          className={`p-2.5 rounded-xl cursor-pointer transition-all flex items-center justify-between gap-3 ${
+                                            isSelected ? 'bg-rose-50 border border-rose-200' : 'hover:bg-gray-50 border border-transparent'
+                                          }`}
+                                        >
+                                          <div className="min-w-0 flex-1">
+                                            <div className="flex items-center gap-2">
+                                              <p className={`text-xs font-bold truncate ${isSelected ? 'text-rose-700' : 'text-gray-900'}`}>
+                                                {ins.firstName} {ins.lastName}
+                                              </p>
+                                              {isActive ? (
+                                                <span className="px-1.5 py-0.5 bg-green-100 text-green-700 text-[9px] font-bold rounded-full flex-shrink-0">
+                                                  Activo
+                                                </span>
+                                              ) : (
+                                                <span className="px-1.5 py-0.5 bg-amber-100 text-amber-800 text-[9px] font-bold rounded-full flex-shrink-0">
+                                                  Terminado hace {daysSinceEnd}d
+                                                </span>
+                                              )}
+                                            </div>
+                                            <p className="text-[10px] text-gray-500 truncate mt-0.5">
+                                              {ins.policyName || ins.plan || 'Póliza sin nombre'} • Vigencia: {ins.startDate} al {ins.endDate}
+                                            </p>
+                                          </div>
+                                          {isSelected && <CheckCircle className="w-4 h-4 text-rose-600 flex-shrink-0" />}
+                                        </div>
+                                      );
+                                    })
+                                  )}
+                                </div>
+                              </div>
+                            </>
+                          )}
                         </div>
                       </div>
 
@@ -656,6 +1054,40 @@ export default function ClaimsManager({ profile, rolePermissions }: ClaimsManage
                           </div>
                         </div>
                       )}
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <div>
+                          <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-1">
+                            Referencia
+                          </label>
+                          <p className="text-[10px] text-amber-600 font-semibold mb-2 flex items-center gap-1">
+                            ⚠️ Debe estar en inglés / Must be in English
+                          </p>
+                          <input 
+                            type="text"
+                            value={formData.reference || ''}
+                            onChange={(e) => setFormData({...formData, reference: e.target.value})}
+                            disabled={formData.isClosed && !isSuperAdmin}
+                            className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl focus:ring-2 focus:ring-rose-500 outline-none font-bold text-xs"
+                            placeholder="e.g. CLAIM-2026-EN / Emergency medical treatment"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-2">
+                            Cantidad Reclamo ($ USD)
+                          </label>
+                          <input 
+                            type="number"
+                            step="0.01"
+                            min="0"
+                            value={formData.claimAmount !== undefined && formData.claimAmount !== null ? formData.claimAmount : ''}
+                            onChange={(e) => setFormData({...formData, claimAmount: e.target.value !== '' ? parseFloat(e.target.value) : undefined})}
+                            disabled={formData.isClosed && !isSuperAdmin}
+                            className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl focus:ring-2 focus:ring-rose-500 outline-none font-bold text-xs"
+                            placeholder="0.00"
+                          />
+                        </div>
+                      </div>
 
                       <div>
                         <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-2">Descripción del Siniestro</label>
@@ -701,94 +1133,254 @@ export default function ClaimsManager({ profile, rolePermissions }: ClaimsManage
                         </div>
                       </div>
 
-                      <div>
-                        <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-2">Respuesta Aseguradora</label>
-                        <input 
-                          type="text"
-                          value={formData.insurerResponse || ''}
-                          onChange={(e) => setFormData({...formData, insurerResponse: e.target.value})}
-                          disabled={formData.isClosed && !isSuperAdmin}
-                          className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl focus:ring-2 focus:ring-rose-500 outline-none font-bold text-xs"
-                          placeholder="Notas o estatus de la aseguradora..."
-                        />
+                      <div className="space-y-4 pt-2 border-t border-gray-100">
+                        <div>
+                          <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest mb-2">Respuesta Aseguradora</label>
+                          <select 
+                            value={formData.insurerResponse || 'Pendiente'}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              const todayStr = format(new Date(), 'yyyy-MM-dd');
+                              setFormData(prev => ({
+                                ...prev,
+                                insurerResponse: val,
+                                resolutionDate: (val === 'Rechazado' || val === 'Aprobado')
+                                  ? (prev.resolutionDate || todayStr)
+                                  : prev.resolutionDate
+                              }));
+                            }}
+                            disabled={formData.isClosed && !isSuperAdmin}
+                            className="w-full p-3 bg-gray-50 border border-gray-100 rounded-xl focus:ring-2 focus:ring-rose-500 outline-none font-bold text-xs cursor-pointer"
+                          >
+                            <option value="Pendiente">⏳ Pendiente</option>
+                            <option value="Rechazado">❌ Rechazado</option>
+                            <option value="Aprobado">✅ Aprobado</option>
+                          </select>
+                        </div>
+
+                        {formData.insurerResponse === 'Rechazado' && (
+                          <div className="p-4 bg-red-50/70 border border-red-100 rounded-2xl space-y-3">
+                            <div className="flex items-center gap-2 text-red-700 font-black text-xs">
+                              <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+                              <span>Detalles del Rechazo</span>
+                            </div>
+
+                            <div>
+                              <label className="block text-[10px] font-black text-gray-500 uppercase tracking-widest mb-1">
+                                Fecha de Resolución
+                              </label>
+                              <input 
+                                type="date"
+                                value={formData.resolutionDate || format(new Date(), 'yyyy-MM-dd')}
+                                onChange={(e) => setFormData({ ...formData, resolutionDate: e.target.value })}
+                                disabled={formData.isClosed && !isSuperAdmin}
+                                className="w-full p-2.5 bg-white border border-red-200 rounded-xl focus:ring-2 focus:ring-red-500 outline-none font-bold text-xs"
+                              />
+                              <p className="text-[9px] text-gray-400 mt-1">Se establece automáticamente con la fecha de hoy pero puede ser modificada.</p>
+                            </div>
+
+                            <div>
+                              <label className="block text-[10px] font-black text-gray-500 uppercase tracking-widest mb-1">
+                                Descripción de la Resolución / Causa del Rechazo
+                              </label>
+                              <textarea 
+                                rows={3}
+                                value={formData.resolutionDescription || ''}
+                                onChange={(e) => setFormData({ ...formData, resolutionDescription: e.target.value })}
+                                disabled={formData.isClosed && !isSuperAdmin}
+                                placeholder="Escriba los motivos o comentarios sobre la resolución del rechazo..."
+                                className="w-full p-3 bg-white border border-red-200 rounded-xl focus:ring-2 focus:ring-red-500 outline-none font-medium text-xs resize-none"
+                              />
+                            </div>
+                          </div>
+                        )}
+
+                        {formData.insurerResponse === 'Aprobado' && (
+                          <div className="p-4 bg-emerald-50/70 border border-emerald-100 rounded-2xl space-y-3">
+                            <div className="flex items-center gap-2 text-emerald-800 font-black text-xs">
+                              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                              <span>Detalles de Aprobación</span>
+                            </div>
+
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                              <div>
+                                <label className="block text-[10px] font-black text-gray-500 uppercase tracking-widest mb-1">
+                                  Cantidad Reembolsada ($ USD)
+                                </label>
+                                <input 
+                                  type="number"
+                                  step="0.01"
+                                  min="0"
+                                  value={formData.reimbursedAmount !== undefined && formData.reimbursedAmount !== null ? formData.reimbursedAmount : ''}
+                                  onChange={(e) => setFormData({ ...formData, reimbursedAmount: e.target.value !== '' ? parseFloat(e.target.value) : undefined })}
+                                  disabled={formData.isClosed && !isSuperAdmin}
+                                  placeholder="0.00"
+                                  className="w-full p-2.5 bg-white border border-emerald-200 rounded-xl focus:ring-2 focus:ring-emerald-500 outline-none font-bold text-xs"
+                                />
+                              </div>
+
+                              <div>
+                                <label className="block text-[10px] font-black text-gray-500 uppercase tracking-widest mb-1">
+                                  Fecha de Resolución
+                                </label>
+                                <input 
+                                  type="date"
+                                  value={formData.resolutionDate || format(new Date(), 'yyyy-MM-dd')}
+                                  onChange={(e) => setFormData({ ...formData, resolutionDate: e.target.value })}
+                                  disabled={formData.isClosed && !isSuperAdmin}
+                                  className="w-full p-2.5 bg-white border border-emerald-200 rounded-xl focus:ring-2 focus:ring-emerald-500 outline-none font-bold text-xs"
+                                />
+                              </div>
+                            </div>
+                            <p className="text-[9px] text-gray-400">La fecha de resolución se establece automáticamente con la fecha de hoy pero puede ser modificada.</p>
+                          </div>
+                        )}
                       </div>
                     </div>
                   </form>
 
                   {/* Documents Side */}
-                  <div className="space-y-6">
+                  <div className="space-y-5">
                     <div>
-                      <div className="flex items-center justify-between mb-4">
-                        <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest">Documentos Adjuntos</label>
-                        <label className="cursor-pointer px-4 py-2 bg-rose-50 text-rose-600 rounded-xl text-[10px] font-black hover:bg-rose-100 transition-all flex items-center gap-2">
-                          <Upload className="w-3.5 h-3.5" />
-                          ADJUNTAR
-                          <input type="file" className="hidden" onChange={handleFileUpload} disabled={formData.isClosed && !isSuperAdmin} />
+                      <div className="flex items-center justify-between mb-3">
+                        <label className="block text-[10px] font-black text-gray-400 uppercase tracking-widest">
+                          Documentos del Expediente ({formData.documents?.length || 0})
                         </label>
                       </div>
+
+                      {/* Drag & Drop Dropzone */}
+                      <div
+                        onDragOver={handleDragOver}
+                        onDragLeave={handleDragLeave}
+                        onDrop={handleDrop}
+                        className={`relative p-6 border-2 border-dashed rounded-3xl text-center transition-all flex flex-col items-center justify-center gap-2 ${
+                          isDragging
+                            ? 'border-rose-500 bg-rose-50/70 scale-[1.01] shadow-lg'
+                            : 'border-gray-200 bg-gray-50/60 hover:bg-gray-50 hover:border-rose-300'
+                        } ${(formData.isClosed && !isSuperAdmin) ? 'opacity-50 pointer-events-none' : ''}`}
+                      >
+                        <input
+                          type="file"
+                          multiple
+                          accept="application/pdf,image/*,.doc,.docx,.xls,.xlsx,.zip,.rar"
+                          onChange={handleFileInputChange}
+                          disabled={formData.isClosed && !isSuperAdmin}
+                          className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
+                        />
+                        
+                        <div className="p-3 bg-white text-rose-600 rounded-2xl shadow-sm border border-gray-100 mb-1">
+                          {uploadingStatus ? (
+                            <Loader2 className="w-6 h-6 animate-spin text-rose-600" />
+                          ) : (
+                            <UploadCloud className="w-6 h-6" />
+                          )}
+                        </div>
+
+                        {uploadingStatus ? (
+                          <p className="text-xs font-bold text-rose-600 animate-pulse">{uploadingStatus}</p>
+                        ) : (
+                          <>
+                            <p className="text-xs font-bold text-gray-800">
+                              Arrastra y suelta tus archivos aquí
+                            </p>
+                            <p className="text-[10px] font-medium text-gray-400 max-w-xs">
+                              Soporta selección múltiple de PDFs, imágenes, documentos Word o archivos ZIP.
+                            </p>
+                            <span className="mt-2 px-4 py-1.5 bg-rose-600 text-white rounded-xl text-[10px] font-extrabold shadow-sm hover:bg-rose-700 transition-colors pointer-events-none">
+                              Examinar Archivos
+                            </span>
+                          </>
+                        )}
+                      </div>
                       
-                      <div className="space-y-3 max-h-[500px] overflow-y-auto pr-2">
+                      {/* Documents List */}
+                      <div className="mt-4 space-y-3 max-h-[420px] overflow-y-auto pr-1">
                         {formData.documents?.length === 0 ? (
-                          <div className="p-12 border-2 border-dashed border-gray-100 rounded-3xl text-center text-gray-400 italic text-xs flex flex-col items-center gap-3">
-                            <FileUp className="w-10 h-10 opacity-20" />
-                            No se han subido documentos
+                          <div className="p-8 border border-gray-100 rounded-2xl text-center text-gray-400 italic text-xs flex flex-col items-center gap-2 bg-gray-50/40">
+                            <FileUp className="w-8 h-8 opacity-20" />
+                            <span>No se han adjuntado documentos aún.</span>
                           </div>
                         ) : (
-                          formData.documents?.map((doc, idx) => (
-                            <div key={doc.id} className="flex flex-col gap-2 p-4 bg-gray-50 rounded-2xl border border-gray-100 group shadow-sm transition-all hover:bg-white hover:shadow-md">
-                              <div className="flex items-center gap-3">
-                                <div className="p-2 bg-white rounded-lg shadow-sm">
-                                  <FileText className="w-4 h-4 text-rose-600" />
+                          formData.documents?.map((doc, idx) => {
+                            const badge = getFileTypeBadge(doc.name);
+                            return (
+                              <div key={doc.id || idx} className="flex flex-col gap-2 p-3.5 bg-gray-50/80 hover:bg-white rounded-2xl border border-gray-100/90 group shadow-sm transition-all">
+                                <div className="flex items-center gap-2.5">
+                                  <span className={`px-2 py-0.5 rounded-md text-[9px] font-black border ${badge.bg}`}>
+                                    {badge.label}
+                                  </span>
+                                  <div className="flex-1 min-w-0">
+                                    <p className="text-xs font-bold text-gray-900 truncate" title={doc.name}>
+                                      {doc.name}
+                                    </p>
+                                  </div>
+                                  <div className="flex items-center gap-1 shrink-0">
+                                    <a
+                                      href={doc.url}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+                                      title="Visualizar documento"
+                                    >
+                                      <Eye className="w-4 h-4" />
+                                    </a>
+                                    <button
+                                      type="button"
+                                      onClick={() => downloadDocument(doc)}
+                                      className="p-1.5 text-gray-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition-colors"
+                                      title="Descargar documento"
+                                    >
+                                      <Download className="w-4 h-4" />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        if (formData.isClosed && !isSuperAdmin) return;
+                                        setFormData({ ...formData, documents: formData.documents?.filter((_, i) => i !== idx) });
+                                      }}
+                                      disabled={formData.isClosed && !isSuperAdmin}
+                                      className="p-1.5 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors disabled:opacity-30"
+                                      title="Eliminar de expediente"
+                                    >
+                                      <X className="w-4 h-4" />
+                                    </button>
+                                  </div>
                                 </div>
-                                <div className="flex-1 min-w-0">
-                                  <p className="text-xs font-bold text-gray-900 truncate">{doc.name}</p>
-                                </div>
-                                <div className="flex items-center gap-2">
-                                  <a href={doc.url} target="_blank" rel="noreferrer" className="p-1.5 text-gray-400 hover:text-blue-600"><Eye className="w-4 h-4" /></a>
-                                  <button
-                                    type="button"
-                                    onClick={() => {
-                                      if (formData.isClosed && !isSuperAdmin) return;
-                                      setFormData({ ...formData, documents: formData.documents?.filter((_, i) => i !== idx) });
-                                    }}
-                                    className="p-1.5 text-gray-300 hover:text-red-500"
-                                  >
-                                    <X className="w-4 h-4" />
-                                  </button>
+
+                                <div className="grid grid-cols-2 gap-2 mt-0.5">
+                                  <div>
+                                    <p className="text-[7px] font-black text-gray-400 uppercase tracking-widest mb-1">Fecha</p>
+                                    <input 
+                                      type="text"
+                                      value={doc.date || ''}
+                                      onChange={(e) => {
+                                        const newDocs = [...(formData.documents || [])];
+                                        newDocs[idx] = { ...newDocs[idx], date: e.target.value };
+                                        setFormData({ ...formData, documents: newDocs });
+                                      }}
+                                      disabled={formData.isClosed && !isSuperAdmin}
+                                      className="w-full text-[9px] px-2 py-1 bg-white border border-gray-100 rounded-lg focus:ring-1 focus:ring-rose-500 outline-none font-medium"
+                                    />
+                                  </div>
+                                  <div>
+                                    <p className="text-[7px] font-black text-gray-400 uppercase tracking-widest mb-1">Concepto / Nota</p>
+                                    <input 
+                                      type="text"
+                                      value={doc.description || ''}
+                                      onChange={(e) => {
+                                        const newDocs = [...(formData.documents || [])];
+                                        newDocs[idx] = { ...newDocs[idx], description: e.target.value };
+                                        setFormData({ ...formData, documents: newDocs });
+                                      }}
+                                      disabled={formData.isClosed && !isSuperAdmin}
+                                      placeholder="Ej. Factura médica, Pase de abordar..."
+                                      className="w-full text-[9px] px-2 py-1 bg-white border border-gray-100 rounded-lg focus:ring-1 focus:ring-rose-500 outline-none font-medium"
+                                    />
+                                  </div>
                                 </div>
                               </div>
-                              <div className="grid grid-cols-2 gap-2 mt-1">
-                                <div>
-                                  <p className="text-[7px] font-black text-gray-400 uppercase tracking-widest mb-1">Fecha</p>
-                                  <input 
-                                    type="text"
-                                    value={doc.date}
-                                    onChange={(e) => {
-                                      const newDocs = [...(formData.documents || [])];
-                                      newDocs[idx] = { ...newDocs[idx], date: e.target.value };
-                                      setFormData({ ...formData, documents: newDocs });
-                                    }}
-                                    disabled={formData.isClosed && !isSuperAdmin}
-                                    className="w-full text-[9px] px-2 py-1 bg-white border border-gray-100 rounded focus:ring-1 focus:ring-rose-500 outline-none"
-                                  />
-                                </div>
-                                <div>
-                                  <p className="text-[7px] font-black text-gray-400 uppercase tracking-widest mb-1">Concepto / Nota</p>
-                                  <input 
-                                    type="text"
-                                    value={doc.description}
-                                    onChange={(e) => {
-                                      const newDocs = [...(formData.documents || [])];
-                                      newDocs[idx] = { ...newDocs[idx], description: e.target.value };
-                                      setFormData({ ...formData, documents: newDocs });
-                                    }}
-                                    disabled={formData.isClosed && !isSuperAdmin}
-                                    className="w-full text-[9px] px-2 py-1 bg-white border border-gray-100 rounded focus:ring-1 focus:ring-rose-500 outline-none"
-                                  />
-                                </div>
-                              </div>
-                            </div>
-                          ))
+                            );
+                          })
                         )}
                       </div>
                     </div>
@@ -815,14 +1407,18 @@ export default function ClaimsManager({ profile, rolePermissions }: ClaimsManage
                             checked={!!formData[item.field as keyof Claim]}
                             onChange={(e) => {
                               const checked = e.target.checked;
-                              setFormData({
+                              const newFormData = {
                                 ...formData,
                                 [item.field]: checked,
                                 [item.dateField]: checked ? format(new Date(), 'yyyy-MM-dd HH:mm') : ''
-                              });
+                              };
+                              if (!checked) {
+                                newFormData.isExpedienteCompletoConfirmed = false;
+                              }
+                              setFormData(newFormData);
                             }}
                             disabled={formData.isClosed && !isSuperAdmin}
-                            className="w-5 h-5 rounded-lg border-2 border-gray-200 text-rose-600 focus:ring-rose-500 mt-0.5"
+                            className="w-5 h-5 rounded-lg border-2 border-gray-200 text-rose-600 focus:ring-rose-500 mt-0.5 cursor-pointer"
                           />
                           <span className="text-[11px] font-bold text-gray-700 leading-tight group-hover:text-rose-600 transition-colors">{item.label}</span>
                         </label>
@@ -835,6 +1431,74 @@ export default function ClaimsManager({ profile, rolePermissions }: ClaimsManage
                       </div>
                     ))}
                   </div>
+
+                  {/* Expediente Completo Confirm Button & Email trigger */}
+                  {!!(formData.calledCentral && formData.docsDelivered && formData.isComplete && formData.sentToInsurer) && (
+                    <div className="mt-6 animate-fadeIn">
+                      {!formData.isExpedienteCompletoConfirmed ? (
+                        <div className="p-4 bg-emerald-50 border border-emerald-200 rounded-2xl flex flex-col sm:flex-row items-center justify-between gap-4 shadow-sm">
+                          <div className="flex items-center gap-3">
+                            <div className="p-2.5 bg-emerald-600 text-white rounded-xl shadow-sm">
+                              <FolderCheck className="w-5 h-5" />
+                            </div>
+                            <div>
+                              <p className="text-xs font-black text-emerald-950 uppercase tracking-wide">
+                                Operación del Siniestro Completa
+                              </p>
+                              <p className="text-[11px] font-medium text-emerald-800 mt-0.5">
+                                Haz clic en Expediente Completo para confirmar la documentación y habilitar el envío del correo.
+                              </p>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setFormData(prev => ({
+                                ...prev,
+                                isExpedienteCompletoConfirmed: true,
+                                expedienteCompletoConfirmedAt: format(new Date(), 'dd/MMM/yyyy HH:mm')
+                              }));
+                            }}
+                            className="px-6 py-3 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black rounded-xl shadow-md hover:shadow-lg transition-all flex items-center gap-2 whitespace-nowrap cursor-pointer"
+                          >
+                            <CheckCircle2 className="w-4 h-4" />
+                            <span>Expediente Completo</span>
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="p-4 bg-gradient-to-r from-emerald-50 via-teal-50 to-indigo-50 border border-emerald-300/80 rounded-2xl flex flex-col sm:flex-row items-center justify-between gap-4 shadow-md">
+                          <div className="flex items-center gap-3">
+                            <div className="p-2.5 bg-emerald-600 text-white rounded-xl shadow-sm">
+                              <CheckCircle2 className="w-5 h-5" />
+                            </div>
+                            <div>
+                              <div className="flex items-center gap-2">
+                                <span className="text-xs font-black text-emerald-950 uppercase tracking-wide">
+                                  ✓ Expediente Completo Confirmado
+                                </span>
+                                {formData.expedienteCompletoConfirmedAt && (
+                                  <span className="text-[9px] font-extrabold bg-emerald-200/80 text-emerald-900 px-2 py-0.5 rounded-md">
+                                    {formData.expedienteCompletoConfirmedAt}
+                                  </span>
+                                )}
+                              </div>
+                              <p className="text-[11px] font-medium text-emerald-800 mt-0.5">
+                                Expediente verificado. Puedes enviar el correo oficial con el archivo ZIP de los documentos adjuntos.
+                              </p>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => setIsEmailModalOpen(true)}
+                            className="px-6 py-3 bg-gradient-to-r from-rose-600 to-rose-700 hover:from-rose-700 hover:to-rose-800 text-white text-xs font-black rounded-xl shadow-md hover:shadow-xl transition-all flex items-center gap-2.5 whitespace-nowrap cursor-pointer"
+                          >
+                            <Mail className="w-4.5 h-4.5" />
+                            <span>Enviar Correo</span>
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               </>
             ) : (
@@ -953,6 +1617,21 @@ export default function ClaimsManager({ profile, rolePermissions }: ClaimsManage
         message="¿Está seguro de que desea eliminar este siniestro? Esta acción no se puede deshacer y eliminará también el historial de actividades."
         confirmText="Sí, eliminar"
         cancelText="Cancelar"
+      />
+
+      <ClaimEmailModal
+        isOpen={isEmailModalOpen}
+        onClose={() => setIsEmailModalOpen(false)}
+        claim={{ ...(selectedClaim || {}), ...formData } as Claim}
+        insurance={insurances.find(i => i.id === formData.insuranceId) || null}
+        policy={policies.find(p => p.id === insurances.find(i => i.id === formData.insuranceId)?.policyId) || null}
+        companySettings={companySettings}
+        profile={profile}
+        onSuccess={(updatedFields) => {
+          if (updatedFields) {
+            setFormData(prev => ({ ...prev, ...updatedFields }));
+          }
+        }}
       />
     </div>
   );

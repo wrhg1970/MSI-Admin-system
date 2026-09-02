@@ -27,6 +27,7 @@ import {
   Receipt,
   CreditCard,
   AlertCircle,
+  FileText,
   X
 } from 'lucide-react';
 import { Link, useNavigate } from 'react-router-dom';
@@ -39,6 +40,7 @@ import {
   onSnapshot, 
   addDoc, 
   updateDoc, 
+  setDoc,
   doc, 
   serverTimestamp, 
   orderBy, 
@@ -52,9 +54,9 @@ import {
 import { db, handleFirestoreError, OperationType } from '../firebase';
 import TaskModal from './TaskModal';
 import ConfirmModal from './ConfirmModal';
-import DailyExchangeRateWidget from './DailyExchangeRateWidget';
 
 import { useCompany } from '../App';
+import { useFirestoreData } from '../context/FirestoreDataContext';
 
 interface HomeProps {
   profile: UserProfile | null;
@@ -64,8 +66,17 @@ interface HomeProps {
 export default function Home({ profile, rolePermissions }: HomeProps) {
   const navigate = useNavigate();
   const { settings: companySettings } = useCompany();
-  const [tasks, setTasks] = useState<Task[]>([]);
-  const [users, setUsers] = useState<UserProfile[]>([]);
+  const {
+    insurances: allInsurances,
+    clients: allClients,
+    exchangeRates: contextExchangeRates,
+    users: contextUsers,
+    tasks: contextTasks,
+    loading: contextLoading,
+    limitToCurrentMonth,
+    setLimitToCurrentMonth
+  } = useFirestoreData();
+
   const [isTaskModalOpen, setIsTaskModalOpen] = useState(false);
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [isConfirmModalOpen, setIsConfirmModalOpen] = useState(false);
@@ -83,103 +94,161 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
   const [filterStartDate, setFilterStartDate] = useState('');
   const [filterEndDate, setFilterEndDate] = useState('');
 
-  // Dashboard KPI States
-  const [insurances, setInsurances] = useState<InsuranceRequest[]>([]);
-  const [clients, setClients] = useState<Client[]>([]);
-  const [loadingKPIs, setLoadingKPIs] = useState(true);
-
   // Exchange Rate States for Header
-  const [exchangeRates, setExchangeRates] = useState<ExchangeRate[]>([]);
   const [isRateModalOpen, setIsRateModalOpen] = useState(false);
   const [rateInput, setRateInput] = useState('');
+  const [cardFeeInput, setCardFeeInput] = useState('');
   const [submittingRate, setSubmittingRate] = useState(false);
   const [rateError, setRateError] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!profile) return;
-
+  // Derive Memoized states from FirestoreDataContext
+  const insurances = useMemo(() => {
+    if (!profile) return [];
     const isAdmin = ['super_admin', 'director', 'seguros', 'administracion', 'admin'].includes(profile.role || '');
-    
-    // 1. Subscribe to insurances securely
-    let qInsurances;
     if (isAdmin) {
-      qInsurances = query(collection(db, 'insurances'));
+      return allInsurances;
     } else if (profile.role === 'agent') {
-      qInsurances = query(collection(db, 'insurances'), where('agentId', '==', profile.uid));
+      return allInsurances.filter(ins => ins.agentId === profile.uid);
     } else {
-      qInsurances = query(collection(db, 'insurances'), where('email', '==', profile.email));
+      return allInsurances.filter(ins => ins.email === profile.email);
     }
+  }, [allInsurances, profile]);
 
-    const unsubscribeInsurances = onSnapshot(qInsurances, (snapshot) => {
-      const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as InsuranceRequest));
-      setInsurances(data);
-      setLoadingKPIs(false);
-    }, (error) => {
-      console.warn("Error fetching insurances in home dashboard (possible quota or network limit):", error);
-      setLoadingKPIs(false);
-    });
-
-    // 2. Subscribe to clients (only admins and agents can read)
-    let unsubscribeClients = () => {};
+  const clients = useMemo(() => {
+    if (!profile) return [];
+    const isAdmin = ['super_admin', 'director', 'seguros', 'administracion', 'admin'].includes(profile.role || '');
     if (isAdmin || profile.role === 'agent') {
-      const qClients = collection(db, 'clients');
-      unsubscribeClients = onSnapshot(qClients, (snapshot) => {
-        const data = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Client));
-        setClients(data);
-      }, (error) => {
-        console.warn("Error fetching clients in home dashboard (possible quota or network limit):", error);
-      });
+      return allClients;
     }
+    return [];
+  }, [allClients, profile]);
 
-    return () => {
-      unsubscribeInsurances();
-      unsubscribeClients();
-    };
-  }, [profile]);
+  const exchangeRates = useMemo(() => {
+    return contextExchangeRates;
+  }, [contextExchangeRates]);
+
+  const users = useMemo(() => {
+    return contextUsers;
+  }, [contextUsers]);
+
+  const tasks = useMemo(() => {
+    if (!profile) return [];
+    const isAdmin = ['super_admin', 'director', 'admin'].includes(profile.role || '');
+    let filteredTasks = contextTasks;
+    if (!isAdmin) {
+      filteredTasks = contextTasks.filter(t => 
+        t.assignedTo === profile.uid || 
+        t.assignedTo === profile.email || 
+        t.createdBy === profile.uid
+      );
+    }
+    return [...filteredTasks].sort((a, b) => {
+      const timeA = a.createdAt?.toDate 
+        ? a.createdAt.toDate().getTime() 
+        : (a.createdAt ? new Date(a.createdAt).getTime() : 0);
+      const timeB = b.createdAt?.toDate 
+        ? b.createdAt.toDate().getTime() 
+        : (b.createdAt ? new Date(b.createdAt).getTime() : 0);
+      return timeB - timeA;
+    });
+  }, [contextTasks, profile]);
+
+  const [openClaimsCount, setOpenClaimsCount] = useState<number>(0);
+  const [loadingClaims, setLoadingClaims] = useState<boolean>(true);
+  const [caremedInvoices, setCaremedInvoices] = useState<any[]>([]);
+  const [loadingInvoices, setLoadingInvoices] = useState<boolean>(true);
+
+  useEffect(() => {
+    const unsub = onSnapshot(
+      collection(db, 'claims'),
+      (snapshot) => {
+        const count = snapshot.docs.filter(doc => !doc.data().isClosed).length;
+        setOpenClaimsCount(count);
+        setLoadingClaims(false);
+      },
+      (error) => {
+        handleFirestoreError(error, OperationType.GET, 'claims');
+        setLoadingClaims(false);
+      }
+    );
+    return () => unsub();
+  }, []);
+
+  useEffect(() => {
+    const unsub = onSnapshot(
+      collection(db, 'caremedInvoices'),
+      (snapshot) => {
+        setCaremedInvoices(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+        setLoadingInvoices(false);
+      },
+      (error) => {
+        handleFirestoreError(error, OperationType.GET, 'caremedInvoices');
+        setLoadingInvoices(false);
+      }
+    );
+    return () => unsub();
+  }, []);
+
+  const loadingKPIs = useMemo(() => {
+    return contextLoading.insurances || loadingClaims || loadingInvoices;
+  }, [contextLoading, loadingClaims, loadingInvoices]);
 
   // KPI Calculations
   const kpiStats = useMemo(() => {
     const todayStr = format(new Date(), 'yyyy-MM-dd');
-    const now = new Date();
-    const startOfThisMonth = startOfMonth(now);
-    const endOfThisMonth = endOfMonth(now);
 
-    // 1. Total Active Policies
+    // 1. Total Active Policies (Operational status "Activo": not cancelled and endDate >= today)
     const activePolicies = insurances.filter(ins => {
-      const isPaidOrPartiallyPaid = ins.status === 'paid' || ins.status === 'partially_paid';
-      const hasStarted = ins.startDate && ins.startDate <= todayStr;
-      const hasNotEnded = ins.endDate && ins.endDate >= todayStr;
-      return isPaidOrPartiallyPaid && hasStarted && hasNotEnded;
+      const statusStr = (ins.status || '') as string;
+      const isNotCancelled = ins.actionType?.toUpperCase() !== 'CAN' && ins.actionType !== 'Can' && statusStr !== 'cancelled';
+      const hasNotEnded = !ins.endDate || ins.endDate >= todayStr;
+      return isNotCancelled && hasNotEnded;
     });
 
-    // 2. New Clients This Month
-    const newClients = clients.filter(c => {
-      let cDate: Date | null = null;
-      if (c.createdAt?.toDate) {
-        cDate = c.createdAt.toDate();
-      } else if (c.createdAt) {
-        cDate = new Date(c.createdAt);
-      }
-      return cDate && isWithinInterval(cDate, { start: startOfThisMonth, end: endOfThisMonth });
-    });
-
-    // 3. Polizas sin Exportar (status not cancelled)
+    // 2. Polizas sin Exportar (status not cancelled)
     const unexportedCount = insurances.filter(ins => !ins.Caremed && ins.status !== 'cancelled').length;
 
-    // 4. Polizas sin Invoice (status not cancelled)
+    // 3. Polizas sin Invoice (status not cancelled)
     const uninvoicedCount = insurances.filter(ins => !ins.InvoiceCaremed && ins.status !== 'cancelled').length;
 
-    // 5. Polizas sin Pagar (status is pending)
-    const unpaidCount = insurances.filter(ins => ins.status === 'pending').length;
+    // 4. Invoices sin Factura (Invoices CareMed agrupados que no tienen factura física/digital adjunta)
+    const uniqueInvoices = Array.from(new Set(
+      insurances
+        .filter(ins => ins.InvoiceCaremed && ins.InvoiceCaremed.trim() !== '' && ins.status !== 'cancelled')
+        .map(ins => ins.InvoiceCaremed!.trim())
+    ));
+
+    const invoicesWithoutFacturaCount = uniqueInvoices.filter(invNum => {
+      return !caremedInvoices.some(
+        d => (d.invoiceNumber || '').toLowerCase().trim() === invNum.toLowerCase().trim()
+      );
+    }).length;
+
+    // 5. Polizas sin Pagar (Solo aquellas con saldo deudor pendiente: no canceladas, no cerradas, no pagadas, y con saldo pendiente > $0.01)
+    const unpaidCount = insurances.filter(ins => {
+      const isCancelled = ins.actionType?.toUpperCase() === 'CAN' || ins.actionType === 'Can' || ins.status === 'cancelled';
+      if (isCancelled) return false;
+      if (ins.closed) return false;
+      if (ins.status === 'paid') return false;
+
+      const totalPrice = ins.totalFinal !== undefined && ins.totalFinal !== null 
+        ? ins.totalFinal 
+        : (ins.totalPrice || 0);
+      const totalPaid = ins.totalPaid || 0;
+      const balance = totalPrice - totalPaid;
+
+      return balance > 0.01;
+    }).length;
 
     return {
       activeCount: activePolicies.length,
-      newClientsCount: newClients.length,
       unexportedCount,
       uninvoicedCount,
-      unpaidCount
+      invoicesWithoutFacturaCount,
+      unpaidCount,
+      openClaimsCount
     };
-  }, [insurances, clients]);
+  }, [insurances, openClaimsCount, caremedInvoices]);
   
   const userName = profile?.displayName || profile?.email?.split('@')[0] || 'Usuario';
   const todayDate = new Date();
@@ -189,11 +258,25 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
     return exchangeRates.find(r => r.date === todayStr);
   }, [exchangeRates, todayStr]);
 
+  const currentCardFee = useMemo(() => {
+    if (todayRate?.cardFee !== undefined) return todayRate.cardFee;
+    if ((todayRate as any)?.cargoTarjeta !== undefined) return (todayRate as any).cargoTarjeta;
+    if (companySettings?.cardFee !== undefined) return companySettings.cardFee;
+    if (companySettings?.cargoTarjeta !== undefined) return companySettings.cargoTarjeta;
+    return 4.5;
+  }, [todayRate, companySettings]);
+
   const handleSaveTodayRate = async (e: React.FormEvent) => {
     e.preventDefault();
     const rateVal = parseFloat(rateInput);
     if (isNaN(rateVal) || rateVal <= 0) {
       setRateError('Por favor ingrese un tipo de cambio válido mayor a cero.');
+      return;
+    }
+
+    const cardFeeVal = parseFloat(cardFeeInput);
+    if (isNaN(cardFeeVal) || cardFeeVal < 0) {
+      setRateError('Por favor ingrese un cargo de tarjeta válido.');
       return;
     }
 
@@ -205,88 +288,40 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
       const snap = await getDocs(q);
 
       if (!snap.empty) {
-        setRateError('Ya existe un tipo de cambio registrado para el día de hoy.');
-        setSubmittingRate(false);
-        return;
+        const existingDoc = snap.docs[0];
+        await updateDoc(doc(db, 'exchangeRates', existingDoc.id), {
+          rate: rateVal,
+          cardFee: cardFeeVal,
+          cargoTarjeta: cardFeeVal,
+          updatedAt: serverTimestamp()
+        });
+      } else {
+        await addDoc(collection(db, 'exchangeRates'), {
+          rate: rateVal,
+          cardFee: cardFeeVal,
+          cargoTarjeta: cardFeeVal,
+          date: todayStr,
+          createdAt: serverTimestamp()
+        });
       }
 
-      await addDoc(collection(db, 'exchangeRates'), {
-        rate: rateVal,
-        date: todayStr,
-        createdAt: serverTimestamp()
-      });
+      await setDoc(doc(db, 'settings', 'company'), {
+        cardFee: cardFeeVal,
+        cargoTarjeta: cardFeeVal
+      }, { merge: true });
 
       setIsRateModalOpen(false);
       setRateInput('');
+      setCardFeeInput('');
     } catch (error) {
-      setRateError('Error al guardar el tipo de cambio.');
+      setRateError('Error al guardar la información.');
       console.error(error);
     } finally {
       setSubmittingRate(false);
     }
   };
 
-  useEffect(() => {
-    if (!profile) return;
 
-    // Fetch tasks related to user (assigned to or created by)
-    const tasksRef = collection(db, 'tasks');
-    const isAdmin = ['super_admin', 'director', 'admin'].includes(profile.role || '');
-    
-    let q;
-    if (isAdmin) {
-      q = query(
-        tasksRef
-      );
-    } else {
-      q = query(
-        tasksRef,
-        or(
-          where('assignedTo', '==', profile.uid),
-          where('assignedTo', '==', profile.email),
-          where('createdBy', '==', profile.uid)
-        )
-      );
-    }
-
-    const unsubscribeTasks = onSnapshot(q, (snapshot) => {
-      const tasksData = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as Task));
-      // Sort in-memory safely to avoid Firestore composite index errors
-      const sortedData = tasksData.sort((a, b) => {
-        const timeA = a.createdAt?.toDate 
-          ? a.createdAt.toDate().getTime() 
-          : (a.createdAt ? new Date(a.createdAt).getTime() : 0);
-        const timeB = b.createdAt?.toDate 
-          ? b.createdAt.toDate().getTime() 
-          : (b.createdAt ? new Date(b.createdAt).getTime() : 0);
-        return timeB - timeA;
-      });
-      setTasks(sortedData);
-    }, (error) => handleFirestoreError(error, OperationType.GET, 'tasks'));
-
-    // Fetch all users so anyone can filter tasks by Creator and Responsible
-    const usersRef = collection(db, 'users');
-    const unsubscribeUsers = onSnapshot(usersRef, (snapshot) => {
-      setUsers(snapshot.docs.map(doc => ({ uid: doc.id, ...doc.data() } as UserProfile)));
-    }, (error) => {
-      console.warn("Error fetching users list (possible quota or network limit):", error);
-    });
-
-    // Subscribe to exchange rates
-    const exchangeRatesRef = collection(db, 'exchangeRates');
-    const qExchange = query(exchangeRatesRef, orderBy('date', 'desc'), limit(30));
-    const unsubscribeExchange = onSnapshot(qExchange, (snapshot) => {
-      setExchangeRates(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as ExchangeRate)));
-    }, (error) => {
-      console.warn("Error fetching exchange rates in home dashboard:", error);
-    });
-
-    return () => {
-      unsubscribeTasks();
-      unsubscribeUsers();
-      unsubscribeExchange();
-    };
-  }, [profile]);
 
   const handleCreateTask = (defaultDate?: Date) => {
     if (defaultDate) {
@@ -571,6 +606,7 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
                 <button
                   onClick={() => {
                     setRateInput(todayRate ? todayRate.rate.toString() : '');
+                    setCardFeeInput(currentCardFee.toString());
                     setRateError(null);
                     setIsRateModalOpen(true);
                   }}
@@ -581,6 +617,21 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
                   ) : (
                     <>TC: Pendiente <Plus className="w-3.5 h-3.5 text-cyan-400" /></>
                   )}
+                </button>
+              </div>
+
+              <div className="flex items-center gap-3 text-sm font-bold bg-white/5 backdrop-blur-md border border-white/10 w-fit px-5 py-2.5 rounded-2xl">
+                <CreditCard className="w-5 h-5 text-indigo-300" />
+                <button
+                  onClick={() => {
+                    setRateInput(todayRate ? todayRate.rate.toString() : '');
+                    setCardFeeInput(currentCardFee.toString());
+                    setRateError(null);
+                    setIsRateModalOpen(true);
+                  }}
+                  className="font-mono hover:text-cyan-300 transition-colors cursor-pointer text-left flex items-center gap-1.5 focus:outline-none"
+                >
+                  <span>Cargo Tarjeta: {currentCardFee}%</span>
                 </button>
               </div>
             </div>
@@ -599,9 +650,34 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
         </div>
       </header>
 
+      {/* Visual Month Limit Indicator Banner */}
+      {limitToCurrentMonth && (
+        <div className="bg-gradient-to-r from-blue-50 to-indigo-50 border-l-4 border-indigo-500 p-4 rounded-r-2xl shadow-sm flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3 animate-in fade-in duration-500">
+          <div className="flex gap-3">
+            <div className="p-2 bg-indigo-100 text-indigo-700 rounded-xl">
+              <Clock className="w-5 h-5 animate-pulse" />
+            </div>
+            <div>
+              <p className="text-sm font-semibold text-slate-800">
+                Optimización de Carga Activa
+              </p>
+              <p className="text-xs text-slate-500">
+                Para reducir el consumo de datos, solo se han cargado las pólizas y transacciones del mes actual.
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={() => setLimitToCurrentMonth(false)}
+            className="text-xs bg-indigo-600 hover:bg-indigo-700 text-white font-bold px-4 py-2 rounded-xl shadow-sm hover:shadow transition-all"
+          >
+            Cargar Todo el Histórico
+          </button>
+        </div>
+      )}
+
       {/* Summary KPI Dashboard */}
       {profile?.role !== 'client' ? (
-        <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-6 animate-in fade-in duration-500">
+        <section className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-6 animate-in fade-in duration-500">
           {/* Pólizas Activas */}
           <div 
             onClick={() => navigate('/policies')}
@@ -624,31 +700,6 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
             </div>
             <div className="p-4 bg-blue-50 text-blue-600 rounded-2xl group-hover:scale-110 transition-transform duration-300">
               <ShieldCheck className="w-6 h-6" />
-            </div>
-          </div>
-
-          {/* Nuevos Clientes */}
-          <div 
-            onClick={() => navigate('/clients')}
-            className="bg-white rounded-[2rem] p-6 border border-gray-100 shadow-sm hover:shadow-lg hover:-translate-y-1 transition-all flex items-center justify-between cursor-pointer group"
-          >
-            <div className="space-y-2">
-              <h3 className="text-[10px] font-black uppercase text-gray-400 tracking-wider">
-                Nuevos Clientes
-              </h3>
-              {loadingKPIs ? (
-                <div className="h-8 w-16 bg-gray-100 animate-pulse rounded" />
-              ) : (
-                <p className="text-3xl font-black text-[#1A2138] group-hover:text-cyan-600 transition-colors">
-                  {kpiStats.newClientsCount}
-                </p>
-              )}
-              <p className="text-[10px] font-bold text-cyan-600 bg-cyan-50 px-2.5 py-1 rounded-lg w-fit font-mono">
-                Este Mes
-              </p>
-            </div>
-            <div className="p-4 bg-cyan-50 text-cyan-600 rounded-2xl group-hover:scale-110 transition-transform duration-300">
-              <Users className="w-6 h-6" />
             </div>
           </div>
 
@@ -679,7 +730,7 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
 
           {/* Pólizas sin Invoice */}
           <div 
-            onClick={() => navigate('/policies?filter=uninvoiced')}
+            onClick={() => navigate('/policies?tab=caremed')}
             className="bg-white rounded-[2rem] p-6 border border-gray-100 shadow-sm hover:shadow-lg hover:-translate-y-1 transition-all flex items-center justify-between cursor-pointer group"
           >
             <div className="space-y-2">
@@ -694,11 +745,36 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
                 </p>
               )}
               <p className="text-[10px] font-bold text-indigo-600 bg-indigo-50 px-2.5 py-1 rounded-lg w-fit">
-                Ir a Gestión
+                Ir a Exportación
               </p>
             </div>
             <div className="p-4 bg-indigo-50 text-indigo-600 rounded-2xl group-hover:scale-110 transition-transform duration-300">
               <Receipt className="w-6 h-6" />
+            </div>
+          </div>
+
+          {/* Invoices sin Factura */}
+          <div 
+            onClick={() => navigate('/policies?tab=invoices')}
+            className="bg-white rounded-[2rem] p-6 border border-gray-100 shadow-sm hover:shadow-lg hover:-translate-y-1 transition-all flex items-center justify-between cursor-pointer group"
+          >
+            <div className="space-y-2">
+              <h3 className="text-[10px] font-black uppercase text-gray-400 tracking-wider">
+                Invoices sin Factura
+              </h3>
+              {loadingKPIs ? (
+                <div className="h-8 w-16 bg-gray-100 animate-pulse rounded" />
+              ) : (
+                <p className="text-3xl font-black text-[#1A2138] group-hover:text-purple-600 transition-colors">
+                  {kpiStats.invoicesWithoutFacturaCount}
+                </p>
+              )}
+              <p className="text-[10px] font-bold text-purple-600 bg-purple-50 px-2.5 py-1 rounded-lg w-fit">
+                Ir a Invoices
+              </p>
+            </div>
+            <div className="p-4 bg-purple-50 text-purple-600 rounded-2xl group-hover:scale-110 transition-transform duration-300">
+              <FileText className="w-6 h-6" />
             </div>
           </div>
 
@@ -724,6 +800,31 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
             </div>
             <div className="p-4 bg-rose-50 text-rose-600 rounded-2xl group-hover:scale-110 transition-transform duration-300">
               <CreditCard className="w-6 h-6" />
+            </div>
+          </div>
+
+          {/* Siniestros Abiertos */}
+          <div 
+            onClick={() => navigate('/claims')}
+            className="bg-white rounded-[2rem] p-6 border border-gray-100 shadow-sm hover:shadow-lg hover:-translate-y-1 transition-all flex items-center justify-between cursor-pointer group"
+          >
+            <div className="space-y-2">
+              <h3 className="text-[10px] font-black uppercase text-gray-400 tracking-wider">
+                Siniestros Abiertos
+              </h3>
+              {loadingKPIs ? (
+                <div className="h-8 w-16 bg-gray-100 animate-pulse rounded" />
+              ) : (
+                <p className="text-3xl font-black text-[#1A2138] group-hover:text-red-600 transition-colors">
+                  {kpiStats.openClaimsCount}
+                </p>
+              )}
+              <p className="text-[10px] font-bold text-red-600 bg-red-50 px-2.5 py-1 rounded-lg w-fit">
+                En trámite
+              </p>
+            </div>
+            <div className="p-4 bg-red-50 text-red-600 rounded-2xl group-hover:scale-110 transition-transform duration-300">
+              <AlertCircle className="w-6 h-6" />
             </div>
           </div>
         </section>
@@ -1362,11 +1463,6 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
               </div>
             )}
 
-            {/* Tipo de Cambio del Día */}
-            <div className="border-t border-gray-100 pt-6 mt-6">
-              <DailyExchangeRateWidget />
-            </div>
-
             {/* Add Task Button always present at bottom */}
             <button 
               onClick={() => handleCreateTask()}
@@ -1466,30 +1562,55 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
                 </div>
               </div>
 
-              <div>
-                <label className="block text-xs font-black text-gray-500 uppercase tracking-wider mb-2">
-                  Tasa de cambio (Pesos Mexicanos por Dólar)
-                </label>
-                <div className="relative">
-                  <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
-                    <DollarSign className="w-4 h-4 text-gray-400" />
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-xs font-black text-gray-500 uppercase tracking-wider mb-2">
+                    Tasa de cambio (MXN/USD)
+                  </label>
+                  <div className="relative">
+                    <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
+                      <DollarSign className="w-4 h-4 text-gray-400" />
+                    </div>
+                    <input
+                      type="number"
+                      step="0.0001"
+                      min="0.01"
+                      placeholder="Ej: 17.5023"
+                      value={rateInput}
+                      onChange={(e) => setRateInput(e.target.value)}
+                      required
+                      disabled={submittingRate}
+                      className="w-full text-sm font-bold pl-9 pr-4 py-3.5 bg-[#F8FAFC] border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all font-mono text-gray-900"
+                    />
                   </div>
-                  <input
-                    type="number"
-                    step="0.0001"
-                    min="0.01"
-                    placeholder="Ej: 17.5023"
-                    value={rateInput}
-                    onChange={(e) => setRateInput(e.target.value)}
-                    required
-                    disabled={submittingRate}
-                    className="w-full text-sm font-bold pl-9 pr-4 py-3.5 bg-[#F8FAFC] border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all font-mono text-gray-900"
-                  />
                 </div>
-                <p className="text-[10px] text-gray-400 mt-2">
-                  Ingrese la equivalencia de 1 USD en MXN. Esta tasa se utilizará en las transacciones y cálculos globales del día.
-                </p>
+
+                <div>
+                  <label className="block text-xs font-black text-gray-500 uppercase tracking-wider mb-2">
+                    Cargo Tarjeta (%)
+                  </label>
+                  <div className="relative">
+                    <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none">
+                      <CreditCard className="w-4 h-4 text-gray-400" />
+                    </div>
+                    <input
+                      type="number"
+                      step="0.1"
+                      min="0"
+                      max="100"
+                      placeholder="Ej: 4.5"
+                      value={cardFeeInput}
+                      onChange={(e) => setCardFeeInput(e.target.value)}
+                      required
+                      disabled={submittingRate}
+                      className="w-full text-sm font-bold pl-9 pr-4 py-3.5 bg-[#F8FAFC] border border-gray-100 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all font-mono text-gray-900"
+                    />
+                  </div>
+                </div>
               </div>
+              <p className="text-[10px] text-gray-400 mt-1">
+                Ingrese la tasa USD/MXN y el porcentaje de recargo por tarjeta. Estos valores se utilizarán en las cotizaciones y transacciones del día.
+              </p>
 
               {rateError && (
                 <div className="p-3 bg-red-50 text-red-700 text-xs rounded-xl border border-red-100 flex items-center gap-2">
