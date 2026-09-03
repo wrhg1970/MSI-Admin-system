@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { X, Loader2, CheckCircle2, FolderArchive, Info, Users, Download, AlertTriangle } from 'lucide-react';
 import { InsuranceRequest, Policy, PolicyLetter } from '../types';
-import { getAvailableLettersForInsurance } from '../lib/policyUtils';
+import { getAvailableLettersForInsurance, isSpainDestination } from '../lib/policyUtils';
 import { generatePDF } from '../lib/pdfGenerator';
 import { createZipFromPdfs, downloadBlob } from '../lib/zipUtils';
 
@@ -52,6 +52,19 @@ export default function BulkZipDownloadModal({
   const [isGenerating, setIsGenerating] = useState(false);
   const [progress, setProgress] = useState<{ current: number; total: number; statusText: string } | null>(null);
   const [summary, setSummary] = useState<{ successCount: number; pdfCount: number; failures: { name: string; error: string }[] } | null>(null);
+
+  const hasSpainDestination = React.useMemo(() => {
+    return selectedInsurances.some(ins => isSpainDestination(ins.destinationCountry));
+  }, [selectedInsurances]);
+
+  const availableLanguagesList = React.useMemo(() => {
+    return AVAILABLE_LANGUAGES.filter(lang => {
+      if (lang.id === 'es_spain' || lang.id === 'embajada_spain') {
+        return hasSpainDestination;
+      }
+      return true;
+    });
+  }, [hasSpainDestination]);
 
   useEffect(() => {
     if (isOpen) {
@@ -203,7 +216,7 @@ export default function BulkZipDownloadModal({
                     Idiomas / Tipos de carta a incluir
                   </h4>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                    {AVAILABLE_LANGUAGES.map((lang) => {
+                    {availableLanguagesList.map((lang) => {
                       const isSelected = selectedLanguages.includes(lang.id);
                       return (
                         <button

@@ -186,6 +186,27 @@ export function findPolicyPrioritized(
 }
 
 /**
+ * Checks if an insurance request has Spain as destination country.
+ */
+export function isSpainDestination(destinationCountry?: string | null): boolean {
+  if (!destinationCountry) return false;
+  const normalized = destinationCountry
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, ''); // removes ñ accents -> espana
+
+  return (
+    normalized === 'es' ||
+    normalized === 'esp' ||
+    normalized === 'espana' ||
+    normalized === 'spain' ||
+    normalized.includes('espana') ||
+    normalized.includes('spain')
+  );
+}
+
+/**
  * Finds all available policy letters (templates) for a given insurance request.
  * It uses a multi-layered fallback strategy and de-duplicates letters by language
  * based on match priority to prevent duplicate templates from appearing.
@@ -296,33 +317,41 @@ export function getAvailableLettersForInsurance(
     }
   });
 
-  // If no explicit 'es_spain' or 'embajada_spain' letter exists for this policy, derive them from 'es' or first available
-  if (!languageGroups.has('es_spain')) {
-    const esItem = languageGroups.get('es') || Array.from(languageGroups.values())[0];
-    if (esItem) {
-      const derivedSpainLetter: PolicyLetter = {
-        ...esItem.letter,
-        id: `${esItem.letter.id || 'default'}_es_spain`,
-        language: 'es_spain',
-        title: esItem.letter.title && esItem.letter.title !== 'A quien corresponda'
-          ? esItem.letter.title
-          : 'CERTIFICADO DE COBERTURA / ESPAÑA',
-      };
-      languageGroups.set('es_spain', { letter: derivedSpainLetter, priority: esItem.priority + 0.1 });
-    }
-  }
+  const hasSpainDest = isSpainDestination(insurance.destinationCountry);
 
-  if (!languageGroups.has('embajada_spain')) {
-    const esItem = languageGroups.get('es') || Array.from(languageGroups.values())[0];
-    if (esItem) {
-      const derivedEmbajadaLetter: PolicyLetter = {
-        ...esItem.letter,
-        id: `${esItem.letter.id || 'default'}_embajada_spain`,
-        language: 'embajada_spain',
-        title: 'CERTIFICADO DE COBERTURA / EMBAJADA DE ESPAÑA',
-      };
-      languageGroups.set('embajada_spain', { letter: derivedEmbajadaLetter, priority: esItem.priority + 0.2 });
+  if (hasSpainDest) {
+    // If no explicit 'es_spain' or 'embajada_spain' letter exists for this policy, derive them from 'es' or first available
+    if (!languageGroups.has('es_spain')) {
+      const esItem = languageGroups.get('es') || Array.from(languageGroups.values())[0];
+      if (esItem) {
+        const derivedSpainLetter: PolicyLetter = {
+          ...esItem.letter,
+          id: `${esItem.letter.id || 'default'}_es_spain`,
+          language: 'es_spain',
+          title: esItem.letter.title && esItem.letter.title !== 'A quien corresponda'
+            ? esItem.letter.title
+            : 'CERTIFICADO DE COBERTURA / ESPAÑA',
+        };
+        languageGroups.set('es_spain', { letter: derivedSpainLetter, priority: esItem.priority + 0.1 });
+      }
     }
+
+    if (!languageGroups.has('embajada_spain')) {
+      const esItem = languageGroups.get('es') || Array.from(languageGroups.values())[0];
+      if (esItem) {
+        const derivedEmbajadaLetter: PolicyLetter = {
+          ...esItem.letter,
+          id: `${esItem.letter.id || 'default'}_embajada_spain`,
+          language: 'embajada_spain',
+          title: 'CERTIFICADO DE COBERTURA / EMBAJADA DE ESPAÑA',
+        };
+        languageGroups.set('embajada_spain', { letter: derivedEmbajadaLetter, priority: esItem.priority + 0.2 });
+      }
+    }
+  } else {
+    // Destination is not Spain: remove Spain & Embassy of Spain letters so they only appear when destination is Spain
+    languageGroups.delete('es_spain');
+    languageGroups.delete('embajada_spain');
   }
 
   // Return the best letter for each language

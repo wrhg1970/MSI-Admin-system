@@ -65,12 +65,20 @@ export function personalizeWhatsAppMessage(template: string, insurance: any): st
 
   const formatMoney = (val: number) => `$${(val || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD`;
   
+  const isUnder25 = (insurance.age !== undefined && insurance.age !== null && !isNaN(Number(insurance.age)) && Number(insurance.age) < 25) ||
+    (insurance.policyNumber && String(insurance.policyNumber).toUpperCase().includes('UNDER25')) ||
+    (insurance.plan && String(insurance.plan).toUpperCase().includes('UNDER25'));
+  const policyCode = isUnder25 ? '26 CC015653-UNDER25' : '26 CC015653-OVER25';
+
   return template
     .replace(/{nombre}/g, fullName)
     .replace(/{plan}/g, plan)
     .replace(/{estado}/g, statusText)
     .replace(/{monto}/g, formatMoney(insurance.totalFinal || insurance.totalPrice || 0))
     .replace(/{pagado}/g, formatMoney(insurance.totalPaid || 0))
+    .replace(/{poliza}/g, policyCode)
+    .replace(/{numero_poliza}/g, policyCode)
+    .replace(/{policy}/g, policyCode)
     .replace(/{fecha_vencimiento}/g, insurance.endDate || 'N/A');
 }
 

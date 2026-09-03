@@ -1,6 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { Mail, XCircle, Send, Loader2, CheckCircle2, Info, Users, Copy, Languages, Files, FileStack } from 'lucide-react';
 import { InsuranceRequest, Policy, PolicyLetter } from '../types';
+import { isSpainDestination } from '../lib/policyUtils';
 
 interface BulkEmailConfigModalProps {
   isOpen: boolean;
@@ -43,6 +44,19 @@ export default function BulkEmailConfigModal({
   const [selectedLanguages, setSelectedLanguages] = useState<string[]>(['es']);
   const [ccInput, setCcInput] = useState('');
   const [ccEmails, setCcEmails] = useState<string[]>([]);
+
+  const hasSpainDestination = useMemo(() => {
+    return selectedInsurances.some(ins => isSpainDestination(ins.destinationCountry));
+  }, [selectedInsurances]);
+
+  const availableLanguagesList = useMemo(() => {
+    return AVAILABLE_LANGUAGES.filter(lang => {
+      if (lang.id === 'es_spain' || lang.id === 'embajada_spain') {
+        return hasSpainDestination;
+      }
+      return true;
+    });
+  }, [hasSpainDestination]);
   const [subjectTemplate, setSubjectTemplate] = useState('Póliza de Seguro - {nombre}');
   const [bodyTemplate, setBodyTemplate] = useState(
     `Hola {nombre}
@@ -234,7 +248,7 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`
                 </p>
 
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-[180px] overflow-y-auto pr-1">
-                  {AVAILABLE_LANGUAGES.map(lang => {
+                  {availableLanguagesList.map(lang => {
                     const isChecked = selectedLanguages.includes(lang.id);
                     return (
                       <label

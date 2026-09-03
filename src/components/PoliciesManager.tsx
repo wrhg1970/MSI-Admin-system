@@ -4,7 +4,7 @@ import { collection, onSnapshot, query, orderBy, deleteDoc, doc, updateDoc, getD
 import { db, handleFirestoreError, OperationType, auth } from '../firebase';
 import { InsuranceRequest, UserProfile, Payment, Policy, CustomRole, PolicyLetter } from '../types';
 import { COUNTRIES } from '../constants';
-import { ShieldCheck, Eye, Trash2, Edit2, CheckCircle, CheckCircle2, XCircle, DollarSign, FileText, FileSpreadsheet, Search, Filter, Receipt, Calendar, Clock, AlertTriangle, ArrowRight, User, Users, Mail, LayoutGrid, List, Baby, Upload, Download, Globe, Building2, ArrowUp, ArrowDown, ChevronLeft, ChevronRight, TrendingUp, Send, Loader2, History, Plus, X, FolderArchive, ArrowUpDown, Scale, Copy, ChevronDown, ChevronUp, Layers, FileQuestion } from 'lucide-react';
+import { ShieldCheck, Eye, Trash2, Edit2, CheckCircle, CheckCircle2, XCircle, DollarSign, FileText, FileSpreadsheet, Search, Filter, Receipt, Calendar, Clock, AlertTriangle, ArrowRight, User, Users, Mail, LayoutGrid, List, Baby, Upload, Download, Globe, Building2, ArrowUp, ArrowDown, ChevronLeft, ChevronRight, TrendingUp, Send, Loader2, History, Plus, X, FolderArchive, ArrowUpDown, Scale, Copy, ChevronDown, ChevronUp, Layers, FileQuestion, MessageCircle } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import TransactionModal from './TransactionModal';
@@ -24,6 +24,7 @@ import { getPolicyNumber, getAvailableLettersForInsurance, getNormalizedYYYYMMDD
 import BatchDetailModal from './BatchDetailModal';
 import DuplicatesModal from './DuplicatesModal';
 import { logInsuranceActivity } from '../utils/activityLogger';
+import WhatsAppPolicyLettersModal, { getPolicyWhatsAppContacts } from './WhatsAppPolicyLettersModal';
 
 const LANGUAGE_ORDER = ['es', 'en', 'es_spain', 'embajada_spain', 'policy', 'covid', 'fr', 'it', 'de'];
 
@@ -118,6 +119,8 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
   const [selectedInsuranceForDetail, setSelectedInsuranceForDetail] = useState<InsuranceRequest | null>(null);
   const [modalInitialAction, setModalInitialAction] = useState<'cancel' | 'correct' | 'extension' | null>(null);
   const [selectedInsuranceForEmail, setSelectedInsuranceForEmail] = useState<InsuranceRequest | null>(null);
+  const [selectedInsuranceForWhatsApp, setSelectedInsuranceForWhatsApp] = useState<InsuranceRequest | null>(null);
+  const [usersList, setUsersList] = useState<any[]>([]);
   const [insuranceToDelete, setInsuranceToDelete] = useState<InsuranceRequest | null>(null);
   const [confirmingAction, setConfirmingAction] = useState<{id: string, type: 'payment' | 'commission'} | null>(null);
   const [showDuplicatesModal, setShowDuplicatesModal] = useState(false);
@@ -1178,6 +1181,16 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
       }
     };
     fetchClients();
+
+    const fetchUsers = async () => {
+      try {
+        const snap = await getDocs(collection(db, 'users'));
+        setUsersList(snap.docs.map(doc => ({ uid: doc.id, ...doc.data() })));
+      } catch (error) {
+        console.error("Error fetching users in PoliciesManager:", error);
+      }
+    };
+    fetchUsers();
 
     const fetchCountries = async () => {
       try {
@@ -6697,6 +6710,20 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                         <Mail className="w-3.5 h-3.5" />
                         Email
                       </button>
+                      {(() => {
+                        const waContacts = getPolicyWhatsAppContacts(i, clients, usersList);
+                        if (!waContacts.hasAnyPhone) return null;
+                        return (
+                          <button 
+                            onClick={() => setSelectedInsuranceForWhatsApp(i)}
+                            className="p-1.5 bg-emerald-50 text-emerald-600 hover:bg-emerald-100 hover:text-emerald-700 border border-emerald-200/80 rounded-lg transition-all shadow-xs flex items-center justify-center hover:scale-105 active:scale-95"
+                            title={`Enviar cartas por WhatsApp (${waContacts.label})`}
+                            aria-label={`Enviar cartas por WhatsApp (${waContacts.label})`}
+                          >
+                            <MessageCircle className="w-4 h-4" />
+                          </button>
+                        );
+                      })()}
                       <button 
                         onClick={() => setSelectedInsuranceForDetail(i)}
                         className="flex items-center gap-2 px-3 py-1.5 bg-blue-50 text-blue-600 text-[10px] font-bold rounded-lg hover:bg-blue-100 transition-all"
@@ -6950,6 +6977,19 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                               >
                                 <Mail className="w-3.5 h-3.5" />
                               </button>
+                              {(() => {
+                                const waContacts = getPolicyWhatsAppContacts(i, clients, usersList);
+                                if (!waContacts.hasAnyPhone) return null;
+                                return (
+                                  <button 
+                                    onClick={() => setSelectedInsuranceForWhatsApp(i)}
+                                    className="p-1 text-emerald-600 hover:bg-emerald-50 rounded-md transition-all"
+                                    title={`Enviar cartas por WhatsApp (${waContacts.label})`}
+                                  >
+                                    <MessageCircle className="w-3.5 h-3.5" />
+                                  </button>
+                                );
+                              })()}
                               <button 
                                 onClick={() => setSelectedInsuranceForDetail(i)}
                                 className="p-1 text-blue-600 hover:bg-blue-50 rounded-md transition-all"
@@ -7307,6 +7347,19 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
         companySettings={settings}
       />
 
+      {selectedInsuranceForWhatsApp && (
+        <WhatsAppPolicyLettersModal
+          isOpen={Boolean(selectedInsuranceForWhatsApp)}
+          onClose={() => setSelectedInsuranceForWhatsApp(null)}
+          insurance={selectedInsuranceForWhatsApp}
+          policies={policies}
+          policyLetters={policyLetters}
+          clients={clients}
+          users={usersList}
+          companySettings={settings}
+        />
+      )}
+
       {languageModal.isOpen && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[200] p-4">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in duration-200">
@@ -7361,6 +7414,20 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
               >
                 Cancelar
               </button>
+              {languageModal.insurance && getPolicyWhatsAppContacts(languageModal.insurance, clients, usersList).hasAnyPhone && (
+                <button
+                  onClick={() => {
+                    const ins = languageModal.insurance;
+                    setLanguageModal(prev => ({ ...prev, isOpen: false }));
+                    setSelectedInsuranceForWhatsApp(ins);
+                  }}
+                  className="py-3 px-4 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 transition-all flex items-center justify-center hover:scale-105 active:scale-95 shadow-md shadow-emerald-100"
+                  title="Enviar cartas por WhatsApp"
+                  aria-label="Enviar cartas por WhatsApp"
+                >
+                  <MessageCircle className="w-5 h-5" />
+                </button>
+              )}
               <button
                 onClick={handleConfirmLanguages}
                 disabled={languageModal.selectedLanguages.length === 0}

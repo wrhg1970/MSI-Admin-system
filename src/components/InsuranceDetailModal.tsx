@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { X, Calendar, User, Mail, MapPin, Shield, DollarSign, Clock, Briefcase, Receipt, CreditCard, FileText, Plus, CheckCircle, ArrowUpRight, Pencil, Check, Printer, ArrowRight, XCircle, History, MessageSquare, Activity, Percent, Trash2, Copy, Calculator, RefreshCw } from 'lucide-react';
+import { X, Calendar, User, Mail, MapPin, Shield, DollarSign, Clock, Briefcase, Receipt, CreditCard, FileText, Plus, CheckCircle, ArrowUpRight, Pencil, Check, Printer, ArrowRight, XCircle, History, MessageSquare, Activity, Percent, Trash2, Copy, Calculator, RefreshCw, MessageCircle } from 'lucide-react';
 import { COUNTRIES } from '../constants';
 import { collection, query, where, onSnapshot, orderBy, doc, updateDoc, getDocs, getDoc, addDoc, deleteDoc, setDoc } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType, auth } from '../firebase';
@@ -16,6 +16,7 @@ import { triggerWhatsAppNotification } from '../services/whatsapp';
 import { getPolicyNumber, getAvailableLettersForInsurance, findPolicyPrioritized, formatDisplayDate } from '../lib/policyUtils';
 import { isCardPaymentMethod, safeNum } from '../utils/paymentUtils';
 import { logInsuranceActivity } from '../utils/activityLogger';
+import WhatsAppPolicyLettersModal, { getPolicyWhatsAppContacts } from './WhatsAppPolicyLettersModal';
 
 const LANGUAGE_ORDER = ['es', 'en', 'es_spain', 'embajada_spain', 'policy', 'covid', 'fr', 'it', 'de'];
 
@@ -392,6 +393,7 @@ export default function InsuranceDetailModal({ isOpen, onClose, insurance, initi
         days: computedDays,
         policyId: editFormData.policyId,
         policyName: selectedPolicy?.name || (localInsurance || insurance).policyName || '',
+        plan: selectedPolicy?.plan || (localInsurance || insurance).plan || '',
         policyNumber: getPolicyNumber(selectedPolicy, computedAge),
         requestDate: editFormData.requestDate,
         totalPrice: parseFloat(editFormData.totalPrice as any) || 0,
@@ -907,6 +909,119 @@ export default function InsuranceDetailModal({ isOpen, onClose, insurance, initi
   const [discountCommissionAmount, setDiscountCommissionAmount] = useState<string>('');
   const [discountCommissionNotes, setDiscountCommissionNotes] = useState<string>('');
   const [isSavingDiscountCommission, setIsSavingDiscountCommission] = useState(false);
+
+  // 1. Calculate destination region for the currently edited destination country
+  const editDestinationRegion = useMemo((): 1 | 2 => {
+    const destCode = (editFormData.destinationCountry || '').trim().toUpperCase();
+    if (['US', 'CA', 'WW', 'PR', 'VI', 'GU'].includes(destCode)) {
+      return 1;
+    }
+    const allCountriesList = countries.length > 0 ? countries : COUNTRIES;
+    const matchedCountry = allCountriesList.find(c => 
+      c.code.toUpperCase() === destCode || 
+      (c.name && c.name.trim().toLowerCase() === (editFormData.destinationCountry || '').trim().toLowerCase())
+    );
+    return matchedCountry?.region === 1 ? 1 : 2;
+  }, [editFormData.destinationCountry, countries]);
+
+  // 2. Calculate the user's age dynamically based on birthDate and startDate (or fallback to original record)
+  const editUserAge = useMemo((): number => {
+    const birthDateStr = editFormData.birthDate || (localInsurance || insurance)?.birthDate;
+    if (!birthDateStr) {
+      const activeIns = localInsurance || insurance;
+      return (activeIns?.age !== undefined && activeIns?.age !== null) ? Number(activeIns.age) : 25;
+    }
+    try {
+      const refDateStr = editFormData.startDate || (localInsurance || insurance)?.startDate || format(new Date(), 'yyyy-MM-dd');
+      const refDate = parseISO(refDateStr);
+      const bDate = parseISO(birthDateStr);
+      return Math.max(0, differenceInYears(refDate, bDate));
+    } catch {
+      const activeIns = localInsurance || insurance;
+      return (activeIns?.age !== undefined && activeIns?.age !== null) ? Number(activeIns.age) : 25;
+    }
+  }, [editFormData.birthDate, editFormData.startDate, localInsurance, insurance]);
+
+  // 3. Filter policies strictly to those that are viable for the user given their age and destination
+  const viablePolicies = useMemo(() => {
+    const activeIns = localInsurance || insurance;
+    const isExtremeRequested = (editFormData as any).isExtremeSports || activeIns?.isExtremeSports || (activeIns?.plan || '').toLowerCase() === 'xtreme';
+
+    return policies.filter(p => {
+      // Must be active (or without status for legacy data)
+      if (p.status && p.status !== 'active') {
+        return false;
+      }
+
+      // Must match the destination region (Region 1: USA/Canada/Mundial, Region 2: Rest of world)
+      const policyRegion: 1 | 2 = Number(p.region) === 1 ? 1 : 2;
+      if (policyRegion !== editDestinationRegion) {
+        return false;
+      }
+
+      const planName = (p.plan || '').trim().toLowerCase();
+      const policyName = (p.name || '').trim().toLowerCase();
+
+      // Check configured insuranceTypes from database first
+      const matchedType = insuranceTypes.find(t => t.name.trim().toLowerCase() === planName);
+      if (matchedType) {
+        const minA = Number(matchedType.minAge);
+        const maxA = Number(matchedType.maxAge);
+        if (editUserAge < minA || editUserAge > maxA) {
+          return false;
+        }
+        if (planName === 'xtreme' && !isExtremeRequested) {
+          return false;
+        }
+        return true;
+      }
+
+      // Standard built-in plan type age rules
+      if (planName === 'u6' || policyName.includes('u6')) {
+        return editUserAge >= 0 && editUserAge <= 6;
+      }
+      if (planName === 'student' || policyName.includes('student') || policyName.includes('estudiante')) {
+        return editUserAge >= 7 && editUserAge <= 25;
+      }
+      if (planName === 'traveler' || planName === 'traveller' || policyName.includes('traveler') || policyName.includes('traveller') || policyName.includes('viajero')) {
+        return editUserAge >= 26 && editUserAge <= 69;
+      }
+      if (planName === 'platinum' || policyName.includes('platinum') || policyName.includes('platino')) {
+        return editUserAge >= 0 && editUserAge <= 69;
+      }
+      if (planName === 'xtreme' || policyName.includes('xtreme')) {
+        return isExtremeRequested && editUserAge >= 7 && editUserAge <= 69;
+      }
+      if (planName === 'o70' || policyName.includes('o70') || policyName.includes('mayor')) {
+        return editUserAge >= 70;
+      }
+
+      // If custom unknown plan, check if min/max age are specified directly on the policy
+      if ((p as any).minAge !== undefined && (p as any).maxAge !== undefined) {
+        return editUserAge >= Number((p as any).minAge) && editUserAge <= Number((p as any).maxAge);
+      }
+
+      return true;
+    });
+  }, [policies, editDestinationRegion, editUserAge, insuranceTypes, editFormData, localInsurance, insurance]);
+
+  // Keep policy selection valid within viable policies during editing
+  useEffect(() => {
+    if (isEditingAll && viablePolicies.length > 0) {
+      const currentMatched = viablePolicies.find(p => 
+        p.id === editFormData.policyId || 
+        (p.CodigoPoliza && p.CodigoPoliza === editFormData.policyId) ||
+        p.name === editFormData.policyId
+      );
+      if (!currentMatched) {
+        // If current policy is not viable for the age or destination, switch to the first viable one and recalculate pricing
+        handleEditFormChange('policyId', viablePolicies[0].id);
+      } else if (editFormData.policyId !== currentMatched.id) {
+        // Normalize policy ID to the exact document ID so the <select> accurately reflects it
+        handleEditFormChange('policyId', currentMatched.id);
+      }
+    }
+  }, [isEditingAll, viablePolicies]);
   const [showExtensionDialog, setShowExtensionDialog] = useState(false);
   const [extensionEndDate, setExtensionEndDate] = useState('');
   const [isCreatingExtension, setIsCreatingExtension] = useState(false);
@@ -1173,6 +1288,7 @@ export default function InsuranceDetailModal({ isOpen, onClose, insurance, initi
     }
   };
   const [showEmailModal, setShowEmailModal] = useState(false);
+  const [showWhatsAppModal, setShowWhatsAppModal] = useState(false);
   const [editingCommissionId, setEditingCommissionId] = useState<string | null>(null);
   const [editAmount, setEditAmount] = useState<string>('');
   const [isEditingIDseg, setIsEditingIDseg] = useState(false);
@@ -2578,17 +2694,37 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
                         <h5 className="font-bold text-xs text-gray-400 uppercase tracking-wider mb-2">Configuración Técnica de Póliza</h5>
                         <div className="grid grid-cols-2 gap-4">
                           <div>
-                            <label className="block text-xs font-semibold text-gray-600 mb-1">Póliza Base (Tarifa) *</label>
+                            <div className="flex items-center justify-between mb-1">
+                              <label className="block text-xs font-semibold text-gray-600">Póliza Base (Tarifa) *</label>
+                              <span className="text-[10px] font-bold text-indigo-700 bg-indigo-50 border border-indigo-100 px-1.5 py-0.5 rounded flex items-center gap-1">
+                                <span>{editUserAge} años</span>
+                                <span>•</span>
+                                <span>Zona {editDestinationRegion}</span>
+                                <span>•</span>
+                                <span>{viablePolicies.length} {viablePolicies.length === 1 ? 'viable' : 'viables'}</span>
+                              </span>
+                            </div>
                             <select
                               value={editFormData.policyId}
                               onChange={e => handleEditFormChange('policyId', e.target.value)}
                               disabled={isCorrecting || isExported}
                               className="w-full px-3 py-2 border border-gray-250 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none bg-white font-medium disabled:opacity-75 disabled:bg-gray-100"
                             >
-                              {policies.map(p => (
-                                <option key={p.id} value={p.id}>{p.name} - {p.plan} ({p.region === 2 ? 'R2' : 'R1'})</option>
-                              ))}
+                              {viablePolicies.length === 0 ? (
+                                <option value="" disabled>No hay pólizas viables ({editUserAge} años, Zona {editDestinationRegion})</option>
+                              ) : (
+                                viablePolicies.map(p => (
+                                  <option key={p.id} value={p.id}>
+                                    {p.name} - {p.plan} (Zona {p.region}) {p.deductible ? '• Con deducible' : '• Sin deducible'} - ${p.pricePerDay || 0}/día
+                                  </option>
+                                ))
+                              )}
                             </select>
+                            {viablePolicies.length === 0 && (
+                              <p className="text-[11px] text-amber-600 mt-1">
+                                No se encontraron pólizas activas configuradas para la Zona {editDestinationRegion} y edad de {editUserAge} años.
+                              </p>
+                            )}
                           </div>
                           <div>
                             <label className="block text-xs font-semibold text-gray-600 mb-1">ID Seguro (IDseg)</label>
@@ -3817,6 +3953,19 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
           companySettings={settings}
         />
 
+        {showWhatsAppModal && insurance && (
+          <WhatsAppPolicyLettersModal
+            isOpen={showWhatsAppModal}
+            onClose={() => setShowWhatsAppModal(false)}
+            insurance={insurance}
+            policies={policies}
+            policyLetters={policyLetters}
+            clients={Object.values(clients || {})}
+            users={Object.values(agents || {})}
+            companySettings={settings}
+          />
+        )}
+
         {showDiscountCommissionModal && (
           <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[210] p-4 animate-in fade-in duration-200">
             <div className="bg-white rounded-[2rem] shadow-2xl w-full max-w-md overflow-hidden animate-in zoom-in duration-300">
@@ -4041,7 +4190,23 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
         )}
 
         {/* Footer */}
-        <div className="p-6 bg-gray-50 border-t border-gray-100 flex justify-end gap-3">
+        <div className="p-6 bg-gray-50 border-t border-gray-100 flex justify-end gap-3 flex-wrap items-center">
+          {insurance && (() => {
+            const clientList = Object.values(clients || {});
+            const agentList = Object.values(agents || {});
+            const waContacts = getPolicyWhatsAppContacts(insurance, clientList, agentList);
+            if (!waContacts.hasAnyPhone) return null;
+            return (
+              <button 
+                onClick={() => setShowWhatsAppModal(true)}
+                className="p-2.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-all shadow-sm flex items-center justify-center hover:scale-105 active:scale-95"
+                title={`Enviar cartas por WhatsApp (${waContacts.label})`}
+                aria-label={`Enviar cartas por WhatsApp (${waContacts.label})`}
+              >
+                <MessageCircle className="w-5 h-5" />
+              </button>
+            );
+          })()}
           <button 
             onClick={() => setShowEmailModal(true)}
             className="px-6 py-2 bg-blue-600 text-white font-bold rounded-lg hover:bg-blue-700 transition-colors flex items-center gap-2"
