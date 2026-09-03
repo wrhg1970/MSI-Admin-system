@@ -1,9 +1,9 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { collection, addDoc, serverTimestamp, query, getDocs, orderBy, limit, doc, getDoc, setDoc, onSnapshot, where } from 'firebase/firestore';
+import { collection, addDoc, updateDoc, serverTimestamp, query, getDocs, orderBy, limit, doc, getDoc, setDoc, onSnapshot, where } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../firebase';
-import { UserProfile, Policy, PlanType, ClientType, InsuranceRequest, Country, Client, ExchangeRate, PolicyLetter } from '../types';
+import { UserProfile, Policy, PlanType, ClientType, InsuranceRequest, Country, Client, ExchangeRate, PolicyLetter, FacturaData } from '../types';
 import { differenceInYears, differenceInDays, parseISO, format, addDays } from 'date-fns';
-import { CheckCircle2, AlertCircle, AlertTriangle, UserPlus, Users, Building2, User, Globe, FileText, Search, Upload, CreditCard, Mail, X, Loader2, Copy } from 'lucide-react';
+import { CheckCircle2, AlertCircle, AlertTriangle, UserPlus, Users, Building2, User, Globe, FileText, Search, Upload, CreditCard, Mail, X, Loader2, Copy, Receipt } from 'lucide-react';
 import BulkImportModal from './BulkImportModal';
 import { useNavigate, useLocation } from 'react-router-dom';
 import TransactionModal from './TransactionModal';
@@ -60,7 +60,72 @@ export default function InsuranceForm({ profile }: InsuranceFormProps) {
     isExtremeSports: false,
     notes: '',
     paymentMethod: '',
+    solicitudFactura: false,
   });
+
+  const [facturaData, setFacturaData] = useState<FacturaData>({
+    rfc: '',
+    razonSocial: '',
+    direccion: '',
+    ciudad: '',
+    state: '',
+    zip: '',
+    country: 'MX',
+    email: '',
+    regimenFiscal: '',
+    cfdiUse: '',
+  });
+  const [syncClientBilling, setSyncClientBilling] = useState<boolean>(true);
+
+  // Helper to fetch/populate billing data from the selected client's profile
+  const populateBillingFromClient = (targetClient?: Client | null) => {
+    let clientToUse = targetClient;
+    if (!clientToUse) {
+      if (formData.clientId) {
+        clientToUse = clients.find(c => c.id === formData.clientId);
+      }
+      if (!clientToUse && formData.email) {
+        clientToUse = clients.find(c => (c.email || '').trim().toLowerCase() === formData.email.trim().toLowerCase());
+      }
+    }
+
+    if (clientToUse) {
+      const isInd = clientToUse.type === 'Individual';
+      const clientFullName = `${clientToUse.firstName || ''} ${clientToUse.lastName || ''}`.trim();
+      const derivedRazonSocial = isInd
+        ? (clientFullName || `${formData.firstName} ${formData.lastName}`.trim())
+        : (clientToUse.legalName || clientToUse.commercialName || clientFullName || `${formData.firstName} ${formData.lastName}`.trim());
+
+      setFacturaData({
+        rfc: (clientToUse.rfc || '').toUpperCase(),
+        razonSocial: derivedRazonSocial || '',
+        direccion: clientToUse.address || '',
+        ciudad: clientToUse.city || formData.city || '',
+        state: clientToUse.state || '',
+        zip: clientToUse.zip || '',
+        country: clientToUse.country || formData.originCountry || 'MX',
+        email: clientToUse.email || formData.email || '',
+        regimenFiscal: clientToUse.regimenFiscal || '',
+        cfdiUse: clientToUse.cfdiUse || '',
+      });
+    } else {
+      // Default from current form fields if client has no billing profile yet
+      setFacturaData(prev => ({
+        ...prev,
+        razonSocial: prev.razonSocial || `${formData.firstName} ${formData.lastName}`.trim(),
+        email: prev.email || formData.email || '',
+        ciudad: prev.ciudad || formData.city || '',
+        country: prev.country || formData.originCountry || 'MX'
+      }));
+    }
+  };
+
+  const handleToggleSolicitudFactura = (requires: boolean) => {
+    setFormData(prev => ({ ...prev, solicitudFactura: requires }));
+    if (requires) {
+      populateBillingFromClient();
+    }
+  };
 
   // Populate basic data when duplicating from an existing policy
   useEffect(() => {
@@ -78,7 +143,11 @@ export default function InsuranceForm({ profile }: InsuranceFormProps) {
         originCountry: duplicateData.originCountry || prev.originCountry,
         destinationCountry: duplicateData.destinationCountry || prev.destinationCountry,
         city: duplicateData.city || prev.city,
+        solicitudFactura: duplicateData.solicitudFactura || false,
       }));
+      if (duplicateData.facturaData) {
+        setFacturaData(duplicateData.facturaData);
+      }
       setDuplicateBanner(true);
     }
   }, [duplicateData]);
@@ -669,12 +738,14 @@ export default function InsuranceForm({ profile }: InsuranceFormProps) {
             email: formData.email || '',
             birthDate: formData.birthDate || '',
             phone: '', 
-            address: '',
-            city: formData.city || '',
-            state: '',
-            zip: '',
-            country: formData.originCountry || '',
-            rfc: '',
+            address: formData.solicitudFactura && facturaData.direccion ? facturaData.direccion.trim() : '',
+            city: formData.city || (formData.solicitudFactura ? facturaData.ciudad?.trim() : '') || '',
+            state: formData.solicitudFactura && facturaData.state ? facturaData.state.trim() : '',
+            zip: formData.solicitudFactura && facturaData.zip ? facturaData.zip.trim() : '',
+            country: formData.originCountry || (formData.solicitudFactura ? facturaData.country?.trim() : '') || '',
+            rfc: formData.solicitudFactura && facturaData.rfc ? facturaData.rfc.toUpperCase().trim() : '',
+            regimenFiscal: formData.solicitudFactura && facturaData.regimenFiscal ? facturaData.regimenFiscal.trim() : '',
+            cfdiUse: formData.solicitudFactura && facturaData.cfdiUse ? facturaData.cfdiUse.trim() : '',
             notes: formData.notes || '',
             createdAt: serverTimestamp()
           };
@@ -706,8 +777,26 @@ export default function InsuranceForm({ profile }: InsuranceFormProps) {
         status: 'pending',
         requestDate: formData.requestDate || format(new Date(), 'yyyy-MM-dd'),
         exchangeRate: exchangeRate,
+        solicitudFactura: formData.solicitudFactura || false,
         createdAt: serverTimestamp(),
       };
+
+      if (formData.solicitudFactura) {
+        insurance.facturaData = {
+          rfc: (facturaData.rfc || '').toUpperCase().trim(),
+          razonSocial: (facturaData.razonSocial || '').trim(),
+          direccion: (facturaData.direccion || '').trim(),
+          ciudad: (facturaData.ciudad || '').trim(),
+          state: (facturaData.state || '').trim(),
+          zip: (facturaData.zip || '').trim(),
+          country: (facturaData.country || 'MX').trim(),
+          email: (facturaData.email || '').trim(),
+          regimenFiscal: (facturaData.regimenFiscal || '').trim(),
+          cfdiUse: (facturaData.cfdiUse || '').trim(),
+        };
+        insurance.rfcFactura = (facturaData.rfc || '').toUpperCase().trim();
+        insurance.razonSocialFactura = (facturaData.razonSocial || '').trim();
+      }
 
       // Only add non-undefined fields from restFormData
       Object.entries(restFormData).forEach(([key, value]) => {
@@ -723,6 +812,26 @@ export default function InsuranceForm({ profile }: InsuranceFormProps) {
       console.log('Saving insurance:', insurance);
       const docRef = await addDoc(collection(db, 'insurances'), insurance);
       const newId = docRef.id;
+
+      // Update client billing details if existing client and sync is true
+      if (finalClientId && syncClientBilling && formData.solicitudFactura) {
+        try {
+          const clientUpdate: any = {};
+          if (facturaData.rfc) clientUpdate.rfc = facturaData.rfc.toUpperCase().trim();
+          if (facturaData.direccion) clientUpdate.address = facturaData.direccion.trim();
+          if (facturaData.ciudad) clientUpdate.city = facturaData.ciudad.trim();
+          if (facturaData.state) clientUpdate.state = facturaData.state.trim();
+          if (facturaData.zip) clientUpdate.zip = facturaData.zip.trim();
+          if (facturaData.country) clientUpdate.country = facturaData.country.trim();
+          if (facturaData.regimenFiscal) clientUpdate.regimenFiscal = facturaData.regimenFiscal.trim();
+          if (facturaData.cfdiUse) clientUpdate.cfdiUse = facturaData.cfdiUse.trim();
+          if (Object.keys(clientUpdate).length > 0) {
+            await updateDoc(doc(db, 'clients', finalClientId), clientUpdate);
+          }
+        } catch (clientErr) {
+          console.error("Error updating client billing profile:", clientErr);
+        }
+      }
 
       // Update IDseg counter if needed after successful creation
       try {
@@ -874,6 +983,19 @@ export default function InsuranceForm({ profile }: InsuranceFormProps) {
     setStripePaymentUrl(null);
     setStripeEmailSent(false);
 
+    setFacturaData({
+      rfc: '',
+      razonSocial: '',
+      direccion: '',
+      ciudad: '',
+      state: '',
+      zip: '',
+      country: 'MX',
+      email: '',
+      regimenFiscal: '',
+      cfdiUse: '',
+    });
+
     setFormData(prev => ({
       ...prev,
       IDseg: nextIDseg,
@@ -882,6 +1004,7 @@ export default function InsuranceForm({ profile }: InsuranceFormProps) {
       birthDate: '',
       notes: '',
       registerAsNewClient: false,
+      solicitudFactura: false,
       ...(isAgentOrCorporate ? {
         // Mantener clientId (agente/corporativo), linkedAgentId (subagente), y email
       } : {
@@ -1480,6 +1603,190 @@ export default function InsuranceForm({ profile }: InsuranceFormProps) {
                 </div>
               </div>
             )}
+
+            {/* Solicitud Factura */}
+            <div className="md:col-span-2 p-4 bg-gray-50/90 rounded-xl border border-gray-200">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <Receipt className="w-4 h-4 text-blue-600" />
+                    <label className="block text-xs font-bold text-gray-800 uppercase">
+                      Solicitud Factura
+                    </label>
+                  </div>
+                  <p className="text-xs text-gray-500 mt-0.5">¿Requiere factura fiscal (CFDI) para esta póliza? (Por default: No)</p>
+                </div>
+                <div className="flex items-center gap-4 bg-white px-3 py-1.5 rounded-lg border border-gray-200 shadow-sm">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="solicitudFactura"
+                      checked={!formData.solicitudFactura}
+                      onChange={() => handleToggleSolicitudFactura(false)}
+                      className="w-4 h-4 text-blue-600 cursor-pointer"
+                    />
+                    <span className="text-sm font-medium text-gray-700">No</span>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="solicitudFactura"
+                      checked={formData.solicitudFactura === true}
+                      onChange={() => handleToggleSolicitudFactura(true)}
+                      className="w-4 h-4 text-blue-600 cursor-pointer"
+                    />
+                    <span className="text-sm font-bold text-blue-700">Sí</span>
+                  </label>
+                </div>
+              </div>
+
+              {formData.solicitudFactura && (
+                <div className="mt-4 pt-4 border-t border-gray-200 space-y-4 animate-in fade-in">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="text-xs font-bold text-blue-900 flex items-center gap-1.5">
+                      <FileText className="w-3.5 h-3.5 text-blue-600" />
+                      Datos de Facturación Fiscal
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => populateBillingFromClient()}
+                      className="text-xs text-blue-600 hover:text-blue-800 font-medium underline cursor-pointer"
+                    >
+                      Traer datos del perfil de cliente
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-xs font-bold text-gray-600 uppercase mb-1">
+                        RFC <span className="text-red-500">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        value={facturaData.rfc || ''}
+                        onChange={e => setFacturaData(prev => ({ ...prev, rfc: e.target.value.toUpperCase() }))}
+                        className="w-full p-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none uppercase font-mono text-sm bg-white"
+                        placeholder="XAXX010101000"
+                        required={formData.solicitudFactura}
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-gray-600 uppercase mb-1">
+                        Razón Social / Nombre Fiscal <span className="text-red-500">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        value={facturaData.razonSocial || ''}
+                        onChange={e => setFacturaData(prev => ({ ...prev, razonSocial: e.target.value }))}
+                        className="w-full p-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-sm bg-white"
+                        placeholder="Nombre fiscal o Razón Social"
+                        required={formData.solicitudFactura}
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-gray-600 uppercase mb-1">
+                        Dirección Fiscal (Calle y Número)
+                      </label>
+                      <input
+                        type="text"
+                        value={facturaData.direccion || ''}
+                        onChange={e => setFacturaData(prev => ({ ...prev, direccion: e.target.value }))}
+                        className="w-full p-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-sm bg-white"
+                        placeholder="Av. Ejemplo 123 Int. 4"
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-xs font-bold text-gray-600 uppercase mb-1">Código Postal (CP)</label>
+                        <input
+                          type="text"
+                          value={facturaData.zip || ''}
+                          onChange={e => setFacturaData(prev => ({ ...prev, zip: e.target.value }))}
+                          className="w-full p-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none font-mono text-sm bg-white"
+                          placeholder="01000"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold text-gray-600 uppercase mb-1">Ciudad</label>
+                        <input
+                          type="text"
+                          value={facturaData.ciudad || ''}
+                          onChange={e => setFacturaData(prev => ({ ...prev, ciudad: e.target.value }))}
+                          className="w-full p-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-sm bg-white"
+                          placeholder="Ciudad"
+                        />
+                      </div>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="block text-xs font-bold text-gray-600 uppercase mb-1">Estado</label>
+                        <input
+                          type="text"
+                          value={facturaData.state || ''}
+                          onChange={e => setFacturaData(prev => ({ ...prev, state: e.target.value }))}
+                          className="w-full p-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-sm bg-white"
+                          placeholder="Estado"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-xs font-bold text-gray-600 uppercase mb-1">País</label>
+                        <select
+                          value={facturaData.country || 'MX'}
+                          onChange={e => setFacturaData(prev => ({ ...prev, country: e.target.value }))}
+                          className="w-full p-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-sm bg-white"
+                        >
+                          {Array.from(new Map([...COUNTRIES, ...countries].map(c => [c.code, c])).values())
+                            .sort((a, b) => (a.name || '').localeCompare(b.name || '', 'es', { sensitivity: 'base' }))
+                            .map(c => <option key={c.code} value={c.code}>{c.name}</option>)}
+                        </select>
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-gray-600 uppercase mb-1">Correo para Facturación</label>
+                      <input
+                        type="email"
+                        value={facturaData.email || ''}
+                        onChange={e => setFacturaData(prev => ({ ...prev, email: e.target.value }))}
+                        className="w-full p-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-sm bg-white"
+                        placeholder="facturacion@empresa.com"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-gray-600 uppercase mb-1">Régimen Fiscal</label>
+                      <input
+                        type="text"
+                        value={facturaData.regimenFiscal || ''}
+                        onChange={e => setFacturaData(prev => ({ ...prev, regimenFiscal: e.target.value }))}
+                        className="w-full p-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-sm bg-white"
+                        placeholder="Ej. 601 General de Ley, 612 Personas Físicas..."
+                      />
+                    </div>
+                    <div className="md:col-span-2">
+                      <label className="block text-xs font-bold text-gray-600 uppercase mb-1">Uso de CFDI</label>
+                      <input
+                        type="text"
+                        value={facturaData.cfdiUse || ''}
+                        onChange={e => setFacturaData(prev => ({ ...prev, cfdiUse: e.target.value }))}
+                        className="w-full p-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-sm bg-white"
+                        placeholder="Ej. G03 Gastos en general, D07 Primas por seguros..."
+                      />
+                    </div>
+                  </div>
+
+                  <label className="flex items-center gap-2 cursor-pointer pt-1">
+                    <input
+                      type="checkbox"
+                      checked={syncClientBilling}
+                      onChange={e => setSyncClientBilling(e.target.checked)}
+                      className="w-4 h-4 text-blue-600 rounded cursor-pointer"
+                    />
+                    <span className="text-xs text-gray-600 font-medium">
+                      Guardar / actualizar estos datos fiscales en el perfil del cliente
+                    </span>
+                  </label>
+                </div>
+              )}
+            </div>
           </div>
         </div>
 

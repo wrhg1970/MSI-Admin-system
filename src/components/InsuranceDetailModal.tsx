@@ -1,14 +1,15 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { X, Calendar, User, Mail, MapPin, Shield, DollarSign, Clock, Briefcase, Receipt, CreditCard, FileText, Plus, CheckCircle, ArrowUpRight, Pencil, Check, Printer, ArrowRight, XCircle, History, MessageSquare, Activity, Percent, Trash2, Copy, Calculator, RefreshCw, MessageCircle } from 'lucide-react';
+import { X, Calendar, User, Mail, MapPin, Shield, DollarSign, Clock, Briefcase, Receipt, CreditCard, FileText, Plus, CheckCircle, ArrowUpRight, Pencil, Check, Printer, ArrowRight, XCircle, History, MessageSquare, Activity, Percent, Trash2, Copy, Calculator, RefreshCw, MessageCircle, RotateCcw } from 'lucide-react';
 import { COUNTRIES } from '../constants';
-import { collection, query, where, onSnapshot, orderBy, doc, updateDoc, getDocs, getDoc, addDoc, deleteDoc, setDoc } from 'firebase/firestore';
+import { collection, query, where, onSnapshot, orderBy, doc, updateDoc, getDocs, getDoc, addDoc, deleteDoc, setDoc, limit, serverTimestamp } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType, auth } from '../firebase';
-import { InsuranceRequest, Payment, Policy, PolicyLetter, Country } from '../types';
+import { InsuranceRequest, Payment, Policy, PolicyLetter, Country, FacturaData } from '../types';
 import { useNavigate } from 'react-router-dom';
 import { format, parseISO, differenceInDays, differenceInYears, isValid, addDays } from 'date-fns';
 import { es } from 'date-fns/locale';
 import TransactionModal from './TransactionModal';
 import EmailModal from './EmailModal';
+import RefundModal from './RefundModal';
 import { generatePDF, generateReceiptPDF } from '../lib/pdfGenerator';
 import { createZipFromPdfs, downloadBlob } from '../lib/zipUtils';
 import { useCompany } from '../App';
@@ -138,7 +139,8 @@ export default function InsuranceDetailModal({ isOpen, onClose, insurance, initi
     actionType: 'NEW',
     clientType: 'Individual',
     clientId: '',
-    linkedAgentId: ''
+    linkedAgentId: '',
+    solicitudFactura: false
   });
 
   const handleEditFormChange = (field: string, value: any) => {
@@ -408,6 +410,10 @@ export default function InsuranceDetailModal({ isOpen, onClose, insurance, initi
         clientType: editFormData.clientType,
         clientId: editFormData.clientType === 'Individual' ? '' : editFormData.clientId,
         linkedAgentId: editFormData.clientType === 'Individual' ? '' : editFormData.linkedAgentId,
+        solicitudFactura: editFormData.solicitudFactura,
+        facturaData: editFormData.solicitudFactura ? facturaDataState : null,
+        rfcFactura: editFormData.solicitudFactura ? (facturaDataState.rfc?.toUpperCase().trim() || '') : '',
+        razonSocialFactura: editFormData.solicitudFactura ? (facturaDataState.razonSocial?.trim() || '') : '',
       };
 
       await updateDoc(doc(db, 'insurances', insurance.id), updatedData);
@@ -449,43 +455,116 @@ export default function InsuranceDetailModal({ isOpen, onClose, insurance, initi
     const activeIns = localInsurance || insurance;
     if (!activeIns?.id) return;
 
+    const confirmCancel = window.confirm(
+      "¿Confirma la cancelación de esta póliza?\n\nDe manera automática se creará el registro de cancelación (CAN) y se generará un pago negativo por la misma cantidad."
+    );
+    if (!confirmCancel) {
+      if (initialAction === 'cancel') {
+        onClose();
+      }
+      return;
+    }
+
     try {
       setSavingEditAll(true);
       
+      // Determinar la cantidad exacta de la póliza para generar el pago negativo por la misma cantidad
+      const policyAmount = Math.abs(
+        (activeIns.totalFinal !== undefined && activeIns.totalFinal !== null && activeIns.totalFinal !== 0)
+          ? activeIns.totalFinal
+          : (activeIns.totalPaid !== undefined && activeIns.totalPaid !== null && activeIns.totalPaid !== 0)
+          ? activeIns.totalPaid
+          : (activeIns.totalPrice || 0)
+      );
+
+      const currency = (activeIns as any).currency || (activeIns as any).paymentCurrency || 'USD';
+      let exchangeRate = Number((activeIns as any).exchangeRate || (activeIns as any).paymentExchangeRate) || 20;
+      try {
+        const todayStr = format(new Date(), 'yyyy-MM-dd');
+        const qRate = query(collection(db, 'exchangeRates'), where('date', '==', todayStr), limit(1));
+        const rateSnap = await getDocs(qRate);
+        if (!rateSnap.empty && rateSnap.docs[0].data()?.rate) {
+          exchangeRate = parseFloat(rateSnap.docs[0].data().rate) || exchangeRate;
+        }
+      } catch (e) {
+        console.warn("Could not fetch today's exchange rate:", e);
+      }
+      const amountMXP = Math.round(policyAmount * exchangeRate * 100) / 100;
+
       const duplicateData = {
         ...activeIns,
-        totalPrice: (activeIns.totalPrice || 0) * -1,
-        totalCost: (activeIns.totalCost || 0) * -1,
-        discount: (activeIns.discount || 0) * -1,
-        adjustment: (activeIns.adjustment || 0) * -1,
-        agentCommission: (activeIns.agentCommission || 0) * -1,
-        comision: (activeIns.comision || 0) * -1,
-        totalFinal: (activeIns.totalFinal || 0) * -1,
-        totalPaid: 0, // No payment exists directly on the cancellation record itself
+        totalPrice: -Math.abs(activeIns.totalPrice || 0),
+        totalCost: -Math.abs(activeIns.totalCost || 0),
+        discount: -Math.abs(activeIns.discount || 0),
+        adjustment: -Math.abs(activeIns.adjustment || 0),
+        agentCommission: -Math.abs(activeIns.agentCommission || 0),
+        comision: -Math.abs(activeIns.comision || 0),
+        totalFinal: -policyAmount,
+        totalPaid: -policyAmount, // Pago negativo que equilibra el registro CAN a saldo 0
+        status: 'paid',
         actionType: 'CAN',
         Caremed: null,
         InvoiceCaremed: null,
         requestDate: format(new Date(), 'yyyy-MM-dd'),
         createdAt: new Date(),
-        closed: true, // Marker to keep it closed / unmodifiable
+        closed: true, // Marcador para mantenerlo cerrado y no modificable
+        cancelledFromInsuranceId: activeIns.id,
       };
       delete duplicateData.id;
 
-      await addDoc(collection(db, 'insurances'), duplicateData);
+      const newCanDocRef = await addDoc(collection(db, 'insurances'), duplicateData);
+      const newCanId = newCanDocRef.id;
+
+      // Generar de manera automática el pago negativo por la misma cantidad en la colección de pagos
+      const negativePaymentData = {
+        insuranceId: newCanId,
+        originalInsuranceId: activeIns.id,
+        amount: -policyAmount,
+        currency: currency,
+        amountMXP: -amountMXP,
+        exchangeRate: exchangeRate,
+        type: 'client_payment' as const,
+        paymentMethod: activeIns.paymentMethod || 'Cancelación',
+        depositAccount: (activeIns as any).depositAccount || '',
+        receiptNumber: `CAN-${activeIns.receiptNumber || Math.floor(1000 + Math.random() * 9000)}`,
+        status: 'completed' as const,
+        date: new Date(),
+        notes: `Pago negativo automático por cancelación de póliza ${activeIns.IDseg || activeIns.id || ''}`,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+        createdBy: auth.currentUser?.email || 'Sistema'
+      };
+
+      await addDoc(collection(db, 'payments'), negativePaymentData);
+
+      // Actualizar registro original marcándolo como cancelado
+      await updateDoc(doc(db, 'insurances', activeIns.id), {
+        isCancelled: true,
+        cancellationInsuranceId: newCanId,
+        updatedAt: serverTimestamp()
+      });
 
       await logInsuranceActivity({
         insuranceId: activeIns.id,
         type: 'manual',
-        description: `Se canceló el seguro de forma manual. Se duplicó el registro con el tipo de acción CAN.`,
+        description: `Se canceló el seguro de forma manual. Se duplicó el registro con el tipo de acción CAN por -$${policyAmount.toFixed(2)} USD y se generó automáticamente un pago negativo por -$${policyAmount.toFixed(2)} USD (ID CAN: ${newCanId}).`,
         date: new Date(),
         createdBy: auth.currentUser?.email || 'Sistema'
       });
 
-      alert("Seguro duplicado con éxito con tipo de acción CAN (Cancelación).");
+      await logInsuranceActivity({
+        insuranceId: newCanId,
+        type: 'automatic',
+        description: `Póliza de cancelación CAN generada con pago negativo automático por -$${policyAmount.toFixed(2)} USD.`,
+        date: new Date(),
+        createdBy: auth.currentUser?.email || 'Sistema'
+      });
+
+      alert(`Póliza cancelada con éxito. Se generó el registro CAN y un pago negativo automático por -$${policyAmount.toFixed(2)} USD.`);
       onClose();
     } catch (err) {
-      console.error("Error duplicating as CAN:", err);
-      alert("Error al duplicar seguro como CAN: " + (err as Error).message);
+      console.error("Error duplicating as CAN with negative payment:", err);
+      alert("Error al cancelar seguro: " + (err as Error).message);
     } finally {
       setSavingEditAll(false);
     }
@@ -571,7 +650,8 @@ export default function InsuranceDetailModal({ isOpen, onClose, insurance, initi
         actionType: 'COR',
         clientType: duplicateData.clientType || 'Individual',
         clientId: duplicateData.clientId || '',
-        linkedAgentId: duplicateData.linkedAgentId || ''
+        linkedAgentId: duplicateData.linkedAgentId || '',
+        solicitudFactura: !!duplicateData.solicitudFactura
       });
 
       setCorrectionTargetId(newId);
@@ -905,10 +985,160 @@ export default function InsuranceDetailModal({ isOpen, onClose, insurance, initi
   const [newComment, setNewComment] = useState('');
   const [isSubmittingComment, setIsSubmittingComment] = useState(false);
   const [showTransactionModal, setShowTransactionModal] = useState(false);
+  const [showRefundModal, setShowRefundModal] = useState(false);
   const [showDiscountCommissionModal, setShowDiscountCommissionModal] = useState(false);
   const [discountCommissionAmount, setDiscountCommissionAmount] = useState<string>('');
   const [discountCommissionNotes, setDiscountCommissionNotes] = useState<string>('');
   const [isSavingDiscountCommission, setIsSavingDiscountCommission] = useState(false);
+
+  // Solicitud Factura State and Actions
+  const [solicitudFacturaState, setSolicitudFacturaState] = useState<boolean>(false);
+  const [facturaDataState, setFacturaDataState] = useState<FacturaData>({
+    rfc: '',
+    razonSocial: '',
+    direccion: '',
+    ciudad: '',
+    state: '',
+    zip: '',
+    country: 'MX',
+    email: '',
+    regimenFiscal: '',
+    cfdiUse: '',
+  });
+  const [savingFactura, setSavingFactura] = useState<boolean>(false);
+  const [facturaSavedSuccess, setFacturaSavedSuccess] = useState<boolean>(false);
+  const [updateClientProfileToo, setUpdateClientProfileToo] = useState<boolean>(true);
+
+  // Helper to fetch billing data from client's profile
+  const populateFacturaFromClientProfile = (forceDefaults: boolean = false) => {
+    const currentIns = localInsurance || insurance;
+    if (!currentIns) return;
+
+    let matchedClient: any = null;
+    if (currentIns.clientId && clients[currentIns.clientId]) {
+      matchedClient = clients[currentIns.clientId];
+    } else if (currentIns.email) {
+      matchedClient = Object.values(clients).find(
+        (c: any) => c.email && c.email.trim().toLowerCase() === currentIns.email.trim().toLowerCase()
+      );
+    }
+
+    if (matchedClient) {
+      const isInd = matchedClient.type === 'Individual';
+      const clientFullName = `${matchedClient.firstName || ''} ${matchedClient.lastName || ''}`.trim();
+      const derivedRazonSocial = isInd
+        ? (clientFullName || `${currentIns.firstName} ${currentIns.lastName}`.trim())
+        : (matchedClient.legalName || matchedClient.commercialName || clientFullName || `${currentIns.firstName} ${currentIns.lastName}`.trim());
+
+      setFacturaDataState(prev => ({
+        rfc: (matchedClient.rfc || (forceDefaults ? '' : prev.rfc) || '').toUpperCase(),
+        razonSocial: derivedRazonSocial || (forceDefaults ? '' : prev.razonSocial) || `${currentIns.firstName} ${currentIns.lastName}`.trim(),
+        direccion: matchedClient.address || (forceDefaults ? '' : prev.direccion) || '',
+        ciudad: matchedClient.city || currentIns.city || (forceDefaults ? '' : prev.ciudad) || '',
+        state: matchedClient.state || (forceDefaults ? '' : prev.state) || '',
+        zip: matchedClient.zip || (forceDefaults ? '' : prev.zip) || '',
+        country: matchedClient.country || currentIns.originCountry || (forceDefaults ? 'MX' : prev.country) || 'MX',
+        email: matchedClient.email || currentIns.email || (forceDefaults ? '' : prev.email) || '',
+        regimenFiscal: matchedClient.regimenFiscal || (forceDefaults ? '' : prev.regimenFiscal) || '',
+        cfdiUse: matchedClient.cfdiUse || (forceDefaults ? '' : prev.cfdiUse) || '',
+      }));
+    } else {
+      setFacturaDataState(prev => ({
+        ...prev,
+        razonSocial: prev.razonSocial || `${currentIns.firstName} ${currentIns.lastName}`.trim(),
+        email: prev.email || currentIns.email || '',
+        ciudad: prev.ciudad || currentIns.city || '',
+        country: prev.country || currentIns.originCountry || 'MX'
+      }));
+    }
+  };
+
+  const handleToggleDetailSolicitudFactura = async (wantsFactura: boolean) => {
+    setSolicitudFacturaState(wantsFactura);
+    if (wantsFactura) {
+      const currentIns = localInsurance || insurance;
+      const existingData = currentIns?.facturaData;
+      if (!existingData?.rfc && !existingData?.razonSocial) {
+        populateFacturaFromClientProfile();
+      }
+    } else {
+      await handleSaveSolicitudFactura(false);
+    }
+  };
+
+  const handleSaveSolicitudFactura = async (wantsFactura: boolean) => {
+    const currentIns = localInsurance || insurance;
+    if (!currentIns?.id) return;
+
+    setSavingFactura(true);
+    setFacturaSavedSuccess(false);
+
+    try {
+      const updatePayload: any = {
+        solicitudFactura: wantsFactura,
+      };
+
+      if (wantsFactura) {
+        const cleanedFactura: FacturaData = {
+          rfc: (facturaDataState.rfc || '').toUpperCase().trim(),
+          razonSocial: (facturaDataState.razonSocial || '').trim(),
+          direccion: (facturaDataState.direccion || '').trim(),
+          ciudad: (facturaDataState.ciudad || '').trim(),
+          state: (facturaDataState.state || '').trim(),
+          zip: (facturaDataState.zip || '').trim(),
+          country: (facturaDataState.country || 'MX').trim(),
+          email: (facturaDataState.email || '').trim(),
+          regimenFiscal: (facturaDataState.regimenFiscal || '').trim(),
+          cfdiUse: (facturaDataState.cfdiUse || '').trim(),
+        };
+        updatePayload.facturaData = cleanedFactura;
+        updatePayload.rfcFactura = cleanedFactura.rfc || '';
+        updatePayload.razonSocialFactura = cleanedFactura.razonSocial || '';
+      }
+
+      await updateDoc(doc(db, 'insurances', currentIns.id), updatePayload);
+
+      // Optionally sync client profile
+      const targetClientId = currentIns.clientId;
+      if (wantsFactura && updateClientProfileToo && targetClientId) {
+        try {
+          const clientUpdate: any = {};
+          if (facturaDataState.rfc) clientUpdate.rfc = facturaDataState.rfc.toUpperCase().trim();
+          if (facturaDataState.direccion) clientUpdate.address = facturaDataState.direccion.trim();
+          if (facturaDataState.ciudad) clientUpdate.city = facturaDataState.ciudad.trim();
+          if (facturaDataState.state) clientUpdate.state = facturaDataState.state.trim();
+          if (facturaDataState.zip) clientUpdate.zip = facturaDataState.zip.trim();
+          if (facturaDataState.country) clientUpdate.country = facturaDataState.country.trim();
+          if (facturaDataState.regimenFiscal) clientUpdate.regimenFiscal = facturaDataState.regimenFiscal.trim();
+          if (facturaDataState.cfdiUse) clientUpdate.cfdiUse = facturaDataState.cfdiUse.trim();
+
+          if (Object.keys(clientUpdate).length > 0) {
+            await updateDoc(doc(db, 'clients', targetClientId), clientUpdate);
+          }
+        } catch (clientErr) {
+          console.error("Error updating client billing profile:", clientErr);
+        }
+      }
+
+      await logInsuranceActivity({
+        insuranceId: currentIns.id,
+        type: 'manual',
+        description: wantsFactura
+          ? `Solicitud de Factura activada (RFC: ${facturaDataState.rfc || 'Sin RFC'}, Razón: ${facturaDataState.razonSocial || 'N/A'})`
+          : `Solicitud de Factura desactivada (No requiere factura)`,
+        date: new Date(),
+        createdBy: auth.currentUser?.email || 'Sistema'
+      });
+
+      setFacturaSavedSuccess(true);
+      setTimeout(() => setFacturaSavedSuccess(false), 4000);
+    } catch (err: any) {
+      console.error("Error saving factura:", err);
+      alert('Error al guardar datos de facturación: ' + err.message);
+    } finally {
+      setSavingFactura(false);
+    }
+  };
 
   // 1. Calculate destination region for the currently edited destination country
   const editDestinationRegion = useMemo((): 1 | 2 => {
@@ -1454,7 +1684,23 @@ export default function InsuranceDetailModal({ isOpen, onClose, insurance, initi
         actionType: currentIns.actionType || 'NEW',
         clientType: currentIns.clientType || 'Individual',
         clientId: currentIns.clientId || '',
-        linkedAgentId: currentIns.linkedAgentId || ''
+        linkedAgentId: currentIns.linkedAgentId || '',
+        solicitudFactura: !!currentIns.solicitudFactura
+      });
+
+      setSolicitudFacturaState(!!currentIns.solicitudFactura);
+      const fd = currentIns.facturaData || {};
+      setFacturaDataState({
+        rfc: fd.rfc || currentIns.rfcFactura || '',
+        razonSocial: fd.razonSocial || currentIns.razonSocialFactura || '',
+        direccion: fd.direccion || '',
+        ciudad: fd.ciudad || currentIns.city || '',
+        state: fd.state || '',
+        zip: fd.zip || '',
+        country: fd.country || currentIns.originCountry || 'MX',
+        email: fd.email || currentIns.email || '',
+        regimenFiscal: fd.regimenFiscal || '',
+        cfdiUse: fd.cfdiUse || '',
       });
     }
   }, [insurance?.id, localInsurance?.id, isOpen]);
@@ -3014,6 +3260,152 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
                           </div>
                         </div>
                       </div>
+
+                      {/* Factura Section in Full Edit */}
+                      <div className="mt-4 p-4 bg-gray-50 rounded-xl border border-gray-200">
+                        <div className="flex items-center justify-between mb-3">
+                          <div className="flex items-center gap-2">
+                            <Receipt className="w-4 h-4 text-indigo-600" />
+                            <span className="text-xs font-bold text-gray-800 uppercase tracking-wider">Solicitud de Factura</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <label className="flex items-center gap-1.5 cursor-pointer">
+                              <input
+                                type="radio"
+                                name="solicitudFacturaEditAll"
+                                checked={!editFormData.solicitudFactura}
+                                onChange={() => {
+                                  handleEditFormChange('solicitudFactura', false);
+                                  setSolicitudFacturaState(false);
+                                }}
+                                className="text-indigo-600 focus:ring-indigo-500"
+                              />
+                              <span className="text-xs font-medium text-gray-700">No</span>
+                            </label>
+                            <label className="flex items-center gap-1.5 cursor-pointer ml-3">
+                              <input
+                                type="radio"
+                                name="solicitudFacturaEditAll"
+                                checked={!!editFormData.solicitudFactura}
+                                onChange={() => {
+                                  handleEditFormChange('solicitudFactura', true);
+                                  setSolicitudFacturaState(true);
+                                  if (!facturaDataState.rfc && !facturaDataState.razonSocial) {
+                                    populateFacturaFromClientProfile();
+                                  }
+                                }}
+                                className="text-indigo-600 focus:ring-indigo-500"
+                              />
+                              <span className="text-xs font-bold text-indigo-700">Sí</span>
+                            </label>
+                          </div>
+                        </div>
+
+                        {editFormData.solicitudFactura && (
+                          <div className="space-y-3 pt-2 border-t border-gray-200">
+                            <div className="flex justify-between items-center">
+                              <span className="text-[11px] text-gray-500">Datos fiscales para facturación electrónica:</span>
+                              <button
+                                type="button"
+                                onClick={() => populateFacturaFromClientProfile(true)}
+                                className="text-xs text-indigo-600 hover:text-indigo-800 font-semibold underline cursor-pointer"
+                              >
+                                Traer datos del cliente
+                              </button>
+                            </div>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs">
+                              <div>
+                                <label className="block text-gray-600 font-medium mb-1">RFC</label>
+                                <input
+                                  type="text"
+                                  value={facturaDataState.rfc}
+                                  onChange={e => setFacturaDataState(prev => ({ ...prev, rfc: e.target.value.toUpperCase() }))}
+                                  placeholder="XAXX010101000"
+                                  className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg font-mono uppercase bg-white focus:ring-1 focus:ring-indigo-500"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-gray-600 font-medium mb-1">Razón Social / Nombre Fiscal</label>
+                                <input
+                                  type="text"
+                                  value={facturaDataState.razonSocial}
+                                  onChange={e => setFacturaDataState(prev => ({ ...prev, razonSocial: e.target.value }))}
+                                  placeholder="Nombre o Empresa S.A. de C.V."
+                                  className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg bg-white focus:ring-1 focus:ring-indigo-500"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-gray-600 font-medium mb-1">Régimen Fiscal</label>
+                                <input
+                                  type="text"
+                                  value={facturaDataState.regimenFiscal}
+                                  onChange={e => setFacturaDataState(prev => ({ ...prev, regimenFiscal: e.target.value }))}
+                                  placeholder="Ej: 601 General de Ley / 612 Físicas"
+                                  className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg bg-white focus:ring-1 focus:ring-indigo-500"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-gray-600 font-medium mb-1">Uso de CFDI</label>
+                                <input
+                                  type="text"
+                                  value={facturaDataState.cfdiUse}
+                                  onChange={e => setFacturaDataState(prev => ({ ...prev, cfdiUse: e.target.value }))}
+                                  placeholder="Ej: G03 Gastos en general / S01"
+                                  className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg bg-white focus:ring-1 focus:ring-indigo-500"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-gray-600 font-medium mb-1">Correo para Facturación</label>
+                                <input
+                                  type="email"
+                                  value={facturaDataState.email}
+                                  onChange={e => setFacturaDataState(prev => ({ ...prev, email: e.target.value }))}
+                                  placeholder="facturacion@correo.com"
+                                  className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg bg-white focus:ring-1 focus:ring-indigo-500"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-gray-600 font-medium mb-1">Código Postal (C.P.)</label>
+                                <input
+                                  type="text"
+                                  value={facturaDataState.zip}
+                                  onChange={e => setFacturaDataState(prev => ({ ...prev, zip: e.target.value }))}
+                                  placeholder="00000"
+                                  className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg bg-white focus:ring-1 focus:ring-indigo-500"
+                                />
+                              </div>
+                              <div className="sm:col-span-2">
+                                <label className="block text-gray-600 font-medium mb-1">Dirección (Calle, número, colonia)</label>
+                                <input
+                                  type="text"
+                                  value={facturaDataState.direccion}
+                                  onChange={e => setFacturaDataState(prev => ({ ...prev, direccion: e.target.value }))}
+                                  placeholder="Calle y número exterior / interior"
+                                  className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg bg-white focus:ring-1 focus:ring-indigo-500"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-gray-600 font-medium mb-1">Ciudad</label>
+                                <input
+                                  type="text"
+                                  value={facturaDataState.ciudad}
+                                  onChange={e => setFacturaDataState(prev => ({ ...prev, ciudad: e.target.value }))}
+                                  className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg bg-white focus:ring-1 focus:ring-indigo-500"
+                                />
+                              </div>
+                              <div>
+                                <label className="block text-gray-600 font-medium mb-1">Estado</label>
+                                <input
+                                  type="text"
+                                  value={facturaDataState.state}
+                                  onChange={e => setFacturaDataState(prev => ({ ...prev, state: e.target.value }))}
+                                  className="w-full px-2.5 py-1.5 border border-gray-300 rounded-lg bg-white focus:ring-1 focus:ring-indigo-500"
+                                />
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      </div>
                     </div>
 
                     {/* Form Controls */}
@@ -3040,7 +3432,7 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
                   <div>
                     {canManageClosedState && (
                       <div className="flex items-center gap-3 justify-end mb-6">
-                        {activeInsurance?.actionType !== 'CAN' && !activeInsurance?.isCorrected && (activeInsurance as any).Caremed && (
+                        {activeInsurance?.actionType !== 'CAN' && !activeInsurance?.isCorrected && !activeInsurance?.isCancelled && (activeInsurance as any).Caremed && (
                           <>
                             <button
                               type="button"
@@ -3070,6 +3462,12 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
                               Extension
                             </button>
                           </>
+                        )}
+                        {activeInsurance?.isCancelled && (
+                          <span className="flex items-center gap-2 px-3.5 py-1.5 bg-red-50 text-red-700 text-xs font-bold rounded-xl border border-red-200">
+                            <XCircle className="w-4 h-4 text-red-600" />
+                            Póliza Cancelada
+                          </span>
                         )}
                         {!isExported || isSuperAdminOrDirector ? (
                           <button
@@ -3102,7 +3500,8 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
                                 actionType: currentIns.actionType || 'NEW',
                                 clientType: currentIns.clientType || 'Individual',
                                 clientId: currentIns.clientId || '',
-                                linkedAgentId: currentIns.linkedAgentId || ''
+                                linkedAgentId: currentIns.linkedAgentId || '',
+                                solicitudFactura: !!currentIns.solicitudFactura
                               });
                               setIsEditingAll(true);
                             }}
@@ -3323,6 +3722,209 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
                                 </div>
                               )}
                             </div>
+                          </div>
+                        </section>
+
+                        {/* Section: Solicitud Factura (Always editable even if closed) */}
+                        <section className="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+                          <div className="p-4 bg-gradient-to-r from-indigo-50/70 via-blue-50/40 to-white border-b border-gray-100 flex flex-wrap items-center justify-between gap-3">
+                            <div className="flex items-center gap-2.5">
+                              <div className="p-2 bg-indigo-600 text-white rounded-xl shadow-sm">
+                                <Receipt className="w-4 h-4" />
+                              </div>
+                              <div>
+                                <h4 className="font-bold text-gray-900 text-sm flex items-center gap-2">
+                                  Solicitud de Factura
+                                  {activeInsurance?.closed && (
+                                    <span className="text-[10px] font-semibold text-amber-700 bg-amber-50 px-2 py-0.5 rounded-full border border-amber-200">
+                                      Modificable en registro cerrado
+                                    </span>
+                                  )}
+                                </h4>
+                                <p className="text-[11px] text-gray-500">¿El cliente requiere comprobante fiscal / factura?</p>
+                              </div>
+                            </div>
+
+                            {/* No / Sí Selector */}
+                            <div className="flex items-center bg-gray-100 p-1 rounded-xl border border-gray-200">
+                              <button
+                                type="button"
+                                onClick={() => handleToggleDetailSolicitudFactura(false)}
+                                className={`px-3 py-1 text-xs font-bold rounded-lg transition-all cursor-pointer ${
+                                  !solicitudFacturaState
+                                    ? 'bg-white text-gray-800 shadow-sm border border-gray-200/80'
+                                    : 'text-gray-500 hover:text-gray-800'
+                                }`}
+                              >
+                                No
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleToggleDetailSolicitudFactura(true)}
+                                className={`px-3 py-1 text-xs font-bold rounded-lg transition-all cursor-pointer ${
+                                  solicitudFacturaState
+                                    ? 'bg-indigo-600 text-white shadow-sm'
+                                    : 'text-gray-500 hover:text-indigo-600'
+                                }`}
+                              >
+                                Sí
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="p-4">
+                            {!solicitudFacturaState ? (
+                              <div className="flex items-center justify-between text-xs text-gray-500 bg-gray-50 p-3 rounded-xl border border-dashed border-gray-200">
+                                <div className="flex items-center gap-2">
+                                  <div className="w-2 h-2 rounded-full bg-gray-400"></div>
+                                  <span>No se ha solicitado factura para este seguro.</span>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => handleToggleDetailSolicitudFactura(true)}
+                                  className="text-indigo-600 hover:text-indigo-800 font-bold underline cursor-pointer"
+                                >
+                                  Activar Factura
+                                </button>
+                              </div>
+                            ) : (
+                              <div className="space-y-4">
+                                <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 bg-blue-50/60 rounded-xl border border-blue-100 text-xs">
+                                  <span className="text-blue-900 font-medium">
+                                    Datos fiscales para emisión de factura:
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => populateFacturaFromClientProfile(true)}
+                                    className="flex items-center gap-1 text-indigo-700 hover:text-indigo-900 font-bold underline cursor-pointer"
+                                    title="Sobrescribir con los datos del perfil del cliente"
+                                  >
+                                    <RefreshCw className="w-3 h-3" />
+                                    Cargar datos del Cliente
+                                  </button>
+                                </div>
+
+                                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                                  <div>
+                                    <label className="block text-gray-700 font-bold mb-1">RFC *</label>
+                                    <input
+                                      type="text"
+                                      value={facturaDataState.rfc}
+                                      onChange={e => setFacturaDataState(prev => ({ ...prev, rfc: e.target.value.toUpperCase() }))}
+                                      placeholder="XAXX010101000"
+                                      className="w-full px-3 py-2 border border-gray-300 rounded-lg font-mono uppercase bg-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                                    />
+                                  </div>
+                                  <div>
+                                    <label className="block text-gray-700 font-bold mb-1">Razón Social / Nombre Fiscal *</label>
+                                    <input
+                                      type="text"
+                                      value={facturaDataState.razonSocial}
+                                      onChange={e => setFacturaDataState(prev => ({ ...prev, razonSocial: e.target.value }))}
+                                      placeholder="Nombre completo o Empresa S.A. de C.V."
+                                      className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                                    />
+                                  </div>
+                                  <div>
+                                    <label className="block text-gray-700 font-bold mb-1">Régimen Fiscal</label>
+                                    <input
+                                      type="text"
+                                      value={facturaDataState.regimenFiscal}
+                                      onChange={e => setFacturaDataState(prev => ({ ...prev, regimenFiscal: e.target.value }))}
+                                      placeholder="Ej: 601 General / 612 Personas Físicas"
+                                      className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                                    />
+                                  </div>
+                                  <div>
+                                    <label className="block text-gray-700 font-bold mb-1">Uso de CFDI</label>
+                                    <input
+                                      type="text"
+                                      value={facturaDataState.cfdiUse}
+                                      onChange={e => setFacturaDataState(prev => ({ ...prev, cfdiUse: e.target.value }))}
+                                      placeholder="Ej: G03 Gastos en general / S01"
+                                      className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                                    />
+                                  </div>
+                                  <div>
+                                    <label className="block text-gray-700 font-bold mb-1">Correo para Factura</label>
+                                    <input
+                                      type="email"
+                                      value={facturaDataState.email}
+                                      onChange={e => setFacturaDataState(prev => ({ ...prev, email: e.target.value }))}
+                                      placeholder="facturacion@correo.com"
+                                      className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                                    />
+                                  </div>
+                                  <div>
+                                    <label className="block text-gray-700 font-bold mb-1">Código Postal (C.P.)</label>
+                                    <input
+                                      type="text"
+                                      value={facturaDataState.zip}
+                                      onChange={e => setFacturaDataState(prev => ({ ...prev, zip: e.target.value }))}
+                                      placeholder="00000"
+                                      className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                                    />
+                                  </div>
+                                  <div className="sm:col-span-2">
+                                    <label className="block text-gray-700 font-bold mb-1">Dirección Fiscal (Calle, número, colonia)</label>
+                                    <input
+                                      type="text"
+                                      value={facturaDataState.direccion}
+                                      onChange={e => setFacturaDataState(prev => ({ ...prev, direccion: e.target.value }))}
+                                      placeholder="Calle y número exterior / interior"
+                                      className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                                    />
+                                  </div>
+                                  <div>
+                                    <label className="block text-gray-700 font-bold mb-1">Ciudad</label>
+                                    <input
+                                      type="text"
+                                      value={facturaDataState.ciudad}
+                                      onChange={e => setFacturaDataState(prev => ({ ...prev, ciudad: e.target.value }))}
+                                      className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                                    />
+                                  </div>
+                                  <div>
+                                    <label className="block text-gray-700 font-bold mb-1">Estado / Provincia</label>
+                                    <input
+                                      type="text"
+                                      value={facturaDataState.state}
+                                      onChange={e => setFacturaDataState(prev => ({ ...prev, state: e.target.value }))}
+                                      className="w-full px-3 py-2 border border-gray-300 rounded-lg bg-white focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 outline-none"
+                                    />
+                                  </div>
+                                </div>
+
+                                <div className="pt-2 border-t border-gray-100 flex flex-wrap items-center justify-between gap-3">
+                                  <label className="flex items-center gap-2 cursor-pointer text-xs text-gray-700">
+                                    <input
+                                      type="checkbox"
+                                      checked={updateClientProfileToo}
+                                      onChange={e => setUpdateClientProfileToo(e.target.checked)}
+                                      className="rounded text-indigo-600 focus:ring-indigo-500"
+                                    />
+                                    <span>Guardar también estos datos en el perfil del Cliente</span>
+                                  </label>
+
+                                  <div className="flex items-center gap-2">
+                                    {facturaSavedSuccess && (
+                                      <span className="flex items-center gap-1 text-xs font-bold text-emerald-600 animate-fade-in">
+                                        <Check className="w-3.5 h-3.5" />
+                                        Guardado
+                                      </span>
+                                    )}
+                                    <button
+                                      type="button"
+                                      onClick={() => handleSaveSolicitudFactura(true)}
+                                      disabled={savingFactura}
+                                      className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl shadow-md shadow-indigo-100 transition-all cursor-pointer disabled:opacity-50"
+                                    >
+                                      {savingFactura ? 'Guardando...' : 'Guardar Datos de Factura'}
+                                    </button>
+                                  </div>
+                                </div>
+                              </div>
+                            )}
                           </div>
                         </section>
                       </div>
@@ -3572,11 +4174,44 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
                     <p className="text-xs text-blue-600 font-bold uppercase mb-1 tracking-wider">Venta Total</p>
                     <p className="text-2xl sm:text-3xl font-extrabold text-blue-700">{formatValue(displayTotalPrice)} USD</p>
                   </div>
-                  <div className={`p-5 rounded-2xl border shadow-sm transition-all hover:shadow-md ${displayPendingBalance >= 3 ? 'bg-amber-50 border-amber-100' : 'bg-gray-50 border-gray-100'}`}>
-                    <p className={`text-xs font-bold uppercase mb-1 tracking-wider ${displayPendingBalance >= 3 ? 'text-amber-600' : 'text-gray-500'}`}>Saldo Pendiente</p>
-                    <p className={`text-2xl sm:text-3xl font-extrabold ${displayPendingBalance >= 3 ? 'text-amber-700' : 'text-gray-600'}`}>{formatValue(displayPendingBalance)} USD</p>
+                  <div className={`p-5 rounded-2xl border shadow-sm transition-all hover:shadow-md ${displayPendingBalance >= 3 ? 'bg-amber-50 border-amber-100' : displayPendingBalance < -0.01 ? 'bg-blue-50 border-blue-100' : 'bg-gray-50 border-gray-100'}`}>
+                    <p className={`text-xs font-bold uppercase mb-1 tracking-wider ${displayPendingBalance >= 3 ? 'text-amber-600' : displayPendingBalance < -0.01 ? 'text-blue-600' : 'text-gray-500'}`}>
+                      {displayPendingBalance < -0.01 ? 'Sobrepago a Favor' : 'Saldo Pendiente'}
+                    </p>
+                    <p className={`text-2xl sm:text-3xl font-extrabold ${displayPendingBalance >= 3 ? 'text-amber-700' : displayPendingBalance < -0.01 ? 'text-blue-700' : 'text-gray-600'}`}>
+                      {displayPendingBalance < -0.01 ? `+$${Math.abs(displayPendingBalance).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD` : `${formatValue(displayPendingBalance)} USD`}
+                    </p>
                   </div>
                 </div>
+
+                {/* Banner y Botón de Reembolso cuando el sobrepago es mayor a $5 */}
+                {displayPendingBalance < -5 && (
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4.5 bg-gradient-to-r from-blue-50 via-indigo-50/50 to-blue-50 rounded-2xl border border-blue-200 shadow-sm">
+                    <div className="flex items-center gap-3">
+                      <div className="p-2.5 bg-blue-600 text-white rounded-xl shadow-xs shrink-0">
+                        <RotateCcw className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <p className="text-xs font-bold text-blue-900 uppercase tracking-wider">Saldo de Sobrepago Detectado</p>
+                          <span className="px-2.5 py-0.5 bg-blue-200 text-blue-800 text-[10px] font-black rounded-full">
+                            +${Math.abs(displayPendingBalance).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD
+                          </span>
+                        </div>
+                        <p className="text-xs text-blue-700 mt-0.5">
+                          El asegurado cuenta con un saldo de sobrepago superior a $5.00 USD. Puedes dar de alta un reembolso por la cantidad de sobrepago.
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => setShowRefundModal(true)}
+                      className="px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl transition-all shadow-md shadow-blue-200 flex items-center gap-2 cursor-pointer whitespace-nowrap hover:scale-[1.02] active:scale-95"
+                    >
+                      <RotateCcw className="w-4 h-4" />
+                      Dar de Alta Reembolso (${Math.abs(displayPendingBalance).toFixed(2)} USD)
+                    </button>
+                  </div>
+                )}
 
                 {/* Acciones de Cobro Re-diseñadas para evitar encimamiento o desbordamiento */}
                 {((insurance.totalPaid || 0) < insuranceTotalPrice) && !isInsuranceClosed(localInsurance || insurance) && (
@@ -3651,12 +4286,18 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
                               {formatDisplayDate(p.date)}
                             </td>
                             <td className="px-6 py-4">
-                              <span className={`px-2 py-1 text-[10px] font-bold rounded uppercase border ${
-                                p.type === 'client_payment' ? 'bg-green-50 text-green-700 border-green-100' :
-                                'bg-red-50 text-red-700 border-red-100'
-                              }`}>
-                                {p.type === 'client_payment' ? 'Cobro Cliente' : 'Pago Proveedor'}
-                              </span>
+                              {(() => {
+                                const isRefund = p.amount < 0 || String(p.notes || '').toLowerCase().includes('reembolso');
+                                return (
+                                  <span className={`px-2 py-1 text-[10px] font-bold rounded uppercase border ${
+                                    isRefund ? 'bg-purple-50 text-purple-700 border-purple-200' :
+                                    p.type === 'client_payment' ? 'bg-green-50 text-green-700 border-green-100' :
+                                    'bg-red-50 text-red-700 border-red-100'
+                                  }`}>
+                                    {isRefund ? 'Reembolso' : p.type === 'client_payment' ? 'Cobro Cliente' : 'Pago Proveedor'}
+                                  </span>
+                                );
+                              })()}
                             </td>
                             <td className="px-6 py-4 text-sm font-bold text-gray-500">
                               {p.receiptNumber || '-'}
@@ -3665,11 +4306,17 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
                               {p.paymentMethod || '-'}
                             </td>
                             <td className="px-6 py-4 text-right">
-                              <span className={`text-sm font-bold ${
-                                p.type === 'client_payment' ? 'text-green-600' : 'text-red-600'
-                              }`}>
-                                ${p.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} {p.currency}
-                              </span>
+                              {(() => {
+                                const isRefund = p.amount < 0 || String(p.notes || '').toLowerCase().includes('reembolso');
+                                return (
+                                  <span className={`text-sm font-bold ${
+                                    isRefund ? 'text-purple-600' :
+                                    p.type === 'client_payment' ? 'text-green-600' : 'text-red-600'
+                                  }`}>
+                                    {p.amount < 0 ? `-$${Math.abs(p.amount).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : `$${p.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`} {p.currency}
+                                  </span>
+                                );
+                              })()}
                             </td>
                             <td className="px-6 py-4 text-center">
                               <div className="flex items-center justify-center gap-2">
@@ -3942,6 +4589,13 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
           onClose={() => setShowTransactionModal(false)}
           insuranceId={insurance.id}
           title="Registrar Transacción"
+        />
+
+        <RefundModal
+          isOpen={showRefundModal}
+          onClose={() => setShowRefundModal(false)}
+          insurance={localInsurance || insurance}
+          overpaymentAmount={Math.abs(displayPendingBalance)}
         />
 
         <EmailModal

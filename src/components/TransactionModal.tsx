@@ -2,11 +2,12 @@ import React, { useState, useEffect } from 'react';
 import { collection, query, where, onSnapshot, orderBy, addDoc, serverTimestamp, doc, updateDoc, getDoc, deleteDoc, getDocs, limit } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType, auth } from '../firebase';
 import { Payment, InsuranceRequest } from '../types';
-import { X, DollarSign, Calendar, CreditCard, ArrowRight, Receipt, User, Shield, Plus, AlertCircle, Briefcase, Eye, Printer, FileText, Trash2, Edit2, Copy } from 'lucide-react';
+import { X, DollarSign, Calendar, CreditCard, ArrowRight, Receipt, User, Shield, Plus, AlertCircle, Briefcase, Eye, Printer, FileText, Trash2, Edit2, Copy, RotateCcw } from 'lucide-react';
 import { format, isValid } from 'date-fns';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import ConfirmModal from './ConfirmModal';
+import RefundModal from './RefundModal';
 import { isCardPaymentMethod } from '../utils/paymentUtils';
 import { logInsuranceActivity } from '../utils/activityLogger';
 
@@ -51,6 +52,7 @@ export default function TransactionModal({ isOpen, onClose, insuranceId, clientE
   const [currentInsurance, setCurrentInsurance] = useState<InsuranceRequest | null>(null);
   const [loading, setLoading] = useState(true);
   const [showAddForm, setShowAddForm] = useState(false);
+  const [showRefundModal, setShowRefundModal] = useState(false);
   const [selectedPaymentForDetail, setSelectedPaymentForDetail] = useState<Payment | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [editingPayment, setEditingPayment] = useState<Payment | null>(null);
@@ -145,22 +147,53 @@ export default function TransactionModal({ isOpen, onClose, insuranceId, clientE
     let unsubInsurances: () => void = () => {};
 
     if (insuranceId) {
+      let directPayments: Payment[] = [];
+      let cancelPayments: Payment[] = [];
+
+      const updateCombinedPayments = () => {
+        const map = new Map<string, Payment>();
+        directPayments.forEach(p => p.id && map.set(p.id, p));
+        cancelPayments.forEach(p => p.id && map.set(p.id, p));
+        const combined = Array.from(map.values()).sort((a, b) => {
+          const dateA = a.date?.toDate ? a.date.toDate().getTime() : new Date(a.date).getTime();
+          const dateB = b.date?.toDate ? b.date.toDate().getTime() : new Date(b.date).getTime();
+          return dateB - dateA;
+        });
+        setPayments(combined);
+        setLoading(false);
+        if (combined.length === 0 || initialShowAddForm) {
+          setShowAddForm(true);
+        }
+      };
+
       const q = query(
         collection(db, 'payments'),
         where('insuranceId', '==', insuranceId),
         orderBy('date', 'desc')
       );
       unsubPayments = onSnapshot(q, (snap) => {
-        const pList = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Payment));
-        setPayments(pList);
-        setLoading(false);
-        if (pList.length === 0 || initialShowAddForm) {
-          setShowAddForm(true);
-        }
+        directPayments = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Payment));
+        updateCombinedPayments();
       }, (error) => {
         handleFirestoreError(error, OperationType.GET, `payments for insurance ${insuranceId}`);
         setLoading(false);
       });
+
+      let unsubCancel: () => void = () => {};
+      try {
+        const qCancel = query(
+          collection(db, 'payments'),
+          where('originalInsuranceId', '==', insuranceId)
+        );
+        unsubCancel = onSnapshot(qCancel, (snap) => {
+          cancelPayments = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Payment));
+          updateCombinedPayments();
+        }, (err) => {
+          console.warn("Could not query cancellation payments by originalInsuranceId:", err);
+        });
+      } catch (err) {
+        console.warn("Error setting up cancellation payment listener:", err);
+      }
 
       // Fetch current insurance to check balance
       const unsubIns = onSnapshot(doc(db, 'insurances', insuranceId), (snap) => {
@@ -171,6 +204,7 @@ export default function TransactionModal({ isOpen, onClose, insuranceId, clientE
 
       return () => {
         unsubPayments();
+        unsubCancel();
         unsubIns();
       };
     } else if (clientEmail) {
@@ -674,21 +708,42 @@ export default function TransactionModal({ isOpen, onClose, insuranceId, clientE
               <DollarSign className="w-6 h-6" />
             </div>
             <div>
-              <h3 className="text-xl font-bold">{title || 'Transacciones de la Póliza'}</h3>
+              <div className="flex items-center gap-2">
+                <h3 className="text-xl font-bold">{title || 'Transacciones de la Póliza'}</h3>
+                {(currentInsurance?.actionType === 'CAN' || currentInsurance?.isCancelled) && (
+                  <span className="px-2.5 py-0.5 bg-red-500/25 text-red-100 border border-red-400/40 rounded-lg text-xs font-bold">
+                    Cancelada
+                  </span>
+                )}
+              </div>
               <p className="text-blue-100 text-xs font-mono">
                 {insuranceId ? `Seguro ID: ${insuranceId}` : `Cliente: ${clientEmail}`}
               </p>
             </div>
           </div>
           <div className="flex items-center gap-2">
-            {insuranceId && !showAddForm && currentInsurance && (currentInsurance.totalPaid || 0) < (currentInsurance.totalFinal || currentInsurance.totalPrice) && (
-              <button 
-                onClick={() => setShowAddForm(true)}
-                className="flex items-center gap-2 px-4 py-2 bg-white/20 hover:bg-white/30 rounded-xl transition-colors text-sm font-bold"
-              >
-                <Plus className="w-4 h-4" />
-                Nuevo Pago
-              </button>
+            {insuranceId && !showAddForm && currentInsurance && (
+              <>
+                {((currentInsurance.totalPaid || 0) - (currentInsurance.totalFinal !== undefined && currentInsurance.totalFinal !== null ? currentInsurance.totalFinal : (currentInsurance.totalPrice || 0))) > 5 && (
+                  <button 
+                    onClick={() => setShowRefundModal(true)}
+                    className="flex items-center gap-2 px-3.5 py-2 bg-blue-500 hover:bg-blue-600 text-white rounded-xl transition-colors text-xs font-bold shadow-xs cursor-pointer hover:scale-[1.02] active:scale-95"
+                    title="Dar de alta reembolso por sobrepago"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    Dar de Alta Reembolso (${((currentInsurance.totalPaid || 0) - (currentInsurance.totalFinal !== undefined && currentInsurance.totalFinal !== null ? currentInsurance.totalFinal : (currentInsurance.totalPrice || 0))).toFixed(2)} USD)
+                  </button>
+                )}
+                {currentInsurance.actionType !== 'CAN' && !currentInsurance.isCancelled && (currentInsurance.totalPaid || 0) < (currentInsurance.totalFinal || currentInsurance.totalPrice) && (
+                  <button 
+                    onClick={() => setShowAddForm(true)}
+                    className="flex items-center gap-2 px-4 py-2 bg-white/20 hover:bg-white/30 rounded-xl transition-colors text-sm font-bold"
+                  >
+                    <Plus className="w-4 h-4" />
+                    Nuevo Pago
+                  </button>
+                )}
+              </>
             )}
             <button onClick={onClose} className="p-2 hover:bg-white/20 rounded-full transition-colors">
               <X className="w-6 h-6" />
@@ -968,31 +1023,65 @@ export default function TransactionModal({ isOpen, onClose, insuranceId, clientE
             </div>
           ) : (
             <div className="space-y-4 max-w-4xl mx-auto">
+              {/* Banner de sobrepago si excede los $5 */}
+              {currentInsurance && ((currentInsurance.totalPaid || 0) - (currentInsurance.totalFinal !== undefined && currentInsurance.totalFinal !== null ? currentInsurance.totalFinal : (currentInsurance.totalPrice || 0))) > 5 && (
+                <div className="p-4.5 bg-gradient-to-r from-blue-50 via-indigo-50/50 to-blue-50 border border-blue-200 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-2xs">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2.5 bg-blue-600 text-white rounded-xl shadow-2xs shrink-0">
+                      <RotateCcw className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <h4 className="text-xs font-bold text-blue-900 uppercase tracking-wider">Saldo de Sobrepago Detectado</h4>
+                        <span className="px-2 py-0.5 bg-blue-200 text-blue-800 text-[10px] font-black rounded-full">
+                          +${((currentInsurance.totalPaid || 0) - (currentInsurance.totalFinal !== undefined && currentInsurance.totalFinal !== null ? currentInsurance.totalFinal : (currentInsurance.totalPrice || 0))).toFixed(2)} USD
+                        </span>
+                      </div>
+                      <p className="text-xs text-blue-700 mt-0.5">
+                        Esta póliza cuenta con un sobrepago acumulado mayor a $5.00 USD. Puedes generar el reembolso correspondiente.
+                      </p>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => setShowRefundModal(true)}
+                    className="px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded-xl transition-all shadow-md shadow-blue-200 flex items-center gap-2 cursor-pointer whitespace-nowrap hover:scale-[1.02] active:scale-95"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    Dar de Alta Reembolso
+                  </button>
+                </div>
+              )}
+
               {payments.map((payment) => {
                 const insurance = insurances.find(i => i.id === payment.insuranceId);
+                const isRefund = payment.amount < 0 || String(payment.notes || '').toLowerCase().includes('reembolso');
                 return (
                   <div key={payment.id} className="bg-white border border-gray-100 rounded-2xl p-6 hover:shadow-md transition-all flex flex-col md:flex-row md:items-center justify-between gap-6">
                     <div className="flex items-center gap-5">
                       <div className={`p-4 rounded-2xl shadow-sm ${
+                        isRefund ? 'bg-purple-50 text-purple-600' :
                         payment.type === 'client_payment' ? 'bg-green-50 text-green-600' :
                         payment.type === 'agent_commission' ? 'bg-indigo-50 text-indigo-600' :
                         'bg-red-50 text-red-600'
                       }`}>
-                        {payment.type === 'client_payment' ? <User className="w-6 h-6" /> :
+                        {isRefund ? <RotateCcw className="w-6 h-6" /> :
+                         payment.type === 'client_payment' ? <User className="w-6 h-6" /> :
                          payment.type === 'agent_commission' ? <Briefcase className="w-6 h-6" /> :
                          <Shield className="w-6 h-6" />}
                       </div>
                       <div>
                         <div className="flex items-center gap-3">
                           <span className="text-base font-bold text-gray-900">
-                            {payment.type === 'client_payment' ? 'Cobro a Cliente' :
+                            {isRefund ? 'Reembolso a Cliente' :
+                             payment.type === 'client_payment' ? 'Cobro a Cliente' :
                              payment.type === 'agent_commission' ? 'Comisión Agente' :
                              'Pago a Proveedor'}
                           </span>
                           <span className={`text-[10px] font-black px-2 py-0.5 rounded-full uppercase border ${
+                            isRefund ? 'bg-purple-100 text-purple-700 border-purple-200' :
                             payment.status === 'completed' ? 'bg-green-100 text-green-700 border-green-200' : 'bg-yellow-100 text-yellow-700 border-yellow-200'
                           }`}>
-                            {payment.status === 'completed' ? 'Completado' : 'Pendiente'}
+                            {isRefund ? 'Reembolso' : payment.status === 'completed' ? 'Completado' : 'Pendiente'}
                           </span>
                           {payment.type === 'agent_commission' && payment.status === 'pending' && (
                             <button 
@@ -1062,15 +1151,16 @@ export default function TransactionModal({ isOpen, onClose, insuranceId, clientE
 
                     <div className="text-right flex flex-col items-end">
                       <p className={`text-xl font-black ${
+                        isRefund ? 'text-purple-600' :
                         payment.type === 'client_payment' ? 'text-green-600' :
                         payment.type === 'agent_commission' ? 'text-indigo-600' :
                         'text-red-600'
                       }`}>
-                        {payment.type === 'provider_payment' ? '-' : ''}${payment.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD
+                        {payment.amount < 0 ? `-$${Math.abs(payment.amount).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : `${payment.type === 'provider_payment' ? '-' : ''}$${payment.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`} USD
                       </p>
                       {payment.amountMXP && payment.exchangeRate && (
                         <p className="text-xs text-gray-400 font-bold uppercase mt-1">
-                          ${payment.amountMXP.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MXP <span className="text-[10px] opacity-70">(T.C. {payment.exchangeRate.toFixed(2)})</span>
+                          {payment.amountMXP < 0 ? `-$${Math.abs(payment.amountMXP).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : `$${payment.amountMXP.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`} MXP <span className="text-[10px] opacity-70">(T.C. {payment.exchangeRate.toFixed(2)})</span>
                         </p>
                       )}
                       {payment.notes && (
@@ -1415,6 +1505,13 @@ export default function TransactionModal({ isOpen, onClose, insuranceId, clientE
           title="Eliminar Pago"
           message="¿Estás seguro de que deseas eliminar este registro de pago? Esta acción no se puede deshacer y afectará el saldo de la póliza."
           confirmText="Eliminar Pago"
+        />
+
+        <RefundModal
+          isOpen={showRefundModal}
+          onClose={() => setShowRefundModal(false)}
+          insurance={currentInsurance}
+          overpaymentAmount={currentInsurance ? Math.max(0, (currentInsurance.totalPaid || 0) - (currentInsurance.totalFinal !== undefined && currentInsurance.totalFinal !== null ? currentInsurance.totalFinal : (currentInsurance.totalPrice || 0))) : 0}
         />
       </div>
     </div>

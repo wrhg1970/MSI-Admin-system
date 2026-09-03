@@ -3,8 +3,9 @@ import { collection, query, onSnapshot, addDoc, getDoc, doc, updateDoc, deleteDo
 import { db, handleFirestoreError, OperationType, auth } from '../firebase';
 import { InsuranceRequest, Payment, Country, UserProfile, ExchangeRate, CustomRole, Category, Subcategory, Client, Provider, Policy, PlanType } from '../types';
 import { COUNTRIES } from '../constants';
-import { CheckCircle, XCircle, X, Check, ShieldCheck, Eye, AlertCircle, Download, BarChart3, TrendingUp, Users, DollarSign, Calendar, Filter, Settings, Building2, Shield, Users2, FileText, Upload, Database, Search, Receipt, Trash2, Edit2, ArrowRightLeft, CheckSquare, Square, Plus, AlertTriangle, Percent, ChevronLeft, ChevronRight, ChevronDown, Coins, ArrowUpDown, ArrowUp, ArrowDown, Sliders, Scale, RefreshCw, CreditCard, Link2, Copy, Mail, MessageSquare, Clock, User, Calculator, Layers } from 'lucide-react';
+import { CheckCircle, XCircle, X, Check, ShieldCheck, Eye, AlertCircle, Download, BarChart3, TrendingUp, Users, DollarSign, Calendar, Filter, Settings, Building2, Shield, Users2, FileText, Upload, Database, Search, Receipt, Trash2, Edit2, ArrowRightLeft, CheckSquare, Square, Plus, AlertTriangle, Percent, ChevronLeft, ChevronRight, ChevronDown, Coins, ArrowUpDown, ArrowUp, ArrowDown, Sliders, Scale, RefreshCw, CreditCard, Link2, Copy, Mail, MessageSquare, Clock, User, Calculator, Layers, RotateCcw, Loader2, Save } from 'lucide-react';
 import TransactionModal from './TransactionModal';
+import RefundModal from './RefundModal';
 import ConfirmModal from './ConfirmModal';
 import StatementOCRManager from './StatementOCRManager';
 import { jsPDF } from 'jspdf';
@@ -20,7 +21,7 @@ import { APP_LOGO } from '../constants';
 
 import { useSearchParams } from 'react-router-dom';
 import { triggerWhatsAppNotification } from '../services/whatsapp';
-import { getNormalizedYYYYMMDD, formatDisplayDate, getPolicyEffectiveCost } from '../lib/policyUtils';
+import { getNormalizedYYYYMMDD, formatDisplayDate, getPolicyEffectiveCost, findPolicyPrioritized, getPolicyNumber } from '../lib/policyUtils';
 import { isCardPaymentMethod } from '../utils/paymentUtils';
 import { logInsuranceActivity } from '../utils/activityLogger';
 
@@ -231,6 +232,7 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
   const [paymentAmount, setPaymentAmount] = useState<number>(0);
   const [editingCommission, setEditingCommission] = useState<number>(0);
   const [selectedInsuranceForTransactions, setSelectedInsuranceForTransactions] = useState<string | null>(null);
+  const [refundInsuranceTarget, setRefundInsuranceTarget] = useState<{ insurance: InsuranceRequest; overpayment: number } | null>(null);
   const [showDiscountCommissionModal, setShowDiscountCommissionModal] = useState(false);
   const [discountCommissionAmount, setDiscountCommissionAmount] = useState<string>('');
   const [discountCommissionNotes, setDiscountCommissionNotes] = useState<string>('');
@@ -336,18 +338,20 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
   };
 
   const getInsuranceTypeLabel = (policyId: string, insuranceName?: string) => {
-    const policy = policies.find(p => p.id === policyId);
+    const policy = findPolicyPrioritized(policyId, policies) || (insuranceName ? findPolicyPrioritized(insuranceName, policies) : undefined);
+    if (policy) return policy.NombrePoliza || policy.name;
     if (insuranceName) return insuranceName;
-    if (policy) return policy.name;
 
     let label = '';
-    if (policyId.includes('Oro')) label = 'Oro';
-    else if (policyId.includes('Plata')) label = 'Plata';
-    else if (policyId.includes('Bronce')) label = 'Bronce';
-    else return '-';
+    const lower = (policyId || '').toLowerCase();
+    if (lower.includes('oro')) label = 'CareMed Oro';
+    else if (lower.includes('plata')) label = 'CareMed Plata';
+    else if (lower.includes('bronce')) label = 'CareMed Bronce';
+    else if (lower.includes('platino') || lower.includes('platinum')) label = 'CareMed Platino';
+    else return policyId || '-';
 
-    if (policyId.toLowerCase().includes('sin')) label += ' sin deducible';
-    else label += ' con deducible';
+    if (lower.includes('sin')) label += ' sin deducible';
+    else if (lower.includes('con')) label += ' con deducible';
     
     return label;
   };
@@ -424,6 +428,11 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
     onConfirm: () => {}
   });
 
+  // State for policy reassignment in Insurance Details Modal
+  const [isEditingPolicy, setIsEditingPolicy] = useState(false);
+  const [selectedPolicyForEdit, setSelectedPolicyForEdit] = useState<string>('');
+  const [isSavingPolicy, setIsSavingPolicy] = useState(false);
+
   useEffect(() => {
     if (selectedInsurance) {
       setEditingCommission(selectedInsurance.agentCommission || 0);
@@ -440,6 +449,8 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
       setEditDiscount(selectedInsurance.discount || 0);
       setEditAdjustment(selectedInsurance.adjustment || 0);
       setIsEditingFinancials(false);
+      setIsEditingPolicy(false);
+      setSelectedPolicyForEdit(selectedInsurance.policyId || '');
     }
   }, [selectedInsurance, exchangeRate]);
 
@@ -550,6 +561,57 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
       alert('Error al guardar los cambios: ' + (err instanceof Error ? err.message : String(err)));
     } finally {
       setIsSavingFinancials(false);
+    }
+  };
+
+  const handleSavePolicyChange = async () => {
+    if (!selectedInsurance?.id || !selectedPolicyForEdit) return;
+    const newPolicy = policies.find(p => p.id === selectedPolicyForEdit);
+    if (!newPolicy) return;
+
+    try {
+      setIsSavingPolicy(true);
+      const computedPolicyNumber = getPolicyNumber(newPolicy, selectedInsurance.age || 0);
+      const newPolicyName = newPolicy.NombrePoliza || newPolicy.name;
+      const newPlan = newPolicy.plan || selectedInsurance.plan;
+      const costPerDay = newPolicy.costPerDay || 0;
+      const totalCost = costPerDay * (selectedInsurance.days || 1);
+
+      const updateData: any = {
+        policyId: newPolicy.id,
+        policyName: newPolicyName,
+        policyNumber: computedPolicyNumber,
+        plan: newPlan,
+        costPerDay,
+        totalCost,
+        updatedAt: serverTimestamp()
+      };
+
+      await updateDoc(doc(db, 'insurances', selectedInsurance.id), updateData);
+
+      setSelectedInsurance(prev => prev ? {
+        ...prev,
+        ...updateData
+      } : null);
+
+      try {
+        await logInsuranceActivity({
+          insuranceId: selectedInsurance.id,
+          userName: profile?.displayName || profile?.email || 'Admin',
+          action: 'policy_updated',
+          description: `Póliza reasignada a: ${newPolicyName} (${computedPolicyNumber}).`
+        });
+      } catch (logErr) {
+        console.error('Error logging policy update:', logErr);
+      }
+
+      setIsEditingPolicy(false);
+      alert('Póliza reasignada y actualizada correctamente.');
+    } catch (err) {
+      console.error('Error updating insurance policy:', err);
+      alert('Error al reasignar póliza: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      setIsSavingPolicy(false);
     }
   };
 
@@ -1063,7 +1125,25 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
         console.error("Error triggering WhatsApp status notification:", waErr);
       }
 
-      if (extraData.amountPaid > 0) {
+      if (finalStatus === 'cancelled') {
+        const policyAmt = Math.abs(insurance.totalPaid && insurance.totalPaid > 0 ? insurance.totalPaid : (totalFinal || 0));
+        if (policyAmt > 0) {
+          const exRate = extraData.paymentExchangeRate || (insurance as any).exchangeRate || 20;
+          await addDoc(collection(db, 'payments'), {
+            insuranceId: id,
+            amount: -policyAmt,
+            currency: extraData.paymentCurrency || (insurance as any).currency || 'USD',
+            exchangeRate: exRate,
+            amountMXP: -Math.abs(policyAmt * exRate),
+            type: 'client_payment',
+            paymentMethod: extraData.paymentMethod || 'Cancelación',
+            depositAccount: extraData.depositAccount || '',
+            status: 'completed',
+            date: extraData.paymentDate ? new Date(extraData.paymentDate) : new Date(),
+            notes: `Pago negativo automático por cancelación de póliza ${insurance.IDseg || id}`
+          });
+        }
+      } else if (extraData.amountPaid > 0) {
         // Record payment
         await addDoc(collection(db, 'payments'), {
           insuranceId: id,
@@ -3066,11 +3146,28 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
       const expected = ins.totalFinal !== undefined && ins.totalFinal !== null ? ins.totalFinal : (ins.totalPrice || 0);
       const totalPaid = ins.totalPaid || 0;
       const balance = expected - totalPaid;
+
+      const itemPolicy = findPolicyPrioritized(ins.policyId, policies)
+                      || findPolicyPrioritized(ins.policyNumber, policies)
+                      || findPolicyPrioritized(ins.policyName, policies);
+      const resolvedPolicyNumber = ins.policyNumber 
+        || (itemPolicy ? getPolicyNumber(itemPolicy, ins.age) : '') 
+        || itemPolicy?.CodigoPoliza 
+        || ins.policyId 
+        || '';
+      const resolvedPolicyName = itemPolicy?.NombrePoliza 
+        || itemPolicy?.name 
+        || ins.policyName 
+        || getInsuranceTypeLabel(ins.policyId, ins.policyName);
+
       return {
         ...ins,
         expected,
         totalPaid,
-        balance
+        balance,
+        itemPolicy,
+        resolvedPolicyNumber,
+        resolvedPolicyName
       };
     }).filter(item => {
       // If the insurance is closed, it must not appear in Cuentas por Cobrar
@@ -3087,7 +3184,7 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
         const client = clients.find(c => c.id === item.clientId);
         const clientNameInfo = client ? `${client.commercialName || ''} ${client.legalName || ''}` : '';
         const subAgentInfo = client?.linkedAgents?.find((la: any) => la.email === item.linkedAgentId || la.id === item.linkedAgentId)?.name || item.linkedAgentId || '';
-        const searchTarget = `${fullName} ${item.firstName || ''} ${item.lastName || ''} ${item.email || ''} ${item.policyId || ''} ${item.IDseg || ''} ${item.requestDate || ''} ${reqDateNorm} ${reqDateDisp} ${clientNameInfo} ${subAgentInfo}`.toLowerCase();
+        const searchTarget = `${fullName} ${item.firstName || ''} ${item.lastName || ''} ${item.email || ''} ${item.policyId || ''} ${item.resolvedPolicyNumber || ''} ${item.resolvedPolicyName || ''} ${item.IDseg || ''} ${item.requestDate || ''} ${reqDateNorm} ${reqDateDisp} ${clientNameInfo} ${subAgentInfo}`.toLowerCase();
         const searchTokens = accountsReceivableFilters.search.toLowerCase().trim().split(/\s+/);
         if (!searchTokens.every(token => searchTarget.includes(token))) {
           return false;
@@ -3103,7 +3200,10 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
 
       // Filter by policy standard ID
       if (accountsReceivableFilters.policyId !== 'all') {
-        if (item.policyId !== accountsReceivableFilters.policyId) return false;
+        const matchesStandardId = item.policyId === accountsReceivableFilters.policyId;
+        const matchesResolvedId = item.itemPolicy?.id === accountsReceivableFilters.policyId;
+        const matchesCode = item.itemPolicy?.CodigoPoliza === accountsReceivableFilters.policyId;
+        if (!matchesStandardId && !matchesResolvedId && !matchesCode) return false;
       }
 
       // Filter by insurance status: active/cancelled etc.
@@ -5611,22 +5711,36 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
                           <td className="px-6 py-4">
                             <div className="flex flex-col">
                               <span className="text-sm font-bold text-gray-900">{item.firstName} {item.lastName}</span>
-                              <span className="text-[10px] text-gray-400 font-mono">
-                                ID Seg: {item.IDseg || 'Sin Folio'} • Póliza ID: {item.policyId || 'S/N'}
-                              </span>
-                              {item.policyName && (
-                                <span className="text-[10px] text-indigo-500 font-medium">
-                                  {item.policyName}
+                              <div className="flex items-center gap-1.5 flex-wrap text-[10px] text-gray-500 font-mono mt-0.5">
+                                <span>ID Seg: <strong className="text-gray-700">{item.IDseg || 'Sin Folio'}</strong></span>
+                                <span>•</span>
+                                <span>Póliza: <strong className="text-indigo-700 bg-indigo-50 border border-indigo-100 px-1.5 py-0.5 rounded font-bold">{item.resolvedPolicyNumber || item.policyNumber || item.policyId || 'S/N'}</strong></span>
+                              </div>
+                              {(item.resolvedPolicyName || item.policyName) && (
+                                <span className="text-[11px] text-indigo-600 font-semibold mt-0.5">
+                                  {item.resolvedPolicyName || item.policyName}
                                 </span>
                               )}
-                              <div className="flex items-center gap-1.5 mt-1 flex-wrap">
-                                <span className="text-[9px] font-bold text-indigo-600 bg-indigo-50 border border-indigo-100 rounded px-1.5 py-0.5 uppercase tracking-wide">
-                                  {item.clientType === 'Corporate' ? 'Corporativo' : 'Agente'}: {getAgentName(item)}
-                                </span>
+                              <div className="flex items-center gap-1.5 mt-1.5 flex-wrap">
+                                {(() => {
+                                  const client = clients.find(cl => cl.id === item.clientId || cl.email === item.clientId);
+                                  const effectiveType = client?.type || item.clientType || (item.linkedAgentId ? 'Agent' : 'Individual');
+                                  const typeLabel = effectiveType === 'Corporate' ? 'Corporativo' : effectiveType === 'Agent' ? 'Agente' : 'Individual';
+                                  const badgeClass = effectiveType === 'Corporate' 
+                                    ? 'text-blue-700 bg-blue-50 border-blue-200' 
+                                    : effectiveType === 'Agent'
+                                    ? 'text-purple-700 bg-purple-50 border-purple-200'
+                                    : 'text-slate-700 bg-slate-100 border-slate-200';
+                                  return (
+                                    <span className={`text-[9px] font-bold border rounded px-1.5 py-0.5 uppercase tracking-wide ${badgeClass}`}>
+                                      {typeLabel}: {getAgentName(item)}
+                                    </span>
+                                  );
+                                })()}
                                 {item.linkedAgentId && (
                                   <span className="text-[9px] font-medium text-slate-600 bg-slate-100 border border-slate-200 rounded px-1.5 py-0.5">
                                     Subagente: {(() => {
-                                      const c = clients.find(cl => cl.id === item.clientId);
+                                      const c = clients.find(cl => cl.id === item.clientId || cl.email === item.clientId);
                                       const sub = c?.linkedAgents?.find((sa: any) => sa.id === item.linkedAgentId || sa.email === item.linkedAgentId);
                                       return sub ? sub.name : item.linkedAgentId;
                                     })()}
@@ -5747,6 +5861,16 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
                                   -${Math.abs(item.balance).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                                 </span>
                                 <span className="text-[9px] text-blue-600 font-bold uppercase mt-0.5 font-sans">Sobrepago</span>
+                                {item.balance < -5 && (
+                                  <button
+                                    onClick={() => setRefundInsuranceTarget({ insurance: item, overpayment: Math.abs(item.balance) })}
+                                    className="mt-1 px-2 py-0.5 bg-blue-600 hover:bg-blue-700 text-white rounded-md text-[9px] font-bold transition-all shadow-2xs flex items-center gap-1 cursor-pointer hover:scale-105 active:scale-95"
+                                    title={`Dar de alta Reembolso por Sobrepago ($${Math.abs(item.balance).toFixed(2)} USD)`}
+                                  >
+                                    <RotateCcw className="w-2.5 h-2.5" />
+                                    Reembolsar
+                                  </button>
+                                )}
                               </div>
                             )}
                           </td>
@@ -5771,6 +5895,15 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
                           </td>
                           <td className="px-6 py-4 text-right">
                             <div className="flex justify-end gap-2">
+                              {item.balance < -5 && (
+                                <button
+                                  onClick={() => setRefundInsuranceTarget({ insurance: item, overpayment: Math.abs(item.balance) })}
+                                  className="p-1.5 text-blue-600 hover:text-blue-800 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors border border-blue-200 cursor-pointer hover:scale-105 active:scale-95"
+                                  title={`Dar de alta Reembolso por Sobrepago ($${Math.abs(item.balance).toFixed(2)} USD)`}
+                                >
+                                  <RotateCcw className="w-3.5 h-3.5" />
+                                </button>
+                              )}
                               <button
                                 onClick={() => setSelectedInsurance(item)}
                                 className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors border border-transparent hover:border-blue-100"
@@ -8604,33 +8737,107 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
                     </section>
 
                     <section>
-                      <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider mb-4">Información de Póliza y Plan</h4>
-                      <div className="bg-gray-50 p-4 rounded-xl space-y-3">
-                        <div className="flex justify-between">
-                          <span className="text-sm text-gray-500">Póliza / Aseguradora:</span>
-                          <span className="text-sm font-bold text-gray-900">
-                            {getInsuranceTypeLabel(selectedInsurance.policyId, selectedInsurance.policyName)}
-                          </span>
-                        </div>
-                        {selectedInsurance.policyId && (
-                          <div className="flex justify-between">
-                            <span className="text-sm text-gray-500">ID de Póliza:</span>
-                            <span className="text-sm font-mono text-gray-700 bg-gray-200/50 px-2.5 py-0.5 rounded border border-slate-250">
-                              {selectedInsurance.policyId}
-                            </span>
-                          </div>
-                        )}
-                        <div className="flex justify-between">
-                          <span className="text-sm text-gray-500">Plan:</span>
-                          <span className="text-xs font-bold text-indigo-700 bg-indigo-50 px-2.5 py-0.5 rounded-full border border-indigo-100 uppercase">
-                            {(() => {
-                              const policyObj = policies.find(p => p.id === selectedInsurance.policyId);
-                              const planVal = selectedInsurance.plan || policyObj?.plan || selectedInsurance.policyId.split('-')[0];
-                              return getPlanLabel(planVal || '');
-                            })()}
-                          </span>
-                        </div>
-                      </div>
+                      {(() => {
+                        const activePolicyObj = findPolicyPrioritized(selectedInsurance.policyId, policies) 
+                                             || findPolicyPrioritized(selectedInsurance.policyNumber, policies)
+                                             || findPolicyPrioritized(selectedInsurance.policyName, policies);
+                        const currentPolicyNumber = selectedInsurance.policyNumber 
+                          || (activePolicyObj ? getPolicyNumber(activePolicyObj, selectedInsurance.age) : '') 
+                          || activePolicyObj?.CodigoPoliza 
+                          || selectedInsurance.policyId 
+                          || 'S/N';
+
+                        return (
+                          <>
+                            <div className="flex items-center justify-between mb-4">
+                              <h4 className="text-xs font-bold text-gray-400 uppercase tracking-wider">Información de Póliza y Plan</h4>
+                              {canManageClosedState && !isInsuranceClosed(selectedInsurance) && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setIsEditingPolicy(prev => !prev);
+                                    setSelectedPolicyForEdit(activePolicyObj?.id || selectedInsurance.policyId || '');
+                                  }}
+                                  className="text-xs font-bold text-indigo-600 hover:text-indigo-800 flex items-center gap-1.5 hover:underline"
+                                >
+                                  <Edit2 className="w-3.5 h-3.5" />
+                                  {isEditingPolicy ? 'Cancelar' : 'Reasignar / Cambiar Póliza'}
+                                </button>
+                              )}
+                            </div>
+
+                            {isEditingPolicy ? (
+                              <div className="bg-indigo-50/50 border border-indigo-100 p-4 rounded-xl space-y-3">
+                                <label className="block text-xs font-bold text-indigo-900 uppercase">
+                                  Selecciona la Póliza Correcta del Catálogo:
+                                </label>
+                                <select
+                                  value={selectedPolicyForEdit}
+                                  onChange={(e) => setSelectedPolicyForEdit(e.target.value)}
+                                  className="w-full px-3 py-2 bg-white border border-indigo-200 rounded-lg text-xs font-medium text-gray-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                >
+                                  <option value="">-- Seleccione una póliza --</option>
+                                  {policies.map(p => (
+                                    <option key={p.id} value={p.id}>
+                                      {p.NombrePoliza || p.name} • {p.CodigoPoliza || p.id} ({p.plan})
+                                    </option>
+                                  ))}
+                                </select>
+                                <div className="flex justify-end gap-2 pt-2">
+                                  <button
+                                    type="button"
+                                    onClick={() => setIsEditingPolicy(false)}
+                                    className="px-3 py-1.5 text-xs text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+                                  >
+                                    Cancelar
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={isSavingPolicy || !selectedPolicyForEdit}
+                                    onClick={handleSavePolicyChange}
+                                    className="px-3 py-1.5 text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 rounded-lg shadow-sm transition-colors flex items-center gap-1"
+                                  >
+                                    {isSavingPolicy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
+                                    Guardar Póliza
+                                  </button>
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="bg-gray-50 p-4 rounded-xl space-y-3">
+                                <div className="flex justify-between items-center">
+                                  <span className="text-sm text-gray-500">Póliza / Aseguradora:</span>
+                                  <span className="text-sm font-bold text-gray-900 text-right">
+                                    {activePolicyObj?.NombrePoliza || activePolicyObj?.name || getInsuranceTypeLabel(selectedInsurance.policyId, selectedInsurance.policyName)}
+                                  </span>
+                                </div>
+                                <div className="flex justify-between items-center">
+                                  <span className="text-sm text-gray-500">Número de Póliza:</span>
+                                  <span className="text-xs font-mono font-bold text-indigo-700 bg-indigo-50 border border-indigo-200 px-2.5 py-0.5 rounded">
+                                    {currentPolicyNumber}
+                                  </span>
+                                </div>
+                                {selectedInsurance.policyId && (
+                                  <div className="flex justify-between items-center">
+                                    <span className="text-sm text-gray-500">ID en Catálogo:</span>
+                                    <span className="text-xs font-mono text-gray-600 bg-gray-200/60 px-2 py-0.5 rounded border border-slate-200">
+                                      {selectedInsurance.policyId}
+                                    </span>
+                                  </div>
+                                )}
+                                <div className="flex justify-between items-center">
+                                  <span className="text-sm text-gray-500">Plan:</span>
+                                  <span className="text-xs font-bold text-indigo-700 bg-indigo-50 px-2.5 py-0.5 rounded-full border border-indigo-100 uppercase">
+                                    {(() => {
+                                      const planVal = selectedInsurance.plan || activePolicyObj?.plan || selectedInsurance.policyId?.split('-')[0];
+                                      return getPlanLabel(planVal || '');
+                                    })()}
+                                  </span>
+                                </div>
+                              </div>
+                            )}
+                          </>
+                        );
+                      })()}
                     </section>
                   </div>
 
@@ -9229,6 +9436,13 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
         insuranceId={selectedInsuranceForTransactions || undefined}
         title="Transacciones de la Póliza"
         exchangeRate={exchangeRate}
+      />
+
+      <RefundModal
+        isOpen={!!refundInsuranceTarget}
+        onClose={() => setRefundInsuranceTarget(null)}
+        insurance={refundInsuranceTarget?.insurance || null}
+        overpaymentAmount={refundInsuranceTarget?.overpayment}
       />
 
       {/* Edit Payment Modal */}

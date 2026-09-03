@@ -102,7 +102,22 @@ export interface Client {
   sendBirthdayGreeting?: boolean;
   
   notes?: string;
+  regimenFiscal?: string;
+  cfdiUse?: string;
   createdAt: any;
+}
+
+export interface FacturaData {
+  rfc?: string;
+  razonSocial?: string;
+  direccion?: string;
+  ciudad?: string;
+  state?: string;
+  zip?: string;
+  country?: string;
+  email?: string;
+  regimenFiscal?: string;
+  cfdiUse?: string;
 }
 
 export interface InsuranceRequest {
@@ -160,6 +175,9 @@ export interface InsuranceRequest {
   notes?: string;
   imported?: boolean;
   isCorrected?: boolean;
+  isCancelled?: boolean;
+  cancellationInsuranceId?: string;
+  cancelledFromInsuranceId?: string;
   externalId?: string;
   requestDate?: string;
   Caremed?: string;
@@ -168,12 +186,17 @@ export interface InsuranceRequest {
   phone?: string;
   policyNumber?: string;
   exchangeRate?: number;
+  solicitudFactura?: boolean;
+  facturaData?: FacturaData;
+  rfcFactura?: string;
+  razonSocialFactura?: string;
   createdAt: any;
 }
 
 export interface Payment {
   id: string;
   insuranceId: string;
+  originalInsuranceId?: string;
   amount: number;
   currency: 'USD' | 'MXP';
   exchangeRate?: number;
@@ -194,6 +217,7 @@ export interface Payment {
   invoiceNumber?: string;
   createdAt?: any;
   updatedAt?: any;
+  createdBy?: string;
 }
 
 export interface Country {

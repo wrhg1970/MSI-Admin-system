@@ -6521,6 +6521,11 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                               CORREGIDO
                             </span>
                           )}
+                          {i.isCancelled && (
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[8px] font-black bg-rose-100 text-rose-800 border border-rose-200 uppercase select-none align-middle tracking-wider">
+                              CANCELADO
+                            </span>
+                          )}
                         </p>
                         <div className="flex items-center gap-1 text-[10px] text-gray-400 mt-0.5">
                           <Mail className="w-3 h-3" />
@@ -6738,7 +6743,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                         <Receipt className="w-3.5 h-3.5" />
                         Pagos
                       </button>
-                      {canManageClosedState && i.actionType !== 'CAN' && !i.isCorrected && (i as any).Caremed && (
+                      {canManageClosedState && i.actionType !== 'CAN' && !i.isCorrected && !i.isCancelled && (i as any).Caremed && (
                         <>
                           <button 
                             onClick={() => {
@@ -6918,6 +6923,11 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                   CORREGIDO
                                 </span>
                               )}
+                              {i.isCancelled && (
+                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[8px] font-black bg-rose-100 text-rose-800 border border-rose-200 uppercase select-none align-middle tracking-wider">
+                                  CANCELADO
+                                </span>
+                              )}
                             </span>
                             <span className="text-[10px] text-gray-400">{i.email}</span>
                             {i.IDseg && (
@@ -7022,7 +7032,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                   <DollarSign className="w-3.5 h-3.5" />
                                 </button>
                               )}
-                              {canManageClosedState && i.actionType !== 'CAN' && !i.isCorrected && (i as any).Caremed && (
+                              {canManageClosedState && i.actionType !== 'CAN' && !i.isCorrected && !i.isCancelled && (i as any).Caremed && (
                                 <>
                                   <button 
                                     onClick={() => {

@@ -18,7 +18,8 @@ import {
   CreditCard,
   ShieldCheck,
   ChevronLeft,
-  ChevronRight
+  ChevronRight,
+  CalendarCheck
 } from 'lucide-react';
 import { collection, query, getDocs, where, orderBy, updateDoc, doc, getDocsFromServer, getDocsFromCache } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../firebase';
@@ -30,6 +31,8 @@ import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { drawVectorLogo } from '../lib/pdfGenerator';
 import { useCompany } from '../App';
+import MonthlyClosingModal from './MonthlyClosingModal';
+import MonthlyReportModal from './MonthlyReportModal';
 
 const formatMonthsDays = (days: number): string => {
   if (!days || days <= 0) return '0 días';
@@ -128,6 +131,8 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
   
   // Quick Reports Modal
   const [showReportModal, setShowReportModal] = useState(false);
+  const [showMonthlyClosingModal, setShowMonthlyClosingModal] = useState(false);
+  const [showMonthlyReportModal, setShowMonthlyReportModal] = useState(false);
   const [reportType, setReportType] = useState<'altas' | 'to_collect' | 'to_pay' | 'commissions' | 'income_statement'>('altas');
   const [reportFormat, setReportFormat] = useState<'detailed' | 'consolidated'>('detailed');
   const [reportGrouping, setReportGrouping] = useState<'all' | 'Agent' | 'Corporate' | 'Individual' | 'policy'>('all');
@@ -1723,21 +1728,46 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
           <h1 className="text-2xl font-bold text-gray-900">Reportes y Estadísticas</h1>
           <p className="text-gray-500">Visualiza el rendimiento y genera informes detallados</p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-2.5">
           {selectedIds.length > 0 && (
             <button 
               onClick={() => setShowPaymentModal(true)}
-              className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white font-bold rounded-xl hover:bg-emerald-700 transition-all shadow-lg shadow-emerald-100 animate-in fade-in slide-in-from-right-4"
+              className="flex items-center gap-2 px-4 py-2 bg-emerald-600 text-white font-bold text-sm rounded-xl hover:bg-emerald-700 transition-all shadow-md shadow-emerald-100 animate-in fade-in slide-in-from-right-4"
             >
               <CreditCard className="w-4 h-4" />
               Pagar Seleccionados ({selectedIds.length})
             </button>
           )}
+
+          <button 
+            onClick={() => {
+              setLimitToCurrentMonth(false);
+              setShowMonthlyClosingModal(true);
+            }}
+            className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-indigo-600 to-indigo-700 hover:from-indigo-700 hover:to-indigo-800 text-white font-bold text-sm rounded-xl transition-all shadow-md shadow-indigo-200 cursor-pointer"
+            title="Generar auditoría y PDF de Cierre de Mes"
+          >
+            <CalendarCheck className="w-4 h-4" />
+            Cierre de Mes
+          </button>
+
+          <button 
+            onClick={() => {
+              setLimitToCurrentMonth(false);
+              setShowMonthlyReportModal(true);
+            }}
+            className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-blue-600 to-slate-800 hover:from-blue-700 hover:to-slate-900 text-white font-bold text-sm rounded-xl transition-all shadow-md shadow-blue-200 cursor-pointer"
+            title="Generar reporte mensual consolidado (números finales)"
+          >
+            <BarChart3 className="w-4 h-4" />
+            Reporte Mensual
+          </button>
+
           <button 
             onClick={exportToCSV}
-            className="flex items-center gap-2 px-4 py-2 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-700 transition-all shadow-lg shadow-blue-100"
+            className="flex items-center gap-2 px-4 py-2 bg-white hover:bg-gray-50 text-gray-700 font-bold text-sm rounded-xl border border-gray-200 transition-all shadow-sm cursor-pointer"
           >
-            <Download className="w-4 h-4" />
+            <Download className="w-4 h-4 text-gray-500" />
             Exportar CSV
           </button>
         </div>
@@ -2118,6 +2148,44 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
             <h3 className="font-bold text-gray-900">Reportes Rápidos</h3>
           </div>
           <div className="space-y-3">
+            <button 
+              onClick={() => {
+                setLimitToCurrentMonth(false);
+                setShowMonthlyClosingModal(true);
+              }}
+              className="w-full flex items-center justify-between p-4 bg-indigo-50/70 hover:bg-indigo-100/70 rounded-2xl transition-all group border border-indigo-200/80 shadow-sm cursor-pointer"
+            >
+              <div className="flex items-center gap-3">
+                <div className="w-8 h-8 rounded-lg bg-indigo-600 text-white flex items-center justify-center shadow-sm">
+                  <CalendarCheck className="w-4 h-4" />
+                </div>
+                <div className="text-left">
+                  <div className="text-sm font-bold text-indigo-950">Cierre de Mes</div>
+                  <div className="text-[10px] text-indigo-600 font-medium">Exportaciones, Invoices y Facturas SAT</div>
+                </div>
+              </div>
+              <ArrowUpRight className="w-4 h-4 text-indigo-400 group-hover:text-indigo-700 transition-colors" />
+            </button>
+
+            <button 
+              onClick={() => {
+                setLimitToCurrentMonth(false);
+                setShowMonthlyReportModal(true);
+              }}
+              className="w-full flex items-center justify-between p-4 bg-blue-50/70 hover:bg-blue-100/70 rounded-2xl transition-all group border border-blue-200/80 shadow-sm cursor-pointer"
+            >
+              <div className="flex items-center gap-3">
+                <div className="w-8 h-8 rounded-lg bg-blue-700 text-white flex items-center justify-center shadow-sm">
+                  <BarChart3 className="w-4 h-4" />
+                </div>
+                <div className="text-left">
+                  <div className="text-sm font-bold text-blue-950">Reporte Mensual</div>
+                  <div className="text-[10px] text-blue-600 font-medium">Consolidado final (Canal, CxC, CxP, Comisiones)</div>
+                </div>
+              </div>
+              <ArrowUpRight className="w-4 h-4 text-blue-400 group-hover:text-blue-700 transition-colors" />
+            </button>
+
             <button 
               onClick={() => {
                 setReportType('income_statement');
@@ -3102,6 +3170,30 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
           </div>
         </div>
       )}
+
+      {/* Monthly Closing Audit Modal & PDF */}
+      <MonthlyClosingModal
+        isOpen={showMonthlyClosingModal}
+        onClose={() => setShowMonthlyClosingModal(false)}
+        insurances={insurances}
+        clients={clients}
+        policies={policies}
+        companySettings={companySettings}
+        profile={profile}
+        onEnsureFullHistory={() => setLimitToCurrentMonth(false)}
+      />
+
+      {/* Monthly Consolidated Report Modal & PDF */}
+      <MonthlyReportModal
+        isOpen={showMonthlyReportModal}
+        onClose={() => setShowMonthlyReportModal(false)}
+        insurances={insurances}
+        clients={clients}
+        policies={policies}
+        companySettings={companySettings}
+        profile={profile}
+        onEnsureFullHistory={() => setLimitToCurrentMonth(false)}
+      />
     </div>
   );
 }

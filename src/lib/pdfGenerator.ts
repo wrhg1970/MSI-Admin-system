@@ -599,7 +599,7 @@ export const generatePDF = async (
     doc.setFontSize(7.5);
     doc.setTextColor(71, 85, 105);
     rightY += 3.0;
-    doc.text('Contact CareMed USA: Phone +1 203 399 5130 | claimhelp@mycisi.com', rightX, rightY);
+    doc.text('Contact CareMed USA: Phone +1 203 399 5130 | inquiries@mycisi.com', rightX, rightY);
     
     doc.setDrawColor(226, 232, 240);
     doc.line(rightX, rightY + 1.5, rightX + rightInnerWidth, rightY + 1.5);
@@ -620,7 +620,7 @@ export const generatePDF = async (
     doc.setFontSize(7.5);
     doc.setTextColor(71, 85, 105);
     rightY += 3.0;
-    const splitEmergency = doc.splitTextToSize('Call ON CALL INTERNATIONAL at +1 877 714 8179 (in US), +1 603 952 2660 (call collect from outside US). Email: mail@ONCALLINTERNATIONAL.COM', rightInnerWidth);
+    const splitEmergency = doc.splitTextToSize('Call ROBIN ASSIST at +1 888 505 2474 (in US), +1 743 244 2474 (call collect from outside US). Email: CISIASSIST@ROBINASSIST.COM', rightInnerWidth);
     doc.text(splitEmergency, rightX, rightY);
     
     rightY += 2.8 * splitEmergency.length + 0.8;
@@ -650,10 +650,13 @@ export const generatePDF = async (
     doc.setTextColor(255, 255, 255); // White text
     doc.text('Insurance Confirmation', margin + 4, confirmY + 3.8); 
     
-    const confirmTableY = confirmY + 11; 
+    const confirmTableY = confirmY + 16.0; 
     const footerTextY = confirmTableY + 19; 
     doc.setFontSize(7.8);
-    const splitBlock = doc.splitTextToSize(introText, contentWidth - 8);
+    const splitBlock = doc.splitTextToSize(
+      introText.replace(/We hereby confirm that the person listed below is insured with CareMed®\.([^\n]|\n(?!\n))/g, 'We hereby confirm that the person listed below is insured with CareMed®.\n\n'),
+      contentWidth - 8
+    );
     const blockHeight = splitBlock.length * 2.8; 
     const boxPadding = 2.5; 
     const calculatedBoxHeight = (footerTextY + blockHeight + boxPadding) - (confirmY + 5.5);
@@ -665,7 +668,7 @@ export const generatePDF = async (
     doc.setFontSize(9.0);
     doc.setFont('helvetica', 'bold');
     doc.setTextColor(30, 41, 59); // Slate-800
-    doc.text('We hereby confirm that the person listed below is insured with CareMed®.', margin + 4, confirmY + 9.5); 
+    doc.text('We hereby confirm that the person listed below is insured with CareMed®.', margin + 4, confirmY + 10.0); 
     
     const col1 = margin + 4;
     const col2 = margin + 35;
@@ -1263,31 +1266,35 @@ export const generateReceiptPDF = async (payment: any, insurance: any, customLog
   doc.text(`Fecha: ${formatDisplayDate(payment.date)}`, 120, 72);
   doc.text(`Método: ${payment.paymentMethod}`, 120, 79);
   
+  const isRefund = payment.amount < 0 || String(payment.notes || '').toLowerCase().includes('reembolso');
+
   // Payment Table
   autoTable(doc, {
     startY: 95,
     head: [['Descripción', 'Monto (USD)', 'Estado']],
     body: [
       [
+        isRefund ? 'Reembolso por Sobrepago a Cliente' :
         payment.type === 'client_payment' ? 'Cobro a Cliente' : 
         payment.type === 'agent_commission' ? 'Comisión Agente' : 'Pago a Proveedor',
-        `$${payment.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
+        `${isRefund ? '-' : ''}$${Math.abs(payment.amount).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`,
         payment.status.toUpperCase()
       ]
     ],
-    headStyles: { fillColor: [37, 99, 235] },
+    headStyles: { fillColor: isRefund ? [99, 102, 241] : [37, 99, 235] },
     theme: 'grid'
   });
   
   // Totals
   const finalReceiptY = (doc as any).lastAutoTable.finalY + 10;
   doc.setFont('helvetica', 'bold');
-  doc.text(`TOTAL PAGADO: $${payment.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD`, pageWidth - 20, finalReceiptY, { align: 'right' });
+  const totalLabel = isRefund ? 'TOTAL REEMBOLSADO:' : 'TOTAL PAGADO:';
+  doc.text(`${totalLabel} ${isRefund ? '-' : ''}$${Math.abs(payment.amount).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD`, pageWidth - 20, finalReceiptY, { align: 'right' });
   
   if (payment.amountMXP) {
     doc.setFontSize(10);
     doc.setFont('helvetica', 'normal');
-    doc.text(`Equivalente a: $${payment.amountMXP.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MXP`, pageWidth - 20, finalReceiptY + 7, { align: 'right' });
+    doc.text(`Equivalente a: ${isRefund ? '-' : ''}$${Math.abs(payment.amountMXP).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MXP`, pageWidth - 20, finalReceiptY + 7, { align: 'right' });
     doc.text(`(Tipo de Cambio: ${payment.exchangeRate?.toFixed(2)})`, pageWidth - 20, finalReceiptY + 12, { align: 'right' });
   }
   
