@@ -398,8 +398,8 @@ export interface DuplicateGroup {
  * 7. Plan
  * 8. Poliza
  */
-export function getDuplicatePolicyKey(ins: InsuranceRequest, policies: Policy[] = []): string {
-  const policy = policies.find(p => p.id === ins.policyId);
+export function getDuplicatePolicyKey(ins: InsuranceRequest, policies: Policy[] = [], policyMap?: Map<string, Policy>): string {
+  const policy = policyMap ? policyMap.get(ins.policyId) : policies.find(p => p.id === ins.policyId);
   const actionType = normalizeDuplicateField(ins.actionType || 'NEW').toUpperCase();
   const fullName = normalizeDuplicateField(`${ins.firstName || ''} ${ins.lastName || ''}`);
   const birthDate = getNormalizedYYYYMMDD(ins.birthDate) || normalizeDuplicateField(ins.birthDate);
@@ -413,10 +413,15 @@ export function getDuplicatePolicyKey(ins: InsuranceRequest, policies: Policy[] 
 }
 
 export function findDuplicatePolicyGroups(insurances: InsuranceRequest[], policies: Policy[] = []): DuplicateGroup[] {
+  const policyMap = new Map<string, Policy>();
+  policies.forEach(p => {
+    if (p.id) policyMap.set(p.id, p);
+  });
+
   const map = new Map<string, InsuranceRequest[]>();
 
   insurances.forEach(ins => {
-    const key = getDuplicatePolicyKey(ins, policies);
+    const key = getDuplicatePolicyKey(ins, policies, policyMap);
     if (!map.has(key)) {
       map.set(key, []);
     }
@@ -428,7 +433,7 @@ export function findDuplicatePolicyGroups(insurances: InsuranceRequest[], polici
   map.forEach((items, key) => {
     if (items.length > 1) {
       const sample = items[0];
-      const policy = policies.find(p => p.id === sample.policyId);
+      const policy = policyMap.get(sample.policyId);
       const actionType = (sample.actionType || 'NEW').toUpperCase();
       const fullName = `${sample.firstName || ''} ${sample.lastName || ''}`.trim();
       const birthDate = sample.birthDate || '';

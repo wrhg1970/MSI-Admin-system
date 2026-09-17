@@ -212,7 +212,7 @@ export default function WhatsAppPolicyLettersModal({
   const [phoneInput, setPhoneInput] = useState<string>('');
   const [availableLetters, setAvailableLetters] = useState<PolicyLetter[]>([]);
   const [selectedLanguages, setSelectedLanguages] = useState<string[]>([]);
-  const [pdfMergeMode, setPdfMergeMode] = useState<'separate' | 'merged'>('separate');
+  const [pdfMergeMode, setPdfMergeMode] = useState<'separate' | 'merged'>('merged');
   const [message, setMessage] = useState<string>('');
   const [isDownloading, setIsDownloading] = useState(false);
   const [isSendingApi, setIsSendingApi] = useState(false);
@@ -307,46 +307,23 @@ export default function WhatsAppPolicyLettersModal({
     if (!insurance) return;
 
     const recipientName = recipientRole === 'client' 
-      ? `${insurance.firstName} ${insurance.lastName}`.trim()
+      ? `${insurance.firstName || ''} ${insurance.lastName || ''}`.trim() || insurance.firstName || 'Asegurado'
       : (contacts.agentContact?.name || 'Estimado Asesor');
 
-    const planName = policy?.name || policy?.NombrePoliza || insurance.policyName || 'Asistencia en Viaje';
-    const startDate = formatDisplayDate(insurance.startDate);
-    const endDate = formatDisplayDate(insurance.endDate);
-    const days = insurance.days || '-';
-    const dest = countryName || insurance.destinationCountry || 'Internacional';
+    const planName = insurance.plan || policy?.name || policy?.NombrePoliza || insurance.policyName || 'Póliza';
+    const startDate = formatDisplayDate(insurance.startDate) !== '-' 
+      ? formatDisplayDate(insurance.startDate) 
+      : (insurance.startDate || 'N/A');
+    const endDate = formatDisplayDate(insurance.endDate) !== '-' 
+      ? formatDisplayDate(insurance.endDate) 
+      : (insurance.endDate || 'N/A');
 
-    const selectedLettersList = selectedLanguages
-      .map(lang => `• Carta en ${getLanguageLabel(lang)}`)
-      .join('\n');
-
-    const policyLink = `https://misegurointernacional.com/p/${insurance.policyNumber || insurance.id}`;
-
-    let constructed = '';
-    if (recipientRole === 'client') {
-      constructed = `¡Hola *${recipientName}*! ✈️\n\n` +
-        `Te compartimos las cartas oficiales y constancia de cobertura de tu seguro internacional:\n\n` +
-        `📄 *Póliza Nº:* ${policyCode}\n` +
-        `🏥 *Plan:* ${planName}\n` +
-        `🗓️ *Vigencia:* ${startDate} al ${endDate} (${days} días)\n` +
-        `📍 *Destino:* ${dest}\n` +
-        `👥 *Pasajero:* ${insurance.firstName} ${insurance.lastName}\n\n` +
-        `📑 *Cartas emitidas:*\n${selectedLettersList || '• Certificado oficial de cobertura'}\n\n` +
-        `🔗 *Descarga y Asistencia 24/7:*\n${policyLink}\n\n` +
-        `Adjuntamos el documento en PDF con todos los teléfonos y procedimientos de atención médica de urgencia. ¡Te deseamos un excelente viaje!`;
-    } else {
-      constructed = `Hola *${recipientName}*,\n\n` +
-        `Te compartimos las cartas emitidas para la póliza de tu cliente:\n\n` +
-        `📄 *Póliza Nº:* ${policyCode}\n` +
-        `👤 *Cliente / Asegurado:* ${insurance.firstName} ${insurance.lastName}\n` +
-        `🏥 *Plan:* ${planName}\n` +
-        `🗓️ *Vigencia:* ${startDate} al ${endDate} (${days} días)\n\n` +
-        `📑 *Cartas incluidas:*\n${selectedLettersList || '• Certificado oficial'}\n\n` +
-        `🔗 *Ver Póliza:* ${policyLink}`;
-    }
+    const constructed = `Hola ${recipientName}, te enviamos tu poliza ${planName} de Mi Seguro Internacional en un solo documento PDF.\n\n` +
+      `Vigencia: ${startDate} al ${endDate}. Conserva este archivo; es tu comprobante de cobertura.\n\n` +
+      `Si tienes dudas, responde este mensaje o llamanos.`;
 
     setMessage(constructed);
-  }, [insurance, recipientRole, contacts, selectedLanguages, policy, countryName, policyCode]);
+  }, [insurance, recipientRole, contacts, policy]);
 
   // Clean phone number for WhatsApp link
   const getCleanPhone = (phone: string): string => {

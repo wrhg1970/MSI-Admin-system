@@ -24,6 +24,7 @@ import { getPolicyNumber, getAvailableLettersForInsurance, getNormalizedYYYYMMDD
 import BatchDetailModal from './BatchDetailModal';
 import DuplicatesModal from './DuplicatesModal';
 import { logInsuranceActivity } from '../utils/activityLogger';
+import { getInsuranceDisplayStatus, getInsuranceFinalPrice } from '../utils/paymentUtils';
 import WhatsAppPolicyLettersModal, { getPolicyWhatsAppContacts } from './WhatsAppPolicyLettersModal';
 
 const LANGUAGE_ORDER = ['es', 'en', 'es_spain', 'embajada_spain', 'policy', 'covid', 'fr', 'it', 'de'];
@@ -1132,17 +1133,20 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
 
   // Duplicates calculation based on the 8 fields: Tipo de acción, Nombre Completo, Fecha de nacimiento, Fecha de inicio, Origen, Destino, Plan, Póliza
   const duplicateGroups = useMemo(() => {
+    if (!isSuperAdminOrDirector) return [];
     return findDuplicatePolicyGroups(insurances, policies);
-  }, [insurances, policies]);
+  }, [insurances, policies, isSuperAdminOrDirector]);
 
   const duplicateCount = duplicateGroups.length;
 
-  // Unexported policies to CareMed
-  const unexportedInsurances = useMemo(() => {
-    return insurances.filter(ins => !ins.Caremed);
+  // Unexported policies to CareMed - calculate count efficiently without array allocations
+  const unexportedCount = useMemo(() => {
+    let count = 0;
+    for (let idx = 0; idx < insurances.length; idx++) {
+      if (!insurances[idx].Caremed) count++;
+    }
+    return count;
   }, [insurances]);
-
-  const unexportedCount = unexportedInsurances.length;
 
   useEffect(() => {
     if (!profile || !hasPermission('policies')) return;
@@ -1156,67 +1160,39 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
       handleFirestoreError(error, OperationType.GET, 'insurances');
     });
 
-    const fetchPolicies = async () => {
-      try {
-        const snap = await getDocs(collection(db, 'policies'));
-        setPolicies(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Policy)));
-      } catch (error) {
-        handleFirestoreError(error, OperationType.GET, 'policies');
-      }
-    };
-    fetchPolicies();
-
     const unsubLetters = onSnapshot(collection(db, 'policyLetters'), (snap) => {
       setPolicyLetters(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as PolicyLetter)));
     }, (error) => {
       handleFirestoreError(error, OperationType.GET, 'policyLetters');
     });
 
-    const fetchClients = async () => {
-      try {
-        const snap = await getDocs(collection(db, 'clients'));
-        setClients(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } )));
-      } catch (error) {
-        handleFirestoreError(error, OperationType.GET, 'clients');
-      }
-    };
-    fetchClients();
-
-    const fetchUsers = async () => {
-      try {
-        const snap = await getDocs(collection(db, 'users'));
-        setUsersList(snap.docs.map(doc => ({ uid: doc.id, ...doc.data() })));
-      } catch (error) {
-        console.error("Error fetching users in PoliciesManager:", error);
-      }
-    };
-    fetchUsers();
-
-    const fetchCountries = async () => {
-      try {
-        const snap = await getDocs(collection(db, 'countries'));
-        setCountriesList(snap.docs.map(doc => doc.data()));
-      } catch (error) {
-        console.error("Error fetching countries in PoliciesManager:", error);
-      }
-    };
-    fetchCountries();
-
-    const fetchActionTypes = async () => {
-      try {
-        const snap = await getDocs(query(collection(db, 'actionTypes'), orderBy('action')));
-        setActionTypes(snap.docs.map(doc => doc.data() as any));
-      } catch (error) {
-        handleFirestoreError(error, OperationType.GET, 'actionTypes');
-      }
-    };
-    fetchActionTypes();
-
     const unsubInvoices = onSnapshot(collection(db, 'caremedInvoices'), (snapshot) => {
       setCaremedInvoices(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
     }, (error) => {
       handleFirestoreError(error, OperationType.GET, 'caremedInvoices');
     });
+
+    // Fetch static auxiliary collections in parallel
+    const fetchAuxiliaryData = async () => {
+      try {
+        const [policiesSnap, clientsSnap, usersSnap, countriesSnap, actionTypesSnap] = await Promise.all([
+          getDocs(collection(db, 'policies')),
+          getDocs(collection(db, 'clients')),
+          getDocs(collection(db, 'users')),
+          getDocs(collection(db, 'countries')),
+          getDocs(query(collection(db, 'actionTypes'), orderBy('action')))
+        ]);
+
+        setPolicies(policiesSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Policy)));
+        setClients(clientsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
+        setUsersList(usersSnap.docs.map(doc => ({ uid: doc.id, ...doc.data() })));
+        setCountriesList(countriesSnap.docs.map(doc => doc.data()));
+        setActionTypes(actionTypesSnap.docs.map(doc => doc.data() as any));
+      } catch (error) {
+        console.error("Error fetching auxiliary data in PoliciesManager:", error);
+      }
+    };
+    fetchAuxiliaryData();
 
     return () => {
       unsubscribe();
@@ -1236,125 +1212,178 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
     return types;
   }, [policies, planFilter]);
 
+  const clientMap = React.useMemo(() => {
+    const map = new Map<string, any>();
+    clients.forEach(c => {
+      if (c.id) map.set(c.id, c);
+    });
+    return map;
+  }, [clients]);
+
+  const policyMap = React.useMemo(() => {
+    const map = new Map<string, Policy>();
+    policies.forEach(p => {
+      if (p.id) map.set(p.id, p);
+    });
+    return map;
+  }, [policies]);
+
+  const [selectedInsuranceIds, setSelectedInsuranceIds] = useState<string[]>([]);
+
+  const selectedInsuranceSet = React.useMemo(() => {
+    return new Set(selectedInsuranceIds);
+  }, [selectedInsuranceIds]);
+
   const selectedClient = React.useMemo(() => {
-    return clients.find(c => c.id === agentFilter);
-  }, [clients, agentFilter]);
+    return clientMap.get(agentFilter);
+  }, [clientMap, agentFilter]);
 
   const filteredInsurances = React.useMemo(() => {
+    const trimmedSearch = searchTerm.toLowerCase().trim();
+    const searchTokens = trimmedSearch ? trimmedSearch.split(/\s+/) : null;
+    const hasSearch = !!searchTokens && searchTokens.length > 0;
+    const today = format(new Date(), 'yyyy-MM-dd');
+    const isAgent = profile?.role === 'agent';
+    const isClient = profile?.role === 'client';
+    const profileEmailLower = profile?.email?.toLowerCase();
+    const profileUid = profile?.uid;
+
     let result = insurances.filter(ins => {
       // Role-based visibility enforcement
-      if (profile?.role === 'agent') {
-        const isOwnerByUid = ins.agentId === profile.uid;
-        const isOwnerByEmail = ins.linkedAgentId?.toLowerCase() === profile.email.toLowerCase();
-        const isOwnerByEmailInAgentId = ins.agentId?.toLowerCase() === profile.email.toLowerCase();
+      if (isAgent) {
+        const isOwnerByUid = ins.agentId === profileUid;
+        const isOwnerByEmail = profileEmailLower && ins.linkedAgentId?.toLowerCase() === profileEmailLower;
+        const isOwnerByEmailInAgentId = profileEmailLower && ins.agentId?.toLowerCase() === profileEmailLower;
         if (!isOwnerByUid && !isOwnerByEmail && !isOwnerByEmailInAgentId) return false;
       }
-      if (profile?.role === 'client' && ins.email?.toLowerCase() !== profile?.email?.toLowerCase()) return false;
+      if (isClient && ins.email?.toLowerCase() !== profileEmailLower) return false;
 
-      const client = clients.find(c => c.id === ins.clientId);
-      const clientName = client ? (client.commercialName || client.legalName || `${client.firstName || ''} ${client.lastName || ''}`.trim()) : '';
-      const subAgent = client?.linkedAgents?.find((la: any) => la.email === ins.linkedAgentId || la.id === ins.linkedAgentId);
-      const subAgentName = subAgent ? subAgent.name : '';
-      const subAgentEmail = ins.linkedAgentId || '';
-
-      const fullName = `${ins.firstName || ''} ${ins.lastName || ''}`.trim();
-      const policy = policies.find(p => p.id === ins.policyId);
-      const policyNum = getPolicyNumber(policy, ins.age || 0);
-      
-      const reqDateNorm = getNormalizedYYYYMMDD(ins.requestDate) || getNormalizedYYYYMMDD(ins.createdAt);
-      const reqDateDisp = formatDisplayDate(ins.requestDate || ins.createdAt);
-      const startDateNorm = getNormalizedYYYYMMDD(ins.startDate);
-      const startDateDisp = formatDisplayDate(ins.startDate);
-      const endDateNorm = getNormalizedYYYYMMDD(ins.endDate);
-      const endDateDisp = formatDisplayDate(ins.endDate);
-
-      const searchTarget = `${fullName} ${ins.firstName || ''} ${ins.lastName || ''} ${ins.email || ''} ${ins.id || ''} ${ins.IDseg || ''} ${policyNum} ${clientName} ${subAgentName} ${subAgentEmail} ${ins.requestDate || ''} ${reqDateNorm} ${reqDateDisp} ${startDateNorm} ${startDateDisp} ${endDateNorm} ${endDateDisp}`.toLowerCase();
-      const searchTokens = searchTerm.toLowerCase().trim().split(/\s+/);
-      const matchesSearch = searchTokens.every(token => searchTarget.includes(token));
-      
+      // Status filter
       let matchesStatus = statusFilter === 'all';
+      const dStatus = getInsuranceDisplayStatus(ins);
       if (statusFilter === 'unpaid') {
-        const isCancelled = ins.actionType?.toUpperCase() === 'CAN' || ins.actionType === 'Can' || ins.status === 'cancelled';
-        const totalPrice = ins.totalFinal !== undefined && ins.totalFinal !== null ? ins.totalFinal : (ins.totalPrice || 0);
+        const isCancelled = dStatus === 'cancelled';
+        const finalPrice = getInsuranceFinalPrice(ins);
         const totalPaid = ins.totalPaid || 0;
-        const balance = totalPrice - totalPaid;
-        matchesStatus = !isCancelled && !ins.closed && ins.status !== 'paid' && balance > 0.01;
+        const balance = finalPrice - totalPaid;
+        matchesStatus = !isCancelled && !ins.closed && dStatus !== 'paid' && balance > 0.01;
       } else if (statusFilter !== 'all') {
-        matchesStatus = ins.status === statusFilter;
+        matchesStatus = dStatus === statusFilter;
       }
-      
-      const plan = ins.plan || policy?.plan || ins.policyId.split('-')[0];
-      const policyName = ins.policyName || policy?.name || '';
+      if (!matchesStatus) return false;
 
-      const matchesPlan = planFilter === 'all' || plan === planFilter;
-      const matchesPolicyType = policyTypeFilter === 'all' || 
-        (policyName.includes(policyTypeFilter)) || 
-        (ins.policyId.includes(policyTypeFilter));
-      
-      const date = ins.createdAt?.toDate ? ins.createdAt.toDate() : new Date(ins.createdAt);
-      const matchesDate = (!dateRange.start || date >= new Date(dateRange.start)) &&
-                          (!dateRange.end || date <= new Date(dateRange.end));
-
-      // Filter by request date
-      const actualRequestDate = getNormalizedYYYYMMDD(ins.requestDate) || getNormalizedYYYYMMDD(ins.createdAt);
-      const matchesRequestDate = (!requestDateRange.start || actualRequestDate >= requestDateRange.start) &&
-                                 (!requestDateRange.end || actualRequestDate <= requestDateRange.end);
-
-      // New filters
-      const matchesValidity = (!validityRange.start || ins.startDate >= validityRange.start) &&
-                              (!validityRange.end || ins.endDate <= validityRange.end);
-      
-      const today = format(new Date(), 'yyyy-MM-dd');
-      let opStatus = 'Activo';
-      if (ins.actionType?.toUpperCase() === 'CAN' || ins.actionType === 'Can' || ins.status === 'cancelled') {
-        opStatus = 'Cancelado';
-      } else if (today > ins.endDate) {
-        opStatus = 'Terminado';
-      }
-      
-      const matchesOperationalStatus = operationalStatusFilter === 'all' || opStatus === operationalStatusFilter;
-      
-      const matchesClientType = clientTypeFilter === 'all' || ins.clientType === clientTypeFilter;
-      const matchesAgent = agentFilter === 'all' || ins.clientId === agentFilter;
-      const matchesSubAgent = subAgentFilter === 'all' || ins.linkedAgentId === subAgentFilter;
-      const matchesActionType = actionTypeFilter === 'all' || ins.actionType === actionTypeFilter;
+      // Simple equality filters (fail fast before string lookups)
+      if (clientTypeFilter !== 'all' && ins.clientType !== clientTypeFilter) return false;
+      if (agentFilter !== 'all' && ins.clientId !== agentFilter) return false;
+      if (subAgentFilter !== 'all' && ins.linkedAgentId !== subAgentFilter) return false;
+      if (actionTypeFilter !== 'all' && ins.actionType !== actionTypeFilter) return false;
 
       // CareMed filters
-      const matchesCaremedExported = caremedExportedFilter === 'all' || 
-        (caremedExportedFilter === 'exported' ? !!ins.Caremed : !ins.Caremed);
+      if (caremedExportedFilter !== 'all') {
+        const isExp = caremedExportedFilter === 'exported';
+        if (isExp ? !ins.Caremed : !!ins.Caremed) return false;
+      }
 
-      const matchesCaremedInvoiced = caremedInvoicedFilter === 'all' ||
-        (caremedInvoicedFilter === 'invoiced' ? !!ins.InvoiceCaremed : !ins.InvoiceCaremed);
+      if (caremedInvoicedFilter !== 'all') {
+        const isInv = caremedInvoicedFilter === 'invoiced';
+        if (isInv ? !ins.InvoiceCaremed : !!ins.InvoiceCaremed) return false;
+      }
 
-      return matchesSearch && matchesStatus && matchesPlan && matchesPolicyType && matchesDate && matchesRequestDate && matchesValidity && matchesOperationalStatus && matchesClientType && matchesAgent && matchesSubAgent && matchesActionType && matchesCaremedExported && matchesCaremedInvoiced;
+      // Operational status
+      if (operationalStatusFilter !== 'all') {
+        let opStatus = 'Activo';
+        if (ins.actionType?.toUpperCase() === 'CAN' || ins.actionType === 'Can' || ins.status === 'cancelled') {
+          opStatus = 'Cancelado';
+        } else if (ins.endDate && today > ins.endDate) {
+          opStatus = 'Terminado';
+        }
+        if (opStatus !== operationalStatusFilter) return false;
+      }
+
+      // Validity Range
+      if (validityRange.start && (!ins.startDate || ins.startDate < validityRange.start)) return false;
+      if (validityRange.end && (!ins.endDate || ins.endDate > validityRange.end)) return false;
+
+      // Creation Date Range
+      if (dateRange.start || dateRange.end) {
+        const date = ins.createdAt?.toDate ? ins.createdAt.toDate() : new Date(ins.createdAt);
+        if (dateRange.start && date < new Date(dateRange.start)) return false;
+        if (dateRange.end && date > new Date(dateRange.end)) return false;
+      }
+
+      // Request Date Range
+      if (requestDateRange.start || requestDateRange.end) {
+        const actualRequestDate = getNormalizedYYYYMMDD(ins.requestDate) || getNormalizedYYYYMMDD(ins.createdAt);
+        if (requestDateRange.start && (!actualRequestDate || actualRequestDate < requestDateRange.start)) return false;
+        if (requestDateRange.end && (!actualRequestDate || actualRequestDate > requestDateRange.end)) return false;
+      }
+
+      // Plan and Policy Type filters
+      const policy = policyMap.get(ins.policyId);
+      const plan = ins.plan || policy?.plan || (ins.policyId ? ins.policyId.split('-')[0] : '');
+      if (planFilter !== 'all' && plan !== planFilter) return false;
+
+      const policyName = ins.policyName || policy?.name || '';
+      if (policyTypeFilter !== 'all') {
+        const matchesPolicyType = policyName.includes(policyTypeFilter) || (ins.policyId && ins.policyId.includes(policyTypeFilter));
+        if (!matchesPolicyType) return false;
+      }
+
+      // Search match (ONLY evaluated if search is non-empty)
+      if (hasSearch) {
+        const client = clientMap.get(ins.clientId);
+        const clientName = client ? (client.commercialName || client.legalName || `${client.firstName || ''} ${client.lastName || ''}`.trim()) : '';
+        const subAgent = client?.linkedAgents?.find((la: any) => la.email === ins.linkedAgentId || la.id === ins.linkedAgentId);
+        const subAgentName = subAgent ? subAgent.name : '';
+        const subAgentEmail = ins.linkedAgentId || '';
+
+        const fullName = `${ins.firstName || ''} ${ins.lastName || ''}`.trim();
+        const policyNum = getPolicyNumber(policy, ins.age || 0);
+
+        const reqDateNorm = getNormalizedYYYYMMDD(ins.requestDate) || getNormalizedYYYYMMDD(ins.createdAt);
+        const reqDateDisp = formatDisplayDate(ins.requestDate || ins.createdAt);
+        const startDateNorm = getNormalizedYYYYMMDD(ins.startDate);
+        const startDateDisp = formatDisplayDate(ins.startDate);
+        const endDateNorm = getNormalizedYYYYMMDD(ins.endDate);
+        const endDateDisp = formatDisplayDate(ins.endDate);
+
+        const searchTarget = `${fullName} ${ins.firstName || ''} ${ins.lastName || ''} ${ins.email || ''} ${ins.id || ''} ${ins.IDseg || ''} ${policyNum} ${clientName} ${subAgentName} ${subAgentEmail} ${ins.requestDate || ''} ${reqDateNorm} ${reqDateDisp} ${startDateNorm} ${startDateDisp} ${endDateNorm} ${endDateDisp}`.toLowerCase();
+        const matchesSearch = searchTokens!.every(token => searchTarget.includes(token));
+        if (!matchesSearch) return false;
+      }
+
+      return true;
     });
 
     // Sorting
-    result.sort((a, b) => {
-      let valA: any = '';
-      let valB: any = '';
-
-      if (sortConfig.key === 'requestDate') {
-        valA = getNormalizedYYYYMMDD(a.requestDate) || getNormalizedYYYYMMDD(a.createdAt);
-        valB = getNormalizedYYYYMMDD(b.requestDate) || getNormalizedYYYYMMDD(b.createdAt);
-      } else if (sortConfig.key === 'clientName') {
-        valA = `${a.firstName} ${a.lastName}`.toLowerCase();
-        valB = `${b.firstName} ${b.lastName}`.toLowerCase();
-      } else {
-        // Default to createdAt if no key matches
+    if (sortConfig.key === 'requestDate') {
+      result.sort((a, b) => {
+        const valA = getNormalizedYYYYMMDD(a.requestDate) || getNormalizedYYYYMMDD(a.createdAt);
+        const valB = getNormalizedYYYYMMDD(b.requestDate) || getNormalizedYYYYMMDD(b.createdAt);
+        if (valA < valB) return sortConfig.direction === 'asc' ? -1 : 1;
+        if (valA > valB) return sortConfig.direction === 'asc' ? 1 : -1;
+        return 0;
+      });
+    } else if (sortConfig.key === 'clientName') {
+      result.sort((a, b) => {
+        const valA = `${a.firstName || ''} ${a.lastName || ''}`.toLowerCase();
+        const valB = `${b.firstName || ''} ${b.lastName || ''}`.toLowerCase();
+        if (valA < valB) return sortConfig.direction === 'asc' ? -1 : 1;
+        if (valA > valB) return sortConfig.direction === 'asc' ? 1 : -1;
+        return 0;
+      });
+    } else {
+      result.sort((a, b) => {
         const dateA = a.createdAt?.toDate ? a.createdAt.toDate().getTime() : new Date(a.createdAt).getTime();
         const dateB = b.createdAt?.toDate ? b.createdAt.toDate().getTime() : new Date(b.createdAt).getTime();
-        valA = dateA;
-        valB = dateB;
-      }
-
-      if (valA < valB) return sortConfig.direction === 'asc' ? -1 : 1;
-      if (valA > valB) return sortConfig.direction === 'asc' ? 1 : -1;
-      return 0;
-    });
+        if (dateA < dateB) return sortConfig.direction === 'asc' ? -1 : 1;
+        if (dateA > dateB) return sortConfig.direction === 'asc' ? 1 : -1;
+        return 0;
+      });
+    }
 
     return result;
-  }, [insurances, searchTerm, statusFilter, planFilter, policyTypeFilter, dateRange, requestDateRange, validityRange, operationalStatusFilter, caremedExportedFilter, caremedInvoicedFilter, policies, clientTypeFilter, agentFilter, subAgentFilter, actionTypeFilter, clients, sortConfig]);
+  }, [insurances, searchTerm, statusFilter, planFilter, policyTypeFilter, dateRange, requestDateRange, validityRange, operationalStatusFilter, caremedExportedFilter, caremedInvoicedFilter, policyMap, clientTypeFilter, agentFilter, subAgentFilter, actionTypeFilter, clientMap, sortConfig, profile]);
 
   // Reset page and selection when filters change
   useEffect(() => {
@@ -1378,7 +1407,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
     filteredInsurances.forEach(i => {
       count++;
       const isCan = i.actionType?.toUpperCase() === 'CAN';
-      const p = i.totalFinal || i.totalPrice || 0;
+      const p = getInsuranceFinalPrice(i);
       const c = getPolicyEffectiveCost(i);
       const com = i.agentCommission || 0;
       ventas += isCan ? -Math.abs(p) : (p < 0 ? p : Math.abs(p));
@@ -1394,7 +1423,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
 
     const dataToExport = filteredInsurances.map(item => {
       const ins = item as any;
-      const client = clients.find(c => c.id === ins.clientId);
+      const client = clientMap.get(ins.clientId);
       const clientName = ins.clientType === 'Individual' ? 'Individual' : (client?.commercialName || client?.legalName || 'Faltante');
       const creationDate = ins.createdAt ? (ins.createdAt.toDate ? format(ins.createdAt.toDate(), 'yyyy-MM-dd HH:mm:ss') : format(new Date(ins.createdAt), 'yyyy-MM-dd HH:mm:ss')) : '';
 
@@ -1537,13 +1566,11 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
     }
   };
 
-  const [selectedInsuranceIds, setSelectedInsuranceIds] = useState<string[]>([]);
-
   // Selected insurances analysis for CareMed export
   const selectedInsurancesList = useMemo(() => {
     if (selectedInsuranceIds.length === 0) return [];
-    return insurances.filter(ins => ins.id && selectedInsuranceIds.includes(ins.id));
-  }, [insurances, selectedInsuranceIds]);
+    return insurances.filter(ins => ins.id && selectedInsuranceSet.has(ins.id));
+  }, [insurances, selectedInsuranceIds, selectedInsuranceSet]);
 
   const selectedExportedCount = useMemo(() => {
     return selectedInsurancesList.filter(ins => !!ins.Caremed).length;
@@ -2120,14 +2147,14 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
       const insSnap = await getDoc(insRef);
       if (insSnap.exists()) {
         const insData = insSnap.data() as InsuranceRequest;
-        const totalPrice = insData.totalFinal || insData.totalPrice;
+        const finalPrice = getInsuranceFinalPrice(insData);
         
         const qAll = query(collection(db, 'payments'), where('insuranceId', '==', insuranceId), where('status', '==', 'completed'));
         const allSnap = await getDocs(qAll);
         const newTotalPaid = allSnap.docs.reduce((acc, d) => acc + (d.data().amount || 0), 0);
         
         let newStatus = insData.status;
-        if ((totalPrice - newTotalPaid) < 2) {
+        if ((finalPrice - newTotalPaid) < 2) {
           newStatus = 'paid';
         } else if (newTotalPaid > 0) {
           newStatus = 'partially_paid';
@@ -2135,7 +2162,8 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
         
         await updateDoc(insRef, {
           totalPaid: newTotalPaid,
-          status: newStatus
+          status: newStatus,
+          totalFinal: finalPrice
         });
 
         // Trigger WhatsApp notifications based on status after payment confirmation
@@ -6472,29 +6500,30 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
               <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
                 {paginatedInsurances.map((i) => {
               const requestDate = i.createdAt?.toDate ? i.createdAt.toDate() : new Date(i.createdAt);
-              const policy = policies.find(p => p.id === i.policyId);
-              const plan = i.plan || policy?.plan || i.policyId.split('-')[0];
+              const policy = policyMap.get(i.policyId);
+              const plan = i.plan || policy?.plan || (i.policyId ? i.policyId.split('-')[0] : '');
               const policyName = i.policyName || policy?.name || '';
               
               const mul = 1;
-              const totalPrice = i.totalFinal || i.totalPrice || 0;
+              const finalPrice = getInsuranceFinalPrice(i);
               const totalPaid = i.totalPaid || 0;
-              const balanceToPay = totalPrice - totalPaid;
-              const isPaidStatus = i.status === 'paid' || (balanceToPay < 2 && i.status !== 'cancelled');
-              const displayStatus = isPaidStatus ? 'paid' : i.status;
+              const balanceToPay = finalPrice - totalPaid;
+              const displayStatus = getInsuranceDisplayStatus(i);
+              const isPaidStatus = displayStatus === 'paid';
 
               const hasPendingPayments = !isPaidStatus && balanceToPay >= 2;
               const isCommissionPending = (i.commissionStatus === 'pending' || !i.commissionStatus) && (i.agentCommission || 0) > 0;
+              const isSelected = selectedInsuranceSet.has(i.id || '');
 
               return (
-                <div key={i.id} className={`bg-white rounded-2xl border ${selectedInsuranceIds.includes(i.id || '') ? 'border-indigo-300 ring-2 ring-indigo-50/50 bg-indigo-50/10' : 'border-gray-100'} p-6 hover:shadow-md transition-all flex flex-col gap-6`}>
+                <div key={i.id} className={`bg-white rounded-2xl border ${isSelected ? 'border-indigo-300 ring-2 ring-indigo-50/50 bg-indigo-50/10' : 'border-gray-100'} p-6 hover:shadow-md transition-all flex flex-col gap-6`}>
                   <div className="flex flex-col md:flex-row justify-between gap-4">
                     <div className="flex items-start gap-4">
                       {(isSuperAdminOrDirector || canManageClosedState) && (
                         <input
                           id={`select-card-${i.id}`}
                           type="checkbox"
-                          checked={selectedInsuranceIds.includes(i.id || '')}
+                          checked={isSelected}
                           onChange={() => handleToggleSelectInsurance(i.id || '')}
                           className="w-4 h-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 cursor-pointer self-center accent-indigo-650"
                         />
@@ -6554,7 +6583,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                             );
                           }
 
-                          const client = clients.find(c => c.id === i.clientId);
+                          const client = clientMap.get(i.clientId);
                           const clientLabel = i.clientType === 'Agent' ? 'Agente' : 'Corporativo';
                           const clientName = client ? (client.commercialName || client.legalName || `${client.firstName || ''} ${client.lastName || ''}`.trim()) : 'Faltante';
                           
@@ -6678,7 +6707,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                       <div className="grid grid-cols-2 gap-2">
                         <div>
                           <p className="text-[8px] text-gray-400 font-bold uppercase">Precio</p>
-                          <p className="text-xs font-black text-gray-900">{formatPriceWithSign(i.totalFinal || i.totalPrice || 0, i.actionType?.toUpperCase() === 'CAN')}</p>
+                          <p className="text-xs font-black text-gray-900">{formatPriceWithSign(finalPrice, i.actionType?.toUpperCase() === 'CAN')}</p>
                         </div>
                         {profile?.role !== 'agent' && (
                           <div>
@@ -6872,27 +6901,28 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                 </thead>
                 <tbody className="divide-y divide-gray-100">
                   {paginatedInsurances.map((i) => {
-                    const policy = policies.find(p => p.id === i.policyId);
-                    const plan = i.plan || policy?.plan || i.policyId.split('-')[0];
+                    const policy = policyMap.get(i.policyId);
+                    const plan = i.plan || policy?.plan || (i.policyId ? i.policyId.split('-')[0] : '');
                     const policyName = i.policyName || policy?.name || '';
                     
                     const mul = 1;
-                    const totalPrice = i.totalFinal || i.totalPrice || 0;
+                    const finalPrice = getInsuranceFinalPrice(i);
                     const totalPaid = i.totalPaid || 0;
-                    const balanceToPay = totalPrice - totalPaid;
-                    const isPaidStatus = i.status === 'paid' || (balanceToPay < 2 && i.status !== 'cancelled');
-                    const displayStatus = isPaidStatus ? 'paid' : i.status;
+                    const balanceToPay = finalPrice - totalPaid;
+                    const displayStatus = getInsuranceDisplayStatus(i);
+                    const isPaidStatus = displayStatus === 'paid';
 
                     const isCommissionPending = (i.commissionStatus === 'pending' || !i.commissionStatus) && (i.agentCommission || 0) > 0;
                     const hasPendingPayments = !isPaidStatus && balanceToPay >= 2;
+                    const isSelected = selectedInsuranceSet.has(i.id || '');
 
                     return (
-                      <tr key={i.id} className={`hover:bg-gray-50 transition-colors ${selectedInsuranceIds.includes(i.id || '') ? 'bg-indigo-50/20 hover:bg-indigo-50/30' : ''}`}>
+                      <tr key={i.id} className={`hover:bg-gray-50 transition-colors ${isSelected ? 'bg-indigo-50/20 hover:bg-indigo-50/30' : ''}`}>
                         {(isSuperAdminOrDirector || canManageClosedState) && (
                           <td className="px-4 py-4 text-center">
                             <input
                               type="checkbox"
-                              checked={selectedInsuranceIds.includes(i.id || '')}
+                              checked={isSelected}
                               onChange={() => handleToggleSelectInsurance(i.id || '')}
                               className="w-4 h-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 cursor-pointer accent-indigo-600"
                             />
@@ -6951,7 +6981,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                 );
                               }
 
-                              const client = clients.find(c => c.id === i.clientId);
+                              const client = clientMap.get(i.clientId);
                               const clientLabel = i.clientType === 'Agent' ? 'Agente' : 'Corp';
                               const clientName = client ? (client.commercialName || client.legalName || `${client.firstName || ''} ${client.lastName || ''}`.trim()) : 'Fal.';
                               
@@ -7143,7 +7173,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                 }`}>
                                   {displayStatus === 'paid' ? 'PAGADO' : 
                                    displayStatus === 'pending' ? 'PENDIENTE' : 
-                                   displayStatus === 'partially_paid' ? 'PARCIAL' :
+                                   displayStatus === 'partially_paid' ? 'PAGO PARCIAL' :
                                    'CANCELADO'}
                                 </span>
                               </div>
@@ -7162,7 +7192,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                             </div>
                           </div>
                         </td>
-                        <td className="px-6 py-4 text-right font-bold text-gray-900 text-sm">{formatPriceWithSign(i.totalFinal || i.totalPrice || 0, i.actionType?.toUpperCase() === 'CAN')}</td>
+                        <td className="px-6 py-4 text-right font-bold text-gray-900 text-sm">{formatPriceWithSign(finalPrice, i.actionType?.toUpperCase() === 'CAN')}</td>
                         {profile?.role !== 'agent' && (
                           <td className="px-6 py-4 text-right font-bold text-red-600 text-sm">{formatPriceWithSign(i.totalCost || 0, i.actionType?.toUpperCase() === 'CAN')}</td>
                         )}

@@ -15,7 +15,7 @@ import { createZipFromPdfs, downloadBlob } from '../lib/zipUtils';
 import { useCompany } from '../App';
 import { triggerWhatsAppNotification } from '../services/whatsapp';
 import { getPolicyNumber, getAvailableLettersForInsurance, findPolicyPrioritized, formatDisplayDate } from '../lib/policyUtils';
-import { isCardPaymentMethod, safeNum } from '../utils/paymentUtils';
+import { isCardPaymentMethod, safeNum, getInsuranceDisplayStatus, getInsuranceFinalPrice } from '../utils/paymentUtils';
 import { logInsuranceActivity } from '../utils/activityLogger';
 import WhatsAppPolicyLettersModal, { getPolicyWhatsAppContacts } from './WhatsAppPolicyLettersModal';
 
@@ -267,7 +267,7 @@ export default function InsuranceDetailModal({ isOpen, onClose, insurance, initi
           updated.iva = 0;
         }
         
-        updated.totalFinal = Math.round((base - disc - adj + iva + cardC) * 100) / 100;
+        updated.totalFinal = Math.round((base - disc - adj) * 100) / 100;
       }
       return updated;
     });
@@ -1546,7 +1546,12 @@ export default function InsuranceDetailModal({ isOpen, onClose, insurance, initi
 
     const isCancellation = activeIns.actionType === 'CAN';
     const multiplier = isCancellation ? -1 : 1;
-    const insuranceTotalPrice = activeIns.totalFinal || activeIns.totalPrice;
+    const basePrice = activeIns.totalPrice || 0;
+    const discountVal = activeIns.discount || 0;
+    const adjustmentVal = activeIns.adjustment || 0;
+    const insuranceTotalPrice = isCancellation
+      ? (activeIns.totalPrice !== undefined && activeIns.totalPrice !== 0 ? activeIns.totalPrice : (activeIns.totalFinal || 0))
+      : (basePrice - discountVal - adjustmentVal);
     const displayTotalPrice = insuranceTotalPrice * multiplier;
     const displayTotalPaid = (activeIns.totalPaid || 0) * multiplier;
     const currentPendingBalance = displayTotalPrice - displayTotalPaid;
@@ -1779,6 +1784,21 @@ export default function InsuranceDetailModal({ isOpen, onClose, insurance, initi
 
   useEffect(() => {
     if (isOpen && insurance?.id) {
+      const activeIns = localInsurance || insurance;
+      const isCan = activeIns.actionType?.toUpperCase() === 'CAN' || activeIns.actionType === 'Can' || activeIns.status === 'cancelled';
+      if (!isCan) {
+        const finalPrice = getInsuranceFinalPrice(activeIns);
+        const totalPaid = activeIns.totalPaid || 0;
+        const balance = finalPrice - totalPaid;
+        const targetStatus = balance < 2 ? 'paid' : (totalPaid > 0 ? 'partially_paid' : 'pending');
+        if (activeIns.status !== targetStatus || (activeIns.totalFinal !== undefined && activeIns.totalFinal !== finalPrice)) {
+          updateDoc(doc(db, 'insurances', insurance.id), {
+            status: targetStatus,
+            totalFinal: finalPrice
+          }).catch(err => console.warn('Could not auto-sync insurance status in background:', err));
+        }
+      }
+
       setLoadingPayments(true);
       const q = query(
         collection(db, 'payments'),
@@ -1886,7 +1906,13 @@ export default function InsuranceDetailModal({ isOpen, onClose, insurance, initi
   const isCancellation = activeInsurance.actionType === 'CAN';
   const multiplier = 1;
 
-  const insuranceTotalPrice = activeInsurance.totalFinal || activeInsurance.totalPrice;
+  const basePrice = activeInsurance.totalPrice || 0;
+  const discountVal = activeInsurance.discount || 0;
+  const adjustmentVal = activeInsurance.adjustment || 0;
+  const insuranceTotalPrice = isCancellation
+    ? (activeInsurance.totalPrice !== undefined && activeInsurance.totalPrice !== 0 ? activeInsurance.totalPrice : (activeInsurance.totalFinal || 0))
+    : (basePrice - discountVal - adjustmentVal);
+
   const cardCommissionVal = activeInsurance.comision || (activeInsurance as any).cardCommission || (activeInsurance as any).cargoTarjeta || 0;
   const displayCardCommission = cardCommissionVal * multiplier;
   const displayTotalPrice = insuranceTotalPrice * multiplier;
@@ -4051,11 +4077,7 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
                             <div className="flex justify-between">
                               <span className="text-gray-500 text-sm font-medium">Estado:</span>
                               {(() => {
-                                const totalPrice = activeInsurance.totalFinal || activeInsurance.totalPrice || 0;
-                                const totalPaid = activeInsurance.totalPaid || 0;
-                                const balanceToPay = totalPrice - totalPaid;
-                                const isPaidStatus = activeInsurance.status === 'paid' || (balanceToPay < 2 && activeInsurance.status !== 'cancelled');
-                                const displayStatus = isPaidStatus ? 'paid' : activeInsurance.status;
+                                const displayStatus = getInsuranceDisplayStatus(activeInsurance);
 
                                 return (
                                   <span className={`px-2 py-0.5 text-[10px] font-bold rounded-full border ${
@@ -4084,12 +4106,6 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
                               <span className="text-gray-500 text-sm font-medium">Precio Base:</span>
                               <span className="font-semibold text-gray-900">{formatValue(activeInsurance.totalPrice || 0)} USD</span>
                             </div>
-                            {displayCardCommission > 0 ? (
-                              <div className="flex justify-between">
-                                <span className="text-gray-500 text-sm font-medium">Comisión Tarjeta:</span>
-                                <span className="font-bold text-amber-600">{formatValue(displayCardCommission)} USD</span>
-                              </div>
-                            ) : null}
                             {activeInsurance.discount ? (
                               <div className="flex justify-between">
                                 <span className="text-gray-500 text-sm font-medium">Descuento:</span>
@@ -4100,8 +4116,14 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
                               <div className="flex justify-between">
                                 <span className="text-gray-500 text-sm font-medium">Ajuste:</span>
                                 <span className={`font-bold ${(activeInsurance.adjustment || 0) > 0 ? 'text-green-600' : 'text-blue-600'}`}>
-                                  {formatValue(activeInsurance.adjustment || 0)} USD
+                                  {formatValue(-(activeInsurance.adjustment || 0))} USD
                                 </span>
+                              </div>
+                            ) : null}
+                            {displayCardCommission > 0 ? (
+                              <div className="flex justify-between">
+                                <span className="text-gray-500 text-sm font-medium">Comisión Tarjeta:</span>
+                                <span className="font-bold text-amber-600">{formatValue(displayCardCommission)} USD</span>
                               </div>
                             ) : null}
                             {activeInsurance.iva ? (
@@ -4110,12 +4132,10 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
                                 <span className="font-bold text-rose-600">{formatValue(activeInsurance.iva)} USD</span>
                               </div>
                             ) : null}
-                            {(activeInsurance.discount || activeInsurance.adjustment || displayCardCommission > 0 || activeInsurance.iva) ? (
-                              <div className="flex justify-between">
-                                <span className="text-gray-500 text-sm font-medium">Venta Total:</span>
-                                <span className="font-bold text-gray-900">{formatValue(displayTotalPrice)} USD</span>
-                              </div>
-                            ) : null}
+                            <div className="flex justify-between">
+                              <span className="text-gray-500 text-sm font-medium">Venta Total:</span>
+                              <span className="font-bold text-gray-900">{formatValue(displayTotalPrice)} USD</span>
+                            </div>
                             <div className="flex justify-between">
                               <span className="text-gray-500 text-sm font-medium">Costo Proveedor:</span>
                               <span className="font-bold text-red-600">{formatValue(displayTotalCost)} USD</span>

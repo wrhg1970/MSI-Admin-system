@@ -5,6 +5,7 @@ import { Client, InsuranceRequest, Payment, Claim } from '../types';
 import { X, Shield, Calendar, DollarSign, CreditCard, Receipt, Briefcase, CheckCircle2, Clock, AlertCircle, ArrowRight, FileText, Search } from 'lucide-react';
 import { format } from 'date-fns';
 import { formatDisplayDate } from '../lib/policyUtils';
+import { getInsuranceDisplayStatus, getInsuranceFinalPrice } from '../utils/paymentUtils';
 
 interface ClientDetailModalProps {
   isOpen: boolean;
@@ -405,17 +406,22 @@ export default function ClientDetailModal({ isOpen, onClose, client }: ClientDet
                           <div className="flex items-center gap-6 justify-between md:justify-end border-t border-gray-50 pt-3 md:border-none md:pt-0">
                             <div className="text-left md:text-right">
                               <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Monto Total</p>
-                              <p className="text-base font-black text-gray-900">${ins.totalFinal?.toLocaleString() || ins.totalPrice.toLocaleString()} USD</p>
+                              <p className="text-base font-black text-gray-900">${getInsuranceFinalPrice(ins).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD</p>
                             </div>
                             <div className="text-right">
                               <p className="text-[10px] font-bold text-gray-400 uppercase tracking-widest">Estado</p>
-                              <span className={`text-[10px] font-black px-2.5 py-0.5 rounded-full uppercase border ${
-                                ins.status === 'paid' ? 'bg-green-100 text-green-700 border-green-200 animate-pulse' :
-                                ins.status === 'partially_paid' ? 'bg-yellow-105/90 text-yellow-700 border-yellow-200' :
-                                'bg-red-100 text-red-700 border-red-200'
-                              }`}>
-                                {ins.status === 'paid' ? 'Pagado' : ins.status === 'partially_paid' ? 'Parcial' : 'Pendiente'}
-                              </span>
+                              {(() => {
+                                const dStatus = getInsuranceDisplayStatus(ins);
+                                return (
+                                  <span className={`text-[10px] font-black px-2.5 py-0.5 rounded-full uppercase border ${
+                                    dStatus === 'paid' ? 'bg-green-100 text-green-700 border-green-200 animate-pulse' :
+                                    dStatus === 'partially_paid' ? 'bg-yellow-105/90 text-yellow-700 border-yellow-200' :
+                                    'bg-red-100 text-red-700 border-red-200'
+                                  }`}>
+                                    {dStatus === 'paid' ? 'Pagado' : dStatus === 'partially_paid' ? 'Parcial' : 'Pendiente'}
+                                  </span>
+                                );
+                              })()}
                             </div>
                           </div>
                         </div>

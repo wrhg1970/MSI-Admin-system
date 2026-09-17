@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { InsuranceRequest, Policy } from '../types';
 import { formatDisplayDate, findDuplicatePolicyGroups, DuplicateGroup, normalizeDuplicateField } from '../lib/policyUtils';
+import { getInsuranceDisplayStatus, getInsuranceFinalPrice } from '../utils/paymentUtils';
 
 interface DuplicatesModalProps {
   isOpen: boolean;
@@ -498,22 +499,27 @@ export default function DuplicatesModal({
 
                               {/* Total Amount */}
                               <td className="px-4 py-3 text-right font-black text-gray-900">
-                                ${((item.totalFinal || item.totalPrice) || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                ${getInsuranceFinalPrice(item).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                               </td>
 
                               {/* Payment Status */}
                               <td className="px-4 py-3 text-center">
-                                <span className={`px-2 py-0.5 text-[9px] font-black rounded-full border inline-block ${
-                                  item.status === 'paid' ? 'bg-green-50 text-green-700 border-green-200' : 
-                                  item.status === 'pending' ? 'bg-yellow-50 text-yellow-700 border-yellow-200' : 
-                                  item.status === 'partially_paid' ? 'bg-blue-50 text-blue-700 border-blue-200' :
-                                  'bg-red-50 text-red-700 border-red-200'
-                                }`}>
-                                  {item.status === 'paid' ? 'PAGADO' : 
-                                   item.status === 'pending' ? 'PENDIENTE' : 
-                                   item.status === 'partially_paid' ? 'PARCIAL' :
-                                   'CANCELADO'}
-                                </span>
+                                {(() => {
+                                  const dStatus = getInsuranceDisplayStatus(item);
+                                  return (
+                                    <span className={`px-2 py-0.5 text-[9px] font-black rounded-full border inline-block ${
+                                      dStatus === 'paid' ? 'bg-green-50 text-green-700 border-green-200' : 
+                                      dStatus === 'pending' ? 'bg-yellow-50 text-yellow-700 border-yellow-200' : 
+                                      dStatus === 'partially_paid' ? 'bg-blue-50 text-blue-700 border-blue-200' :
+                                      'bg-red-50 text-red-700 border-red-200'
+                                    }`}>
+                                      {dStatus === 'paid' ? 'PAGADO' : 
+                                       dStatus === 'pending' ? 'PENDIENTE' : 
+                                       dStatus === 'partially_paid' ? 'PAGO PARCIAL' :
+                                       'CANCELADO'}
+                                    </span>
+                                  );
+                                })()}
                               </td>
 
                               {/* Caremed Status */}

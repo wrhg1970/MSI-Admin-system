@@ -5,6 +5,7 @@ import { db, handleFirestoreError, OperationType } from '../firebase';
 import { Client, Policy, InsuranceRequest } from '../types';
 import { Search, Users, ShieldCheck, FileText, X, Loader2, ChevronRight, User, Calendar, Mail, Tag } from 'lucide-react';
 import InsuranceDetailModal from './InsuranceDetailModal';
+import { getInsuranceDisplayStatus } from '../utils/paymentUtils';
 
 export default function HeaderSearch() {
   const navigate = useNavigate();
@@ -355,12 +356,13 @@ export default function HeaderSearch() {
                     <div className="space-y-1">
                       {insuranceResults.map((ins) => {
                         const passenger = `${ins.firstName || ''} ${ins.lastName || ''}`.trim() || ins.email || 'Pasajero';
-                        const statusColor = ins.status === 'paid' 
+                        const dStatus = getInsuranceDisplayStatus(ins);
+                        const statusColor = dStatus === 'paid' 
                           ? 'bg-emerald-100 text-emerald-700' 
-                          : ins.status === 'partially_paid' 
+                          : dStatus === 'partially_paid' 
                             ? 'bg-amber-100 text-amber-700' 
                             : 'bg-rose-100 text-rose-700';
-                        const statusText = ins.status === 'paid' ? 'Pagado' : ins.status === 'partially_paid' ? 'Parcial' : 'Pendiente';
+                        const statusText = dStatus === 'paid' ? 'Pagado' : dStatus === 'partially_paid' ? 'Parcial' : 'Pendiente';
 
                         return (
                           <div
