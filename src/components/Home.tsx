@@ -57,6 +57,7 @@ import ConfirmModal from './ConfirmModal';
 
 import { useCompany } from '../App';
 import { useFirestoreData } from '../context/FirestoreDataContext';
+import { isInsuranceDeudor } from '../utils/paymentUtils';
 
 interface HomeProps {
   profile: UserProfile | null;
@@ -211,7 +212,7 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
     // 3. Polizas sin Invoice (status not cancelled)
     const uninvoicedCount = insurances.filter(ins => !ins.InvoiceCaremed && ins.status !== 'cancelled').length;
 
-    // 4. Invoices sin Factura (Invoices CareMed agrupados que no tienen factura física/digital adjunta)
+    // 4. Invoices sin Factura (Invoices CareMed agrupados que no tienen factura f?sica/digital adjunta)
     const uniqueInvoices = Array.from(new Set(
       insurances
         .filter(ins => ins.InvoiceCaremed && ins.InvoiceCaremed.trim() !== '' && ins.status !== 'cancelled')
@@ -224,21 +225,8 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
       );
     }).length;
 
-    // 5. Polizas sin Pagar (Solo aquellas con saldo deudor pendiente: no canceladas, no cerradas, no pagadas, y con saldo pendiente > $0.01)
-    const unpaidCount = insurances.filter(ins => {
-      const isCancelled = ins.actionType?.toUpperCase() === 'CAN' || ins.actionType === 'Can' || ins.status === 'cancelled';
-      if (isCancelled) return false;
-      if (ins.closed) return false;
-      if (ins.status === 'paid') return false;
-
-      const totalPrice = ins.totalFinal !== undefined && ins.totalFinal !== null 
-        ? ins.totalFinal 
-        : (ins.totalPrice || 0);
-      const totalPaid = ins.totalPaid || 0;
-      const balance = totalPrice - totalPaid;
-
-      return balance > 0.01;
-    }).length;
+    // 5. Polizas por cobrar: mismo criterio que Reporte / Gesti?n (saldo deudor > $0.01)
+    const unpaidCount = insurances.filter(isInsuranceDeudor).length;
 
     return {
       activeCount: activePolicies.length,
@@ -270,13 +258,13 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
     e.preventDefault();
     const rateVal = parseFloat(rateInput);
     if (isNaN(rateVal) || rateVal <= 0) {
-      setRateError('Por favor ingrese un tipo de cambio válido mayor a cero.');
+      setRateError('Por favor ingrese un tipo de cambio v?lido mayor a cero.');
       return;
     }
 
     const cardFeeVal = parseFloat(cardFeeInput);
     if (isNaN(cardFeeVal) || cardFeeVal < 0) {
-      setRateError('Por favor ingrese un cargo de tarjeta válido.');
+      setRateError('Por favor ingrese un cargo de tarjeta v?lido.');
       return;
     }
 
@@ -314,7 +302,7 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
       setRateInput('');
       setCardFeeInput('');
     } catch (error) {
-      setRateError('Error al guardar la información.');
+      setRateError('Error al guardar la informaci?n.');
       console.error(error);
     } finally {
       setSubmittingRate(false);
@@ -538,7 +526,7 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
   const quickActions = [
     { 
       name: 'Solicitar Seguro', 
-      description: 'Emisión de pólizas y cotizaciones', 
+      description: 'Emisi?n de p?lizas y cotizaciones', 
       icon: FilePlus, 
       path: '/request', 
       color: 'bg-[#1e40af]', 
@@ -546,7 +534,7 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
     },
     { 
       name: 'Alta de Clientes', 
-      description: 'Gestión de base de datos de clientes', 
+      description: 'Gesti?n de base de datos de clientes', 
       icon: Users, 
       path: '/clients', 
       color: 'bg-[#06b6d4]', 
@@ -554,7 +542,7 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
     },
     { 
       name: 'Pagos y Cobros', 
-      description: 'Conciliación bancaria y facturación', 
+      description: 'Conciliaci?n bancaria y facturaci?n', 
       icon: DollarSign, 
       path: '/admin?tab=reconciliation', 
       color: 'bg-[#0f172a]', 
@@ -564,9 +552,9 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
 
   const modules = [
     { name: 'Dashboard', icon: LayoutDashboard, path: '/dashboard', description: 'Resumen de ventas y KPIs' },
-    { name: 'Proveedores', icon: Settings, path: '/providers', description: 'Gestión de partners' },
-    { name: 'Catálogos', icon: Database, path: '/catalogs', description: 'Países y tipos de cambio' },
-    { name: 'Reportes', icon: TrendingUp, path: '/reports', description: 'Análisis detallado' },
+    { name: 'Proveedores', icon: Settings, path: '/providers', description: 'Gesti?n de partners' },
+    { name: 'Cat?logos', icon: Database, path: '/catalogs', description: 'Pa?ses y tipos de cambio' },
+    { name: 'Reportes', icon: TrendingUp, path: '/reports', description: 'An?lisis detallado' },
   ];
 
   return (
@@ -590,10 +578,10 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
         <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-8">
           <div className="space-y-4">
             <h1 className="text-4xl md:text-5xl font-black tracking-tight leading-tight">
-              ¡Buen día, <span className="text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-blue-400">{userName}</span>!
+              ?Buen d?a, <span className="text-transparent bg-clip-text bg-gradient-to-r from-cyan-400 to-blue-400">{userName}</span>!
             </h1>
             <p className="text-blue-100/70 text-lg md:text-xl font-medium max-w-xl">
-              Bienvenido a tu panel de control de Mi Seguro Internacional. Todo lo que necesitas está a un click de distancia.
+              Bienvenido a tu panel de control de Mi Seguro Internacional. Todo lo que necesitas est? a un click de distancia.
             </p>
             <div className="flex flex-wrap items-center gap-3">
               <div className="flex items-center gap-3 text-sm font-bold bg-white/5 backdrop-blur-md border border-white/10 w-fit px-5 py-2.5 rounded-2xl">
@@ -659,10 +647,10 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
             </div>
             <div>
               <p className="text-sm font-semibold text-slate-800">
-                Optimización de Carga Activa
+                Optimizaci?n de Carga Activa
               </p>
               <p className="text-xs text-slate-500">
-                Para reducir el consumo de datos, solo se han cargado las pólizas y transacciones del mes actual.
+                Para reducir el consumo de datos, solo se han cargado las p?lizas y transacciones del mes actual.
               </p>
             </div>
           </div>
@@ -670,7 +658,7 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
             onClick={() => setLimitToCurrentMonth(false)}
             className="text-xs bg-indigo-600 hover:bg-indigo-700 text-white font-bold px-4 py-2 rounded-xl shadow-sm hover:shadow transition-all"
           >
-            Cargar Todo el Histórico
+            Cargar Todo el Hist?rico
           </button>
         </div>
       )}
@@ -678,14 +666,14 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
       {/* Summary KPI Dashboard */}
       {profile?.role !== 'client' ? (
         <section className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-6 animate-in fade-in duration-500">
-          {/* Pólizas Activas */}
+          {/* P?lizas Activas */}
           <div 
             onClick={() => navigate('/policies')}
             className="bg-white rounded-[2rem] p-6 border border-gray-100 shadow-sm hover:shadow-lg hover:-translate-y-1 transition-all flex items-center justify-between cursor-pointer group"
           >
             <div className="space-y-2">
               <h3 className="text-[10px] font-black uppercase text-gray-400 tracking-wider">
-                Pólizas Activas
+                P?lizas Activas
               </h3>
               {loadingKPIs ? (
                 <div className="h-8 w-16 bg-gray-100 animate-pulse rounded" />
@@ -703,7 +691,7 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
             </div>
           </div>
 
-          {/* Pólizas sin Exportar */}
+          {/* P?lizas sin Exportar */}
           <div 
             onClick={() => navigate('/policies?filter=unexported')}
             className="bg-white rounded-[2rem] p-6 border border-gray-100 shadow-sm hover:shadow-lg hover:-translate-y-1 transition-all flex items-center justify-between cursor-pointer group"
@@ -720,7 +708,7 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
                 </p>
               )}
               <p className="text-[10px] font-bold text-amber-600 bg-amber-50 px-2.5 py-1 rounded-lg w-fit">
-                Ir a Gestión
+                Ir a Gesti?n
               </p>
             </div>
             <div className="p-4 bg-amber-50 text-amber-600 rounded-2xl group-hover:scale-110 transition-transform duration-300">
@@ -728,7 +716,7 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
             </div>
           </div>
 
-          {/* Pólizas sin Invoice */}
+          {/* P?lizas sin Invoice */}
           <div 
             onClick={() => navigate('/policies?tab=caremed')}
             className="bg-white rounded-[2rem] p-6 border border-gray-100 shadow-sm hover:shadow-lg hover:-translate-y-1 transition-all flex items-center justify-between cursor-pointer group"
@@ -745,7 +733,7 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
                 </p>
               )}
               <p className="text-[10px] font-bold text-indigo-600 bg-indigo-50 px-2.5 py-1 rounded-lg w-fit">
-                Ir a Exportación
+                Ir a Exportaci?n
               </p>
             </div>
             <div className="p-4 bg-indigo-50 text-indigo-600 rounded-2xl group-hover:scale-110 transition-transform duration-300">
@@ -778,7 +766,7 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
             </div>
           </div>
 
-          {/* Pólizas sin Pagar */}
+          {/* P?lizas sin Pagar */}
           <div 
             onClick={() => navigate('/policies?filter=unpaid')}
             className="bg-white rounded-[2rem] p-6 border border-gray-100 shadow-sm hover:shadow-lg hover:-translate-y-1 transition-all flex items-center justify-between cursor-pointer group"
@@ -795,7 +783,7 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
                 </p>
               )}
               <p className="text-[10px] font-bold text-rose-600 bg-rose-50 px-2.5 py-1 rounded-lg w-fit">
-                Ir a Gestión
+                Ir a Gesti?n
               </p>
             </div>
             <div className="p-4 bg-rose-50 text-rose-600 rounded-2xl group-hover:scale-110 transition-transform duration-300">
@@ -820,7 +808,7 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
                 </p>
               )}
               <p className="text-[10px] font-bold text-red-600 bg-red-50 px-2.5 py-1 rounded-lg w-fit">
-                En trámite
+                En tr?mite
               </p>
             </div>
             <div className="p-4 bg-red-50 text-red-600 rounded-2xl group-hover:scale-110 transition-transform duration-300">
@@ -830,14 +818,14 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
         </section>
       ) : (
         <section className="grid grid-cols-1 md:grid-cols-2 gap-6 animate-in fade-in duration-500">
-          {/* Pólizas Activas */}
+          {/* P?lizas Activas */}
           <div 
             onClick={() => navigate('/policies')}
             className="bg-white rounded-[2rem] p-6 border border-gray-100 shadow-sm hover:shadow-lg hover:-translate-y-1 transition-all flex items-center justify-between cursor-pointer group"
           >
             <div className="space-y-2">
               <h3 className="text-[10px] font-black uppercase text-gray-400 tracking-wider">
-                Pólizas Activas / Total Active Policies
+                P?lizas Activas / Total Active Policies
               </h3>
               {loadingKPIs ? (
                 <div className="h-8 w-16 bg-gray-100 animate-pulse rounded" />
@@ -862,7 +850,7 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
                 Soporte / Assistance
               </h3>
               <p className="text-sm font-black text-[#1A2138] leading-tight">
-                ¿Necesitas ayuda con tus seguros?
+                ?Necesitas ayuda con tus seguros?
               </p>
               <p className="text-[10px] font-bold text-[#1e40af] bg-blue-50 px-2.5 py-1 rounded-lg w-fit">
                 Contacto Disponible
@@ -1067,7 +1055,7 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
                             : 'text-gray-500 hover:text-gray-800'
                         }`}
                       >
-                        {mode === 'month' ? 'Mes' : mode === 'week' ? 'Semana' : 'Día'}
+                        {mode === 'month' ? 'Mes' : mode === 'week' ? 'Semana' : 'D?a'}
                       </button>
                     ))}
                   </div>
@@ -1078,7 +1066,7 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
                   <div className="space-y-2">
                     {/* Weekday headers */}
                     <div className="grid grid-cols-7 gap-1 text-center bg-gray-50/50 p-1 rounded-xl border border-gray-100">
-                      {['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom'].map(d => (
+                      {['Lun', 'Mar', 'Mi?', 'Jue', 'Vie', 'S?b', 'Dom'].map(d => (
                         <span key={d} className="text-[10px] font-black uppercase text-gray-400 tracking-wider py-1.5">{d}</span>
                       ))}
                     </div>
@@ -1153,7 +1141,7 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
                               ))}
                               {dayTasks.length > 3 && (
                                 <div className="text-[8px] font-black text-gray-400 text-center uppercase tracking-widest">
-                                  + {dayTasks.length - 3} más
+                                  + {dayTasks.length - 3} m?s
                                 </div>
                               )}
                             </div>
@@ -1192,7 +1180,7 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
                               <button 
                                 onClick={() => handleCreateTask(day)}
                                 className="p-1 hover:bg-gray-100 text-blue-600 rounded-lg transition-colors cursor-pointer"
-                                title="Agregar para este día"
+                                title="Agregar para este d?a"
                               >
                                 <Plus className="w-4 h-4" />
                               </button>
@@ -1237,12 +1225,12 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
                     <div className="space-y-4">
                       <div className="flex items-center gap-1.5 text-blue-600 font-black text-xs uppercase tracking-wider ml-1">
                         <Clock className="w-4 h-4" />
-                        Aún por Hacer ({getTasksForDate(calendarDate).filter(t => t.status !== 'completed').length})
+                        A?n por Hacer ({getTasksForDate(calendarDate).filter(t => t.status !== 'completed').length})
                       </div>
                       <div className="space-y-3">
                         {getTasksForDate(calendarDate).filter(t => t.status !== 'completed').length === 0 ? (
                           <div className="bg-white rounded-2xl border border-dashed border-gray-100 text-center py-10 font-bold text-xs text-gray-400">
-                            No hay tareas pendientes para este día.
+                            No hay tareas pendientes para este d?a.
                           </div>
                         ) : (
                           getTasksForDate(calendarDate).filter(t => t.status !== 'completed').map(task => (
@@ -1258,7 +1246,7 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
                               </button>
                               <div className="flex-1 min-w-0 cursor-pointer" onClick={() => handleEditTask(task)}>
                                 <h4 className="text-sm font-black text-gray-900 truncate uppercase tracking-tight">{task.title}</h4>
-                                <p className="text-xs font-bold text-gray-500 mt-1 truncate">{task.description || 'Sin descripción'}</p>
+                                <p className="text-xs font-bold text-gray-500 mt-1 truncate">{task.description || 'Sin descripci?n'}</p>
                                 <div className="flex flex-wrap gap-x-3 gap-y-1 mt-2 text-[9px] font-black uppercase text-gray-400">
                                   <span>De: {getUserName(task.createdBy)}</span>
                                   <span>Para: {getUserName(task.assignedTo)}</span>
@@ -1280,7 +1268,7 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
                       <div className="space-y-3">
                         {getTasksForDate(calendarDate).filter(t => t.status === 'completed').length === 0 ? (
                           <div className="bg-white rounded-2xl border border-dashed border-gray-100 text-center py-10 font-bold text-xs text-gray-400">
-                            Ninguna tarea ha sido completada este día aún.
+                            Ninguna tarea ha sido completada este d?a a?n.
                           </div>
                         ) : (
                           getTasksForDate(calendarDate).filter(t => t.status === 'completed').map(task => (
@@ -1514,8 +1502,8 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
         onClose={() => setIsConfirmModalOpen(false)}
         onConfirm={confirmDeleteTask}
         title="Eliminar Tarea"
-        message="¿Estás seguro de que deseas eliminar esta tarea de la agenda? Esta acción no se puede deshacer."
-        confirmText="Sí, eliminar"
+        message="?Est?s seguro de que deseas eliminar esta tarea de la agenda? Esta acci?n no se puede deshacer."
+        confirmText="S?, eliminar"
         cancelText="No, mantener"
       />
 
@@ -1534,7 +1522,7 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
             <div className="p-6 pb-4 border-b border-gray-50 flex items-center justify-between">
               <div>
                 <span className="text-[10px] font-black text-blue-600 uppercase tracking-widest block mb-0.5">
-                  Catálogo Tipo de Cambio
+                  Cat?logo Tipo de Cambio
                 </span>
                 <h3 className="text-lg font-black text-gray-900">
                   {todayRate ? 'Actualizar Tipo de Cambio' : 'Registrar Tipo de Cambio'}
@@ -1609,7 +1597,7 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
                 </div>
               </div>
               <p className="text-[10px] text-gray-400 mt-1">
-                Ingrese la tasa USD/MXN y el porcentaje de recargo por tarjeta. Estos valores se utilizarán en las cotizaciones y transacciones del día.
+                Ingrese la tasa USD/MXN y el porcentaje de recargo por tarjeta. Estos valores se utilizar?n en las cotizaciones y transacciones del d?a.
               </p>
 
               {rateError && (

@@ -10,6 +10,7 @@ import autoTable from 'jspdf-autotable';
 import TransactionModal from './TransactionModal';
 import InsuranceDetailModal from './InsuranceDetailModal';
 import EmailModal from './EmailModal';
+import WhatsAppLettersModal from './WhatsAppLettersModal';
 import BulkEmailConfigModal from './BulkEmailConfigModal';
 import BulkZipDownloadModal from './BulkZipDownloadModal';
 import { generatePDF, generateMergedLettersPDF } from '../lib/pdfGenerator';
@@ -21,11 +22,10 @@ import Papa from 'papaparse';
 import { useCompany } from '../App';
 import { triggerWhatsAppNotification } from '../services/whatsapp';
 import { getPolicyNumber, getAvailableLettersForInsurance, getNormalizedYYYYMMDD, formatDisplayDate, findPolicyPrioritized, findDuplicatePolicyGroups, getPolicyEffectiveCost } from '../lib/policyUtils';
+import { getInsurancePaymentBalance, getInsurancePaymentDisplayStatus, getInsurancePaymentStatusLabel, getInsurancePaymentStatusBadgeClass, isInsuranceDeudor } from '../utils/paymentUtils';
 import BatchDetailModal from './BatchDetailModal';
 import DuplicatesModal from './DuplicatesModal';
 import { logInsuranceActivity } from '../utils/activityLogger';
-import { getInsuranceDisplayStatus, getInsuranceFinalPrice } from '../utils/paymentUtils';
-import WhatsAppPolicyLettersModal, { getPolicyWhatsAppContacts } from './WhatsAppPolicyLettersModal';
 
 const LANGUAGE_ORDER = ['es', 'en', 'es_spain', 'embajada_spain', 'policy', 'covid', 'fr', 'it', 'de'];
 
@@ -121,7 +121,6 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
   const [modalInitialAction, setModalInitialAction] = useState<'cancel' | 'correct' | 'extension' | null>(null);
   const [selectedInsuranceForEmail, setSelectedInsuranceForEmail] = useState<InsuranceRequest | null>(null);
   const [selectedInsuranceForWhatsApp, setSelectedInsuranceForWhatsApp] = useState<InsuranceRequest | null>(null);
-  const [usersList, setUsersList] = useState<any[]>([]);
   const [insuranceToDelete, setInsuranceToDelete] = useState<InsuranceRequest | null>(null);
   const [confirmingAction, setConfirmingAction] = useState<{id: string, type: 'payment' | 'commission'} | null>(null);
   const [showDuplicatesModal, setShowDuplicatesModal] = useState(false);
@@ -176,7 +175,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
   const [invoiceListSortField, setInvoiceListSortField] = useState<'exportDate' | 'invoiceDate' | 'invoiceNumber' | 'policyCount' | 'totalCalculatedCost' | 'difference'>('exportDate');
   const [invoiceListSortOrder, setInvoiceListSortOrder] = useState<'asc' | 'desc'>('desc');
 
-  // Detailed sub-tab (Detalle de Pólizas por Invoice) filters & sort states
+  // Detailed sub-tab (Detalle de P?lizas por Invoice) filters & sort states
   const [invoiceDetailViewMode, setInvoiceDetailViewMode] = useState<'concentrated' | 'detailed'>('concentrated');
   const [expandedGroupKeys, setExpandedGroupKeys] = useState<string[]>([]);
   const [invoiceDetailSearchTerm, setInvoiceDetailSearchTerm] = useState('');
@@ -703,7 +702,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
 
       setInvoiceMessage({
         type: 'success',
-        text: `Se ha asignado el invoice "${invoiceInput.trim()}" a ${caremedSelectedIds.length} pólizas con éxito.`
+        text: `Se ha asignado el invoice "${invoiceInput.trim()}" a ${caremedSelectedIds.length} p?lizas con ?xito.`
       });
       setCaremedSelectedIds([]);
       setInvoiceInput('');
@@ -716,7 +715,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
       console.error("Error assigning Invoice Caremed:", error);
       setInvoiceMessage({
         type: 'error',
-        text: 'No se pudo asignar el invoice. Por favor intente más tarde.'
+        text: 'No se pudo asignar el invoice. Por favor intente m?s tarde.'
       });
     } finally {
       setInvoiceSaving(false);
@@ -730,7 +729,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
       });
     } catch (error) {
       console.error("Error removing Invoice Caremed:", error);
-      alert("Error al remover el invoice de la póliza.");
+      alert("Error al remover el invoice de la p?liza.");
     }
   };
 
@@ -767,14 +766,14 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
 
           const resText = await response.text();
           if (!resText || resText.trim().startsWith("<") || resText.includes("<!DOCTYPE") || resText.includes("<html")) {
-            throw new Error("El servicio está inicializando o bajo alta demanda. Reintentando...");
+            throw new Error("El servicio est? inicializando o bajo alta demanda. Reintentando...");
           }
 
           let parsedData: any = {};
           try {
             parsedData = JSON.parse(resText);
           } catch {
-            throw new Error(`El servidor devolvió una respuesta no válida (${response.status}). Intenta nuevamente.`);
+            throw new Error(`El servidor devolvi? una respuesta no v?lida (${response.status}). Intenta nuevamente.`);
           }
 
           if (!response.ok || parsedData.error) {
@@ -800,7 +799,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
 
       await addDoc(collection(db, 'caremedInvoices'), {
         exportDate,
-        invoiceNumber: customInvoiceNumber || data.invoiceNumber || 'SIN_NÚMERO',
+        invoiceNumber: customInvoiceNumber || data.invoiceNumber || 'SIN_N?MERO',
         amount: Number(data.amount) || 0,
         fileName: file.name,
         fileSize: file.size,
@@ -823,13 +822,13 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
   const handleAddManualInvoice = async (exportDate: string, customInvoiceNumber?: string) => {
     const finalInvoiceNumber = (customInvoiceNumber || manualInvoice.number).trim();
     if (!finalInvoiceNumber || !manualInvoice.amount.trim()) {
-      alert("Por favor ingresa un número de factura y un importe.");
+      alert("Por favor ingresa un n?mero de factura y un importe.");
       return;
     }
 
     const amt = parseFloat(manualInvoice.amount);
     if (isNaN(amt)) {
-      alert("El importe debe ser un número válido.");
+      alert("El importe debe ser un n?mero v?lido.");
       return;
     }
 
@@ -856,7 +855,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
 
   const handleDeleteCaremedInvoice = async (invoiceId: string) => {
     if (!isSuperAdminOrDirector) {
-      alert("Acceso denegado: Solo el Administrador, Director o Super Administrador tiene autorización para eliminar facturas digitales adjuntas.");
+      alert("Acceso denegado: Solo el Administrador, Director o Super Administrador tiene autorizaci?n para eliminar facturas digitales adjuntas.");
       return;
     }
 
@@ -864,7 +863,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
     const invoiceNum = invToDelete?.invoiceNumber || '';
     const invoiceAmt = invToDelete?.amount ? `$${Number(invToDelete.amount).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD` : '';
 
-    if (!confirm(`¿Estás seguro de eliminar esta factura digital adjunta (${invoiceNum}${invoiceAmt ? ` - ${invoiceAmt}` : ''})?\n\nEsta acción eliminará el archivo/registro del comprobante y el cotejo automático de esta factura.`)) return;
+    if (!confirm(`?Est?s seguro de eliminar esta factura digital adjunta (${invoiceNum}${invoiceAmt ? ` - ${invoiceAmt}` : ''})?\n\nEsta acci?n eliminar? el archivo/registro del comprobante y el cotejo autom?tico de esta factura.`)) return;
 
     try {
       await deleteDoc(doc(db, 'caremedInvoices', invoiceId));
@@ -873,15 +872,15 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
         await logInsuranceActivity({
           insuranceId: invoiceId,
           type: 'delete_invoice',
-          description: `Eliminó la factura digital adjunta para el Invoice ${invoiceNum} (${invoiceAmt}).`,
+          description: `Elimin? la factura digital adjunta para el Invoice ${invoiceNum} (${invoiceAmt}).`,
           date: new Date(),
           createdBy: auth.currentUser?.email || 'Admin'
         });
       } catch (logErr) {
-        console.warn("No se pudo registrar en bitácora:", logErr);
+        console.warn("No se pudo registrar en bit?cora:", logErr);
       }
 
-      alert("Factura digital eliminada con éxito.");
+      alert("Factura digital eliminada con ?xito.");
     } catch (err: any) {
       console.error("Error deleting invoice:", err);
       alert("Fallo al borrar la factura digital: " + err.message);
@@ -890,13 +889,13 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
 
   const handleDeleteEntireInvoice = async (invoiceNumber: string) => {
     if (!isSuperAdminOrDirector) {
-      alert("Acceso denegado: Solo el Administrador, Director o Super Administrador puede realizar esta acción.");
+      alert("Acceso denegado: Solo el Administrador, Director o Super Administrador puede realizar esta acci?n.");
       return;
     }
 
     const targetPolicies = insurances.filter(ins => (ins.InvoiceCaremed || '').trim().toLowerCase() === invoiceNumber.trim().toLowerCase());
 
-    if (!confirm(`¿Estás seguro de eliminar el invoice "${invoiceNumber}"?\n\nEsta acción:\n1. Desvinculará sus ${targetPolicies.length} pólizas asociadas.\n2. Eliminará cualquier factura digital adjunta de este invoice.\n3. Restablecerá el estado de las pólizas a pendiente de facturar.`)) return;
+    if (!confirm(`?Est?s seguro de eliminar el invoice "${invoiceNumber}"?\n\nEsta acci?n:\n1. Desvincular? sus ${targetPolicies.length} p?lizas asociadas.\n2. Eliminar? cualquier factura digital adjunta de este invoice.\n3. Restablecer? el estado de las p?lizas a pendiente de facturar.`)) return;
 
     try {
       setInvoiceSaving(true);
@@ -927,19 +926,19 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
         await logInsuranceActivity({
           insuranceId: invoiceNumber,
           type: 'delete_invoice_group',
-          description: `Eliminó el invoice completo ${invoiceNumber} (desvinculadas ${targetPolicies.length} pólizas y eliminadas ${attachedInvs.length} facturas adjuntas).`,
+          description: `Elimin? el invoice completo ${invoiceNumber} (desvinculadas ${targetPolicies.length} p?lizas y eliminadas ${attachedInvs.length} facturas adjuntas).`,
           date: new Date(),
           createdBy: auth.currentUser?.email || 'Admin'
         });
       } catch (logErr) {
-        console.warn("No se pudo registrar en bitácora:", logErr);
+        console.warn("No se pudo registrar en bit?cora:", logErr);
       }
 
       if (selectedInvoiceNumber === invoiceNumber) {
         setSelectedInvoiceNumber(null);
       }
 
-      alert(`Invoice "${invoiceNumber}" y sus registros asociados han sido eliminados con éxito.`);
+      alert(`Invoice "${invoiceNumber}" y sus registros asociados han sido eliminados con ?xito.`);
     } catch (err: any) {
       console.error("Error deleting entire invoice:", err);
       alert("Error al eliminar el invoice: " + err.message);
@@ -959,7 +958,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
       : caremedInvoices.find(d => (d.invoiceNumber || '').toLowerCase().trim() === item.invoiceNumber.toLowerCase().trim());
 
     if (!dbInv) {
-      alert("No se encontró la factura adjunta en la base de datos.");
+      alert("No se encontr? la factura adjunta en la base de datos.");
       return;
     }
 
@@ -980,7 +979,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
       return;
     }
     if (!justifyingInvoice.justificationText.trim()) {
-      alert("Por favor escribe la justificación de la diferencia antes de confirmar.");
+      alert("Por favor escribe la justificaci?n de la diferencia antes de confirmar.");
       return;
     }
 
@@ -998,19 +997,19 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
         await logInsuranceActivity({
           insuranceId: justifyingInvoice.dbInvoiceId,
           type: 'approve_invoice_difference',
-          description: `Director/Super Admin aprobó la diferencia en el Invoice ${justifyingInvoice.invoiceNumber} (Dif: ${justifyingInvoice.difference > 0 ? '+' : ''}$${justifyingInvoice.difference.toFixed(2)} USD). Justificación: "${justifyingInvoice.justificationText.trim()}"`,
+          description: `Director/Super Admin aprob? la diferencia en el Invoice ${justifyingInvoice.invoiceNumber} (Dif: ${justifyingInvoice.difference > 0 ? '+' : ''}$${justifyingInvoice.difference.toFixed(2)} USD). Justificaci?n: "${justifyingInvoice.justificationText.trim()}"`,
           date: new Date(),
           createdBy: auth.currentUser?.email || 'Director'
         });
       } catch (logErr) {
-        console.warn("No se pudo registrar en bitácora:", logErr);
+        console.warn("No se pudo registrar en bit?cora:", logErr);
       }
 
-      alert(`Diferencia del Invoice ${justifyingInvoice.invoiceNumber} aprobada y justificada exitosamente. El invoice ya no aparecerá en el listado de pendientes.`);
+      alert(`Diferencia del Invoice ${justifyingInvoice.invoiceNumber} aprobada y justificada exitosamente. El invoice ya no aparecer? en el listado de pendientes.`);
       setJustifyingInvoice(null);
     } catch (err: any) {
       console.error("Error saving justification:", err);
-      alert("Error al guardar la justificación: " + err.message);
+      alert("Error al guardar la justificaci?n: " + err.message);
     } finally {
       setIsSavingJustification(false);
     }
@@ -1018,10 +1017,10 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
 
   const handleRevokeJustification = async (invoiceId: string, invoiceNumber: string) => {
     if (!isSuperAdminOrDirector) {
-      alert("Acceso denegado: Solo el Director o Super Administrador puede modificar esta aprobación.");
+      alert("Acceso denegado: Solo el Director o Super Administrador puede modificar esta aprobaci?n.");
       return;
     }
-    if (!confirm(`¿Deseas revocar la aprobación de diferencia del Invoice ${invoiceNumber}? Volverá a mostrarse en el listado de pendientes.`)) return;
+    if (!confirm(`?Deseas revocar la aprobaci?n de diferencia del Invoice ${invoiceNumber}? Volver? a mostrarse en el listado de pendientes.`)) return;
 
     try {
       await updateDoc(doc(db, 'caremedInvoices', invoiceId), {
@@ -1031,10 +1030,10 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
         approvedBy: '',
         approvedAt: ''
       });
-      alert(`Aprobación revocada para el Invoice ${invoiceNumber}.`);
+      alert(`Aprobaci?n revocada para el Invoice ${invoiceNumber}.`);
     } catch (err: any) {
       console.error("Error revoking justification:", err);
-      alert("Error al revocar la aprobación: " + err.message);
+      alert("Error al revocar la aprobaci?n: " + err.message);
     }
   };
 
@@ -1050,13 +1049,13 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
 
   const handleSaveEditInvoice = async (invoiceId: string) => {
     if (!editInvoiceValues.number.trim() || !editInvoiceValues.amount.trim()) {
-      alert("Se requiere número e importe");
+      alert("Se requiere n?mero e importe");
       return;
     }
 
     const amt = parseFloat(editInvoiceValues.amount);
     if (isNaN(amt)) {
-      alert("El importe debe ser un número");
+      alert("El importe debe ser un n?mero");
       return;
     }
 
@@ -1121,32 +1120,29 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
         });
       }
 
-      alert("Fecha de exportación actualizada correctamente.");
+      alert("Fecha de exportaci?n actualizada correctamente.");
       setEditingExportDate(null);
     } catch (err: any) {
       console.error("Error updating export date:", err);
-      alert("Hubo un error al actualizar la fecha de exportación: " + err.message);
+      alert("Hubo un error al actualizar la fecha de exportaci?n: " + err.message);
     } finally {
       setInvoiceSaving(false);
     }
   };
 
-  // Duplicates calculation based on the 8 fields: Tipo de acción, Nombre Completo, Fecha de nacimiento, Fecha de inicio, Origen, Destino, Plan, Póliza
+  // Duplicates calculation based on the 8 fields: Tipo de acci?n, Nombre Completo, Fecha de nacimiento, Fecha de inicio, Origen, Destino, Plan, P?liza
   const duplicateGroups = useMemo(() => {
-    if (!isSuperAdminOrDirector) return [];
     return findDuplicatePolicyGroups(insurances, policies);
-  }, [insurances, policies, isSuperAdminOrDirector]);
+  }, [insurances, policies]);
 
   const duplicateCount = duplicateGroups.length;
 
-  // Unexported policies to CareMed - calculate count efficiently without array allocations
-  const unexportedCount = useMemo(() => {
-    let count = 0;
-    for (let idx = 0; idx < insurances.length; idx++) {
-      if (!insurances[idx].Caremed) count++;
-    }
-    return count;
+  // Unexported policies to CareMed
+  const unexportedInsurances = useMemo(() => {
+    return insurances.filter(ins => !ins.Caremed);
   }, [insurances]);
+
+  const unexportedCount = unexportedInsurances.length;
 
   useEffect(() => {
     if (!profile || !hasPermission('policies')) return;
@@ -1160,39 +1156,57 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
       handleFirestoreError(error, OperationType.GET, 'insurances');
     });
 
+    const fetchPolicies = async () => {
+      try {
+        const snap = await getDocs(collection(db, 'policies'));
+        setPolicies(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Policy)));
+      } catch (error) {
+        handleFirestoreError(error, OperationType.GET, 'policies');
+      }
+    };
+    fetchPolicies();
+
     const unsubLetters = onSnapshot(collection(db, 'policyLetters'), (snap) => {
       setPolicyLetters(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as PolicyLetter)));
     }, (error) => {
       handleFirestoreError(error, OperationType.GET, 'policyLetters');
     });
 
+    const fetchClients = async () => {
+      try {
+        const snap = await getDocs(collection(db, 'clients'));
+        setClients(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } )));
+      } catch (error) {
+        handleFirestoreError(error, OperationType.GET, 'clients');
+      }
+    };
+    fetchClients();
+
+    const fetchCountries = async () => {
+      try {
+        const snap = await getDocs(collection(db, 'countries'));
+        setCountriesList(snap.docs.map(doc => doc.data()));
+      } catch (error) {
+        console.error("Error fetching countries in PoliciesManager:", error);
+      }
+    };
+    fetchCountries();
+
+    const fetchActionTypes = async () => {
+      try {
+        const snap = await getDocs(query(collection(db, 'actionTypes'), orderBy('action')));
+        setActionTypes(snap.docs.map(doc => doc.data() as any));
+      } catch (error) {
+        handleFirestoreError(error, OperationType.GET, 'actionTypes');
+      }
+    };
+    fetchActionTypes();
+
     const unsubInvoices = onSnapshot(collection(db, 'caremedInvoices'), (snapshot) => {
       setCaremedInvoices(snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() })));
     }, (error) => {
       handleFirestoreError(error, OperationType.GET, 'caremedInvoices');
     });
-
-    // Fetch static auxiliary collections in parallel
-    const fetchAuxiliaryData = async () => {
-      try {
-        const [policiesSnap, clientsSnap, usersSnap, countriesSnap, actionTypesSnap] = await Promise.all([
-          getDocs(collection(db, 'policies')),
-          getDocs(collection(db, 'clients')),
-          getDocs(collection(db, 'users')),
-          getDocs(collection(db, 'countries')),
-          getDocs(query(collection(db, 'actionTypes'), orderBy('action')))
-        ]);
-
-        setPolicies(policiesSnap.docs.map(doc => ({ id: doc.id, ...doc.data() } as Policy)));
-        setClients(clientsSnap.docs.map(doc => ({ id: doc.id, ...doc.data() })));
-        setUsersList(usersSnap.docs.map(doc => ({ uid: doc.id, ...doc.data() })));
-        setCountriesList(countriesSnap.docs.map(doc => doc.data()));
-        setActionTypes(actionTypesSnap.docs.map(doc => doc.data() as any));
-      } catch (error) {
-        console.error("Error fetching auxiliary data in PoliciesManager:", error);
-      }
-    };
-    fetchAuxiliaryData();
 
     return () => {
       unsubscribe();
@@ -1212,178 +1226,121 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
     return types;
   }, [policies, planFilter]);
 
-  const clientMap = React.useMemo(() => {
-    const map = new Map<string, any>();
-    clients.forEach(c => {
-      if (c.id) map.set(c.id, c);
-    });
-    return map;
-  }, [clients]);
-
-  const policyMap = React.useMemo(() => {
-    const map = new Map<string, Policy>();
-    policies.forEach(p => {
-      if (p.id) map.set(p.id, p);
-    });
-    return map;
-  }, [policies]);
-
-  const [selectedInsuranceIds, setSelectedInsuranceIds] = useState<string[]>([]);
-
-  const selectedInsuranceSet = React.useMemo(() => {
-    return new Set(selectedInsuranceIds);
-  }, [selectedInsuranceIds]);
-
   const selectedClient = React.useMemo(() => {
-    return clientMap.get(agentFilter);
-  }, [clientMap, agentFilter]);
+    return clients.find(c => c.id === agentFilter);
+  }, [clients, agentFilter]);
 
   const filteredInsurances = React.useMemo(() => {
-    const trimmedSearch = searchTerm.toLowerCase().trim();
-    const searchTokens = trimmedSearch ? trimmedSearch.split(/\s+/) : null;
-    const hasSearch = !!searchTokens && searchTokens.length > 0;
-    const today = format(new Date(), 'yyyy-MM-dd');
-    const isAgent = profile?.role === 'agent';
-    const isClient = profile?.role === 'client';
-    const profileEmailLower = profile?.email?.toLowerCase();
-    const profileUid = profile?.uid;
-
     let result = insurances.filter(ins => {
       // Role-based visibility enforcement
-      if (isAgent) {
-        const isOwnerByUid = ins.agentId === profileUid;
-        const isOwnerByEmail = profileEmailLower && ins.linkedAgentId?.toLowerCase() === profileEmailLower;
-        const isOwnerByEmailInAgentId = profileEmailLower && ins.agentId?.toLowerCase() === profileEmailLower;
+      if (profile?.role === 'agent') {
+        const isOwnerByUid = ins.agentId === profile.uid;
+        const isOwnerByEmail = ins.linkedAgentId?.toLowerCase() === profile.email.toLowerCase();
+        const isOwnerByEmailInAgentId = ins.agentId?.toLowerCase() === profile.email.toLowerCase();
         if (!isOwnerByUid && !isOwnerByEmail && !isOwnerByEmailInAgentId) return false;
       }
-      if (isClient && ins.email?.toLowerCase() !== profileEmailLower) return false;
+      if (profile?.role === 'client' && ins.email?.toLowerCase() !== profile?.email?.toLowerCase()) return false;
 
-      // Status filter
+      const client = clients.find(c => c.id === ins.clientId);
+      const clientName = client ? (client.commercialName || client.legalName || `${client.firstName || ''} ${client.lastName || ''}`.trim()) : '';
+      const subAgent = client?.linkedAgents?.find((la: any) => la.email === ins.linkedAgentId || la.id === ins.linkedAgentId);
+      const subAgentName = subAgent ? subAgent.name : '';
+      const subAgentEmail = ins.linkedAgentId || '';
+
+      const fullName = `${ins.firstName || ''} ${ins.lastName || ''}`.trim();
+      const policy = policies.find(p => p.id === ins.policyId);
+      const policyNum = getPolicyNumber(policy, ins.age || 0);
+      
+      const reqDateNorm = getNormalizedYYYYMMDD(ins.requestDate) || getNormalizedYYYYMMDD(ins.createdAt);
+      const reqDateDisp = formatDisplayDate(ins.requestDate || ins.createdAt);
+      const startDateNorm = getNormalizedYYYYMMDD(ins.startDate);
+      const startDateDisp = formatDisplayDate(ins.startDate);
+      const endDateNorm = getNormalizedYYYYMMDD(ins.endDate);
+      const endDateDisp = formatDisplayDate(ins.endDate);
+
+      const searchTarget = `${fullName} ${ins.firstName || ''} ${ins.lastName || ''} ${ins.email || ''} ${ins.id || ''} ${ins.IDseg || ''} ${policyNum} ${clientName} ${subAgentName} ${subAgentEmail} ${ins.requestDate || ''} ${reqDateNorm} ${reqDateDisp} ${startDateNorm} ${startDateDisp} ${endDateNorm} ${endDateDisp}`.toLowerCase();
+      const searchTokens = searchTerm.toLowerCase().trim().split(/\s+/);
+      const matchesSearch = searchTokens.every(token => searchTarget.includes(token));
+      
       let matchesStatus = statusFilter === 'all';
-      const dStatus = getInsuranceDisplayStatus(ins);
       if (statusFilter === 'unpaid') {
-        const isCancelled = dStatus === 'cancelled';
-        const finalPrice = getInsuranceFinalPrice(ins);
-        const totalPaid = ins.totalPaid || 0;
-        const balance = finalPrice - totalPaid;
-        matchesStatus = !isCancelled && !ins.closed && dStatus !== 'paid' && balance > 0.01;
+        matchesStatus = isInsuranceDeudor(ins);
       } else if (statusFilter !== 'all') {
-        matchesStatus = dStatus === statusFilter;
+        matchesStatus = ins.status === statusFilter;
       }
-      if (!matchesStatus) return false;
+      
+      const plan = ins.plan || policy?.plan || ins.policyId.split('-')[0];
+      const policyName = ins.policyName || policy?.name || '';
 
-      // Simple equality filters (fail fast before string lookups)
-      if (clientTypeFilter !== 'all' && ins.clientType !== clientTypeFilter) return false;
-      if (agentFilter !== 'all' && ins.clientId !== agentFilter) return false;
-      if (subAgentFilter !== 'all' && ins.linkedAgentId !== subAgentFilter) return false;
-      if (actionTypeFilter !== 'all' && ins.actionType !== actionTypeFilter) return false;
+      const matchesPlan = planFilter === 'all' || plan === planFilter;
+      const matchesPolicyType = policyTypeFilter === 'all' || 
+        (policyName.includes(policyTypeFilter)) || 
+        (ins.policyId.includes(policyTypeFilter));
+      
+      const date = ins.createdAt?.toDate ? ins.createdAt.toDate() : new Date(ins.createdAt);
+      const matchesDate = (!dateRange.start || date >= new Date(dateRange.start)) &&
+                          (!dateRange.end || date <= new Date(dateRange.end));
+
+      // Filter by request date
+      const actualRequestDate = getNormalizedYYYYMMDD(ins.requestDate) || getNormalizedYYYYMMDD(ins.createdAt);
+      const matchesRequestDate = (!requestDateRange.start || actualRequestDate >= requestDateRange.start) &&
+                                 (!requestDateRange.end || actualRequestDate <= requestDateRange.end);
+
+      // New filters
+      const matchesValidity = (!validityRange.start || ins.startDate >= validityRange.start) &&
+                              (!validityRange.end || ins.endDate <= validityRange.end);
+      
+      const today = format(new Date(), 'yyyy-MM-dd');
+      let opStatus = 'Activo';
+      if (ins.actionType?.toUpperCase() === 'CAN' || ins.actionType === 'Can' || ins.status === 'cancelled') {
+        opStatus = 'Cancelado';
+      } else if (today > ins.endDate) {
+        opStatus = 'Terminado';
+      }
+      
+      const matchesOperationalStatus = operationalStatusFilter === 'all' || opStatus === operationalStatusFilter;
+      
+      const matchesClientType = clientTypeFilter === 'all' || ins.clientType === clientTypeFilter;
+      const matchesAgent = agentFilter === 'all' || ins.clientId === agentFilter;
+      const matchesSubAgent = subAgentFilter === 'all' || ins.linkedAgentId === subAgentFilter;
+      const matchesActionType = actionTypeFilter === 'all' || ins.actionType === actionTypeFilter;
 
       // CareMed filters
-      if (caremedExportedFilter !== 'all') {
-        const isExp = caremedExportedFilter === 'exported';
-        if (isExp ? !ins.Caremed : !!ins.Caremed) return false;
-      }
+      const matchesCaremedExported = caremedExportedFilter === 'all' || 
+        (caremedExportedFilter === 'exported' ? !!ins.Caremed : !ins.Caremed);
 
-      if (caremedInvoicedFilter !== 'all') {
-        const isInv = caremedInvoicedFilter === 'invoiced';
-        if (isInv ? !ins.InvoiceCaremed : !!ins.InvoiceCaremed) return false;
-      }
+      const matchesCaremedInvoiced = caremedInvoicedFilter === 'all' ||
+        (caremedInvoicedFilter === 'invoiced' ? !!ins.InvoiceCaremed : !ins.InvoiceCaremed);
 
-      // Operational status
-      if (operationalStatusFilter !== 'all') {
-        let opStatus = 'Activo';
-        if (ins.actionType?.toUpperCase() === 'CAN' || ins.actionType === 'Can' || ins.status === 'cancelled') {
-          opStatus = 'Cancelado';
-        } else if (ins.endDate && today > ins.endDate) {
-          opStatus = 'Terminado';
-        }
-        if (opStatus !== operationalStatusFilter) return false;
-      }
-
-      // Validity Range
-      if (validityRange.start && (!ins.startDate || ins.startDate < validityRange.start)) return false;
-      if (validityRange.end && (!ins.endDate || ins.endDate > validityRange.end)) return false;
-
-      // Creation Date Range
-      if (dateRange.start || dateRange.end) {
-        const date = ins.createdAt?.toDate ? ins.createdAt.toDate() : new Date(ins.createdAt);
-        if (dateRange.start && date < new Date(dateRange.start)) return false;
-        if (dateRange.end && date > new Date(dateRange.end)) return false;
-      }
-
-      // Request Date Range
-      if (requestDateRange.start || requestDateRange.end) {
-        const actualRequestDate = getNormalizedYYYYMMDD(ins.requestDate) || getNormalizedYYYYMMDD(ins.createdAt);
-        if (requestDateRange.start && (!actualRequestDate || actualRequestDate < requestDateRange.start)) return false;
-        if (requestDateRange.end && (!actualRequestDate || actualRequestDate > requestDateRange.end)) return false;
-      }
-
-      // Plan and Policy Type filters
-      const policy = policyMap.get(ins.policyId);
-      const plan = ins.plan || policy?.plan || (ins.policyId ? ins.policyId.split('-')[0] : '');
-      if (planFilter !== 'all' && plan !== planFilter) return false;
-
-      const policyName = ins.policyName || policy?.name || '';
-      if (policyTypeFilter !== 'all') {
-        const matchesPolicyType = policyName.includes(policyTypeFilter) || (ins.policyId && ins.policyId.includes(policyTypeFilter));
-        if (!matchesPolicyType) return false;
-      }
-
-      // Search match (ONLY evaluated if search is non-empty)
-      if (hasSearch) {
-        const client = clientMap.get(ins.clientId);
-        const clientName = client ? (client.commercialName || client.legalName || `${client.firstName || ''} ${client.lastName || ''}`.trim()) : '';
-        const subAgent = client?.linkedAgents?.find((la: any) => la.email === ins.linkedAgentId || la.id === ins.linkedAgentId);
-        const subAgentName = subAgent ? subAgent.name : '';
-        const subAgentEmail = ins.linkedAgentId || '';
-
-        const fullName = `${ins.firstName || ''} ${ins.lastName || ''}`.trim();
-        const policyNum = getPolicyNumber(policy, ins.age || 0);
-
-        const reqDateNorm = getNormalizedYYYYMMDD(ins.requestDate) || getNormalizedYYYYMMDD(ins.createdAt);
-        const reqDateDisp = formatDisplayDate(ins.requestDate || ins.createdAt);
-        const startDateNorm = getNormalizedYYYYMMDD(ins.startDate);
-        const startDateDisp = formatDisplayDate(ins.startDate);
-        const endDateNorm = getNormalizedYYYYMMDD(ins.endDate);
-        const endDateDisp = formatDisplayDate(ins.endDate);
-
-        const searchTarget = `${fullName} ${ins.firstName || ''} ${ins.lastName || ''} ${ins.email || ''} ${ins.id || ''} ${ins.IDseg || ''} ${policyNum} ${clientName} ${subAgentName} ${subAgentEmail} ${ins.requestDate || ''} ${reqDateNorm} ${reqDateDisp} ${startDateNorm} ${startDateDisp} ${endDateNorm} ${endDateDisp}`.toLowerCase();
-        const matchesSearch = searchTokens!.every(token => searchTarget.includes(token));
-        if (!matchesSearch) return false;
-      }
-
-      return true;
+      return matchesSearch && matchesStatus && matchesPlan && matchesPolicyType && matchesDate && matchesRequestDate && matchesValidity && matchesOperationalStatus && matchesClientType && matchesAgent && matchesSubAgent && matchesActionType && matchesCaremedExported && matchesCaremedInvoiced;
     });
 
     // Sorting
-    if (sortConfig.key === 'requestDate') {
-      result.sort((a, b) => {
-        const valA = getNormalizedYYYYMMDD(a.requestDate) || getNormalizedYYYYMMDD(a.createdAt);
-        const valB = getNormalizedYYYYMMDD(b.requestDate) || getNormalizedYYYYMMDD(b.createdAt);
-        if (valA < valB) return sortConfig.direction === 'asc' ? -1 : 1;
-        if (valA > valB) return sortConfig.direction === 'asc' ? 1 : -1;
-        return 0;
-      });
-    } else if (sortConfig.key === 'clientName') {
-      result.sort((a, b) => {
-        const valA = `${a.firstName || ''} ${a.lastName || ''}`.toLowerCase();
-        const valB = `${b.firstName || ''} ${b.lastName || ''}`.toLowerCase();
-        if (valA < valB) return sortConfig.direction === 'asc' ? -1 : 1;
-        if (valA > valB) return sortConfig.direction === 'asc' ? 1 : -1;
-        return 0;
-      });
-    } else {
-      result.sort((a, b) => {
+    result.sort((a, b) => {
+      let valA: any = '';
+      let valB: any = '';
+
+      if (sortConfig.key === 'requestDate') {
+        valA = getNormalizedYYYYMMDD(a.requestDate) || getNormalizedYYYYMMDD(a.createdAt);
+        valB = getNormalizedYYYYMMDD(b.requestDate) || getNormalizedYYYYMMDD(b.createdAt);
+      } else if (sortConfig.key === 'clientName') {
+        valA = `${a.firstName} ${a.lastName}`.toLowerCase();
+        valB = `${b.firstName} ${b.lastName}`.toLowerCase();
+      } else {
+        // Default to createdAt if no key matches
         const dateA = a.createdAt?.toDate ? a.createdAt.toDate().getTime() : new Date(a.createdAt).getTime();
         const dateB = b.createdAt?.toDate ? b.createdAt.toDate().getTime() : new Date(b.createdAt).getTime();
-        if (dateA < dateB) return sortConfig.direction === 'asc' ? -1 : 1;
-        if (dateA > dateB) return sortConfig.direction === 'asc' ? 1 : -1;
-        return 0;
-      });
-    }
+        valA = dateA;
+        valB = dateB;
+      }
+
+      if (valA < valB) return sortConfig.direction === 'asc' ? -1 : 1;
+      if (valA > valB) return sortConfig.direction === 'asc' ? 1 : -1;
+      return 0;
+    });
 
     return result;
-  }, [insurances, searchTerm, statusFilter, planFilter, policyTypeFilter, dateRange, requestDateRange, validityRange, operationalStatusFilter, caremedExportedFilter, caremedInvoicedFilter, policyMap, clientTypeFilter, agentFilter, subAgentFilter, actionTypeFilter, clientMap, sortConfig, profile]);
+  }, [insurances, searchTerm, statusFilter, planFilter, policyTypeFilter, dateRange, requestDateRange, validityRange, operationalStatusFilter, caremedExportedFilter, caremedInvoicedFilter, policies, clientTypeFilter, agentFilter, subAgentFilter, actionTypeFilter, clients, sortConfig]);
 
   // Reset page and selection when filters change
   useEffect(() => {
@@ -1407,7 +1364,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
     filteredInsurances.forEach(i => {
       count++;
       const isCan = i.actionType?.toUpperCase() === 'CAN';
-      const p = getInsuranceFinalPrice(i);
+      const p = i.totalFinal || i.totalPrice || 0;
       const c = getPolicyEffectiveCost(i);
       const com = i.agentCommission || 0;
       ventas += isCan ? -Math.abs(p) : (p < 0 ? p : Math.abs(p));
@@ -1423,7 +1380,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
 
     const dataToExport = filteredInsurances.map(item => {
       const ins = item as any;
-      const client = clientMap.get(ins.clientId);
+      const client = clients.find(c => c.id === ins.clientId);
       const clientName = ins.clientType === 'Individual' ? 'Individual' : (client?.commercialName || client?.legalName || 'Faltante');
       const creationDate = ins.createdAt ? (ins.createdAt.toDate ? format(ins.createdAt.toDate(), 'yyyy-MM-dd HH:mm:ss') : format(new Date(ins.createdAt), 'yyyy-MM-dd HH:mm:ss')) : '';
 
@@ -1437,13 +1394,13 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
         'Fecha de Nacimiento': ins.birthDate || '',
         'Edad': ins.age || '',
         'Solicitud': ins.requestDate || '',
-        'Acción': ins.actionType || 'NEW',
+        'Acci?n': ins.actionType || 'NEW',
         'Origen': ins.originCountry || '',
         'Destino': ins.destinationCountry || '',
         'Ciudad': ins.city || '',
         'Inicio': ins.startDate || '',
         'Fin': ins.endDate || '',
-        'Días': ins.days || '',
+        'D?as': ins.days || '',
         'Seguro': ins.policyName || '',
         'Plan': ins.plan || '',
         'Tipo de Cliente': ins.clientType || '',
@@ -1454,11 +1411,11 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
         'Descuento USD': ins.discount || 0,
         'Total Cobrado USD': ins.totalFinal || 0,
         'Costo USD': ins.totalCost || 0,
-        'Comisión Agencia USD': ins.agentCommission || 0,
+        'Comisi?n Agencia USD': ins.agentCommission || 0,
         'Total Pagado USD': ins.totalPaid || 0,
-        'Estado de Emisión': ins.status === 'pending' ? 'Pendiente' : ins.status === 'reviewed' ? 'Revisado' : ins.status === 'issued' ? 'Emitido' : ins.status === 'cancelled' ? 'Cancelado' : ins.status,
-        'Fecha de Creación': creationDate,
-        'Deportes Extremos': ins.isExtremeSports ? 'Sí' : 'No',
+        'Estado de Emisi?n': ins.status === 'pending' ? 'Pendiente' : ins.status === 'reviewed' ? 'Revisado' : ins.status === 'issued' ? 'Emitido' : ins.status === 'cancelled' ? 'Cancelado' : ins.status,
+        'Fecha de Creaci?n': creationDate,
+        'Deportes Extremos': ins.isExtremeSports ? 'S?' : 'No',
         'Notas': ins.notes || ''
       };
     });
@@ -1476,14 +1433,14 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
 
   const handleDownloadCareMedCSV = async () => {
     if (selectedInsuranceIds.length === 0) {
-      alert('Por favor selecciona al menos una póliza para exportar a CareMed.');
+      alert('Por favor selecciona al menos una p?liza para exportar a CareMed.');
       return;
     }
 
     const selectedInsurancesList = insurances.filter(ins => ins.id && selectedInsuranceIds.includes(ins.id));
     const alreadyExported = selectedInsurancesList.filter(ins => !!ins.Caremed);
     if (alreadyExported.length > 0) {
-      alert(`No se puede exportar: se han seleccionado ${alreadyExported.length} póliza(s) que ya fueron exportadas a CareMed previamente.`);
+      alert(`No se puede exportar: se han seleccionado ${alreadyExported.length} p?liza(s) que ya fueron exportadas a CareMed previamente.`);
       return;
     }
 
@@ -1559,18 +1516,20 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
         URL.revokeObjectURL(url);
       });
 
-      alert(`Se exportaron con éxito ${selectedInsurancesList.length} pólizas. Se generó un archivo por cada código de póliza.`);
+      alert(`Se exportaron con ?xito ${selectedInsurancesList.length} p?lizas. Se gener? un archivo por cada c?digo de p?liza.`);
     } catch (err: any) {
       console.error(err);
-      alert('Ocurrió un error al exportar a CareMed: ' + err.message);
+      alert('Ocurri? un error al exportar a CareMed: ' + err.message);
     }
   };
+
+  const [selectedInsuranceIds, setSelectedInsuranceIds] = useState<string[]>([]);
 
   // Selected insurances analysis for CareMed export
   const selectedInsurancesList = useMemo(() => {
     if (selectedInsuranceIds.length === 0) return [];
-    return insurances.filter(ins => ins.id && selectedInsuranceSet.has(ins.id));
-  }, [insurances, selectedInsuranceIds, selectedInsuranceSet]);
+    return insurances.filter(ins => ins.id && selectedInsuranceIds.includes(ins.id));
+  }, [insurances, selectedInsuranceIds]);
 
   const selectedExportedCount = useMemo(() => {
     return selectedInsurancesList.filter(ins => !!ins.Caremed).length;
@@ -1686,7 +1645,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
           await logInsuranceActivity({
             insuranceId: ins.id,
             type: 'manual',
-            description: `Modificación masiva por Super Administrador`,
+            description: `Modificaci?n masiva por Super Administrador`,
             updatedFields: Object.keys(updatePayload),
             createdAt: serverTimestamp()
           });
@@ -1694,7 +1653,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
       });
 
       await Promise.all(updatePromises);
-      alert(`Se modificaron con éxito ${selectedInsurancesList.length} pólizas de manera masiva.`);
+      alert(`Se modificaron con ?xito ${selectedInsurancesList.length} p?lizas de manera masiva.`);
       setShowBulkEditModal(false);
       setSelectedInsuranceIds([]);
       setBulkEditFields({
@@ -1722,7 +1681,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
       });
     } catch (err: any) {
       console.error("Error bulk editing insurances:", err);
-      alert("Hubo un error al realizar la modificación masiva: " + err.message);
+      alert("Hubo un error al realizar la modificaci?n masiva: " + err.message);
     } finally {
       setBulkEditing(false);
     }
@@ -1852,13 +1811,13 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
   }) => {
     const selectedInsurancesList = insurances.filter(ins => ins.id && selectedInsuranceIds.includes(ins.id));
     if (selectedInsurancesList.length === 0) {
-      alert('Por favor selecciona al menos una póliza para enviar por correo.');
+      alert('Por favor selecciona al menos una p?liza para enviar por correo.');
       return;
     }
 
     setIsBulkSending(true);
     setShowBulkEmailModal(false);
-    setBulkSendProgress({ current: 0, total: selectedInsurancesList.length, statusText: 'Iniciando generación de certificados...' });
+    setBulkSendProgress({ current: 0, total: selectedInsurancesList.length, statusText: 'Iniciando generaci?n de certificados...' });
 
     const successes: string[] = [];
     const failures: { name: string; error: string }[] = [];
@@ -1875,7 +1834,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
       });
 
       if (!emailTo) {
-        failures.push({ name: fullName, error: 'La póliza no tiene un correo electrónico registrado.' });
+        failures.push({ name: fullName, error: 'La p?liza no tiene un correo electr?nico registrado.' });
         continue;
       }
 
@@ -1904,13 +1863,13 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
             .replace(/{Nombre}/g, fullName)
             .replace(/{fecha_nacimiento}/g, formatToShow(ins.birthDate))
             .replace(/{Fecha_nacimiento}/g, formatToShow(ins.birthDate))
-            .replace(/Codigo de la Poliza\s+-\s+Nombre Póliza \(Admin\)/g, policyInfo)
-            .replace(/Codigo de la Poliza\s+-\s+Nombre Póliza/g, policyInfo)
+            .replace(/Codigo de la Poliza\s+-\s+Nombre P?liza \(Admin\)/g, policyInfo)
+            .replace(/Codigo de la Poliza\s+-\s+Nombre P?liza/g, policyInfo)
             .replace(/{poliza_info}/g, policyInfo)
             .replace(/{poliza}/g, policyInfo)
             .replace(/{Poliza}/g, policyInfo)
-            .replace(/{Pais Origen}/g, getCountryName(ins.originCountry) || 'México')
-            .replace(/{origen}/g, getCountryName(ins.originCountry) || 'México')
+            .replace(/{Pais Origen}/g, getCountryName(ins.originCountry) || 'M?xico')
+            .replace(/{origen}/g, getCountryName(ins.originCountry) || 'M?xico')
             .replace(/{Pais Destino}/g, getCountryName(ins.destinationCountry) || '')
             .replace(/{destino}/g, getCountryName(ins.destinationCountry) || '')
             .replace(/{Fecha_inicio}/g, formatToShow(ins.startDate))
@@ -1938,7 +1897,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
               data: base64
             });
           } else {
-            failures.push({ name: fullName, error: 'No se encontraron cartas de los idiomas seleccionados para esta póliza.' });
+            failures.push({ name: fullName, error: 'No se encontraron cartas de los idiomas seleccionados para esta p?liza.' });
             continue;
           }
         } else if (config.pdfMergeMode === 'merged' && selectedLetters.length > 1) {
@@ -1974,7 +1933,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
         });
 
         if (!response.ok) {
-          let errMessage = 'Error de envío de correo en servidor';
+          let errMessage = 'Error de env?o de correo en servidor';
           try {
             const contentType = response.headers.get('content-type');
             if (contentType && contentType.includes('application/json')) {
@@ -1993,7 +1952,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
           throw new Error(errMessage);
         }
 
-        // Log bulk email dispatch to policy's activity log (bitácora)
+        // Log bulk email dispatch to policy's activity log (bit?cora)
         try {
           const now = new Date();
           const userEmail = auth.currentUser?.email || 'Sistema';
@@ -2007,7 +1966,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
           await logInsuranceActivity({
             insuranceId: ins.id,
             type: 'automatic',
-            description: `Póliza de seguro enviada por correo electrónico (Envío masivo) a: ${emailTo} ${attachDesc}. Enviado el día ${format(now, 'dd/MM/yyyy')} a las ${format(now, 'HH:mm:ss')} por el usuario ${userEmail}.`,
+            description: `P?liza de seguro enviada por correo electr?nico (Env?o masivo) a: ${emailTo} ${attachDesc}. Enviado el d?a ${format(now, 'dd/MM/yyyy')} a las ${format(now, 'HH:mm:ss')} por el usuario ${userEmail}.`,
             date: now,
             createdBy: userEmail
           });
@@ -2025,12 +1984,12 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
     setIsBulkSending(false);
     setBulkSendProgress(null);
 
-    let summaryMessage = `Envío masivo finalizado.\n\n`;
+    let summaryMessage = `Env?o masivo finalizado.\n\n`;
     if (successes.length > 0) {
-      summaryMessage += `✓ Enviado con éxito a ${successes.length} pasajeros:\n${successes.slice(0, 10).join(', ')}${successes.length > 10 ? ' y más...' : ''}\n\n`;
+      summaryMessage += `? Enviado con ?xito a ${successes.length} pasajeros:\n${successes.slice(0, 10).join(', ')}${successes.length > 10 ? ' y m?s...' : ''}\n\n`;
     }
     if (failures.length > 0) {
-      summaryMessage += `✗ Fallas en ${failures.length} pasajeros:\n${failures.map(f => `- ${f.name}: ${f.error}`).join('\n')}\n`;
+      summaryMessage += `? Fallas en ${failures.length} pasajeros:\n${failures.map(f => `- ${f.name}: ${f.error}`).join('\n')}\n`;
     }
 
     alert(summaryMessage);
@@ -2040,7 +1999,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
   const handleBulkSendEmailsClick = () => {
     const selectedInsurancesList = insurances.filter(ins => ins.id && selectedInsuranceIds.includes(ins.id));
     if (selectedInsurancesList.length === 0) {
-      alert('Por favor selecciona al menos una póliza para enviar por correo.');
+      alert('Por favor selecciona al menos una p?liza para enviar por correo.');
       return;
     }
     setShowBulkEmailModal(true);
@@ -2076,7 +2035,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
 
       setSelectedInsuranceIds([]);
       setShowDeleteSelectedConfirm(false);
-      alert('Las pólizas seleccionadas han sido eliminadas.');
+      alert('Las p?lizas seleccionadas han sido eliminadas.');
     } catch (error) {
       handleFirestoreError(error, OperationType.DELETE, 'insurances_selected');
     } finally {
@@ -2147,14 +2106,14 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
       const insSnap = await getDoc(insRef);
       if (insSnap.exists()) {
         const insData = insSnap.data() as InsuranceRequest;
-        const finalPrice = getInsuranceFinalPrice(insData);
+        const totalPrice = insData.totalFinal || insData.totalPrice;
         
         const qAll = query(collection(db, 'payments'), where('insuranceId', '==', insuranceId), where('status', '==', 'completed'));
         const allSnap = await getDocs(qAll);
         const newTotalPaid = allSnap.docs.reduce((acc, d) => acc + (d.data().amount || 0), 0);
         
         let newStatus = insData.status;
-        if ((finalPrice - newTotalPaid) < 2) {
+        if ((totalPrice - newTotalPaid) < 2) {
           newStatus = 'paid';
         } else if (newTotalPaid > 0) {
           newStatus = 'partially_paid';
@@ -2162,8 +2121,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
         
         await updateDoc(insRef, {
           totalPaid: newTotalPaid,
-          status: newStatus,
-          totalFinal: finalPrice
+          status: newStatus
         });
 
         // Trigger WhatsApp notifications based on status after payment confirmation
@@ -2216,7 +2174,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
     const available = getAvailableLettersForInsurance(insurance, policyLetters, policies);
     
     if (available.length === 0) {
-      alert('No se encontraron cartas vinculadas a esta póliza en el catálogo. Se generará el formato por defecto.');
+      alert('No se encontraron cartas vinculadas a esta p?liza en el cat?logo. Se generar? el formato por defecto.');
       await generatePDF(insurance, undefined, policies, settings?.logoUrl);
       return;
     }
@@ -2285,7 +2243,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
           hasAttachedInvoice = true;
           difference = dbInv.amount - totalCalculatedCost;
           if (Math.abs(difference) < 0.05) {
-            isCorrect = 'Sí';
+            isCorrect = 'S?';
           } else {
             isCorrect = 'No';
           }
@@ -2298,7 +2256,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
         let isPaid = 'No';
         if (totalPolicies > 0) {
           if (paidPolicies === totalPolicies) {
-            isPaid = 'Sí';
+            isPaid = 'S?';
           } else if (paidPolicies > 0) {
             isPaid = 'Parcial';
           }
@@ -2355,19 +2313,19 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
           }
         }
 
-        if (invoiceListPaidFilter === 'paid' && item.isPaid !== 'Sí') return false;
+        if (invoiceListPaidFilter === 'paid' && item.isPaid !== 'S?') return false;
         if (invoiceListPaidFilter === 'not_paid' && item.isPaid !== 'No') return false;
         if (invoiceListPaidFilter === 'partial' && item.isPaid !== 'Parcial') return false;
 
         // Filtro de Estado de Factura / Diferencia
         if (invoiceListCorrectFilter === 'pending') {
           // Pendientes: Sin factura O con diferencia que NO ha sido justificada
-          if (item.hasAttachedInvoice && (item.isCorrect === 'Sí' || item.isJustified)) {
+          if (item.hasAttachedInvoice && (item.isCorrect === 'S?' || item.isJustified)) {
             return false;
           }
         } else if (invoiceListCorrectFilter === 'incorrect') {
           // Solo los que tienen diferencia de importe
-          if (!item.hasAttachedInvoice || item.isCorrect === 'Sí') {
+          if (!item.hasAttachedInvoice || item.isCorrect === 'S?') {
             return false;
           }
         } else if (invoiceListCorrectFilter === 'no_invoice') {
@@ -2377,7 +2335,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
           }
         } else if (invoiceListCorrectFilter === 'correct') {
           // Solo los que tienen factura correcta (sin diferencia)
-          if (!item.hasAttachedInvoice || item.isCorrect !== 'Sí') {
+          if (!item.hasAttachedInvoice || item.isCorrect !== 'S?') {
             return false;
           }
         } else if (invoiceListCorrectFilter === 'justified') {
@@ -2434,7 +2392,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
     let unpaidAmount = 0;
 
     dataset.forEach(item => {
-      if (item.isPaid !== 'Sí') {
+      if (item.isPaid !== 'S?') {
         unpaidCount++;
       }
       item.rawGroup.policies.forEach(p => {
@@ -2456,7 +2414,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
     };
   }, [filteredAndSortedInvoiceList]);
 
-  // Statistics for Cotejo Automático sub-tab
+  // Statistics for Cotejo Autom?tico sub-tab
   const cotejoMetrics = useMemo(() => {
     let correctCount = 0;
     let differenceCount = 0;
@@ -2843,7 +2801,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(8.5);
     doc.setTextColor(200, 210, 235);
-    doc.text(`Generado: ${format(new Date(), 'dd/MM/yyyy HH:mm')} | Total Pólizas: ${detailedMetrics.totalPolicies} | Invoices: ${detailedMetrics.uniqueInvoices} | Monto Total: $${detailedMetrics.totalAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD`, 14, 21);
+    doc.text(`Generado: ${format(new Date(), 'dd/MM/yyyy HH:mm')} | Total P?lizas: ${detailedMetrics.totalPolicies} | Invoices: ${detailedMetrics.uniqueInvoices} | Monto Total: $${detailedMetrics.totalAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD`, 14, 21);
 
     // Draw logo if available
     if (loadedLogo) {
@@ -2890,15 +2848,15 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
       else if (invoiceDetailCorrectFilter === 'no_invoice') filterParts.push('Factura: Sin Factura Adjunta');
     }
     if (invoiceDetailSearchTerm) {
-      filterParts.push(`Búsqueda: "${invoiceDetailSearchTerm}"`);
+      filterParts.push(`B?squeda: "${invoiceDetailSearchTerm}"`);
     }
-    filterDesc += filterParts.length > 0 ? filterParts.join(' | ') : 'Todas las pólizas facturadas';
+    filterDesc += filterParts.length > 0 ? filterParts.join(' | ') : 'Todas las p?lizas facturadas';
 
     doc.text(filterDesc, 18, 39.5);
 
     doc.setFont('helvetica', 'normal');
     doc.setTextColor(100, 116, 139);
-    doc.text(`Concentrado: ${concentratedPoliciesData.length} registros | ${detailedMetrics.totalPolicies} pólizas acumuladas`, 18, 44.5);
+    doc.text(`Concentrado: ${concentratedPoliciesData.length} registros | ${detailedMetrics.totalPolicies} p?lizas acumuladas`, 18, 44.5);
 
     // Table Content - EXACT 5 COLUMNS REQUESTED BY USER
     const tableHeaders = [
@@ -2969,11 +2927,11 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
       },
       margin: { left: 14, right: 14, bottom: 15 },
       didDrawPage: (data) => {
-        const str = `Página ${data.pageNumber} de ${doc.internal.pages.length - 1}`;
+        const str = `P?gina ${data.pageNumber} de ${doc.internal.pages.length - 1}`;
         doc.setFontSize(8);
         doc.setTextColor(148, 163, 184);
         doc.text(str, pageWidth - 14, pageHeight - 8, { align: 'right' });
-        doc.text('MSI Seguros Internacionales - Sistema de Gestión', 14, pageHeight - 8);
+        doc.text('MSI Seguros Internacionales - Sistema de Gesti?n', 14, pageHeight - 8);
       }
     });
 
@@ -3024,31 +2982,31 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
       <header className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">
-            {tab === 'caremed' ? 'Exportación Caremed' : tab === 'invoices' ? 'Invoices CareMed' : 'Gestión de Pólizas'}
+            {tab === 'caremed' ? 'Exportaci?n Caremed' : tab === 'invoices' ? 'Invoices CareMed' : 'Gesti?n de P?lizas'}
           </h1>
           <p className="text-gray-500">
             {tab === 'caremed' 
-              ? 'Consulte y visualice de manera eficiente las pólizas exportadas' 
+              ? 'Consulte y visualice de manera eficiente las p?lizas exportadas' 
               : tab === 'invoices' 
-                ? 'Historial de lotes con números de invoice Caremed asignados' 
+                ? 'Historial de lotes con n?meros de invoice Caremed asignados' 
                 : 'Listado completo de seguros solicitados y emitidos'}
           </p>
         </div>
         {tab !== 'caremed' && tab !== 'invoices' && (
           <div className="flex flex-col items-start lg:items-end gap-2.5">
-            {/* Fila Superior: Controles de Selección, Limpieza y Edición Masiva */}
+            {/* Fila Superior: Controles de Selecci?n, Limpieza y Edici?n Masiva */}
             {(isSuperAdminOrDirector || canManageClosedState) && (
               <div className="flex items-center gap-2 flex-wrap">
-                {/* Seleccionar / Deseleccionar Página */}
+                {/* Seleccionar / Deseleccionar P?gina */}
                 <button
                   onClick={handleSelectAllCurrentPage}
                   className="flex items-center gap-1.5 px-3 py-1.5 bg-white text-gray-700 hover:bg-gray-50 rounded-xl font-bold border border-gray-200 transition-all shadow-xs text-xs cursor-pointer"
-                  title="Seleccionar o deseleccionar todas las pólizas de la página actual"
+                  title="Seleccionar o deseleccionar todas las p?lizas de la p?gina actual"
                 >
                   <CheckCircle className="w-3.5 h-3.5 text-gray-500" />
                   {paginatedInsurances.length > 0 && paginatedInsurances.map(i => i.id).filter((id): id is string => !!id).every(id => selectedInsuranceIds.includes(id)) 
-                    ? 'Deseleccionar Página' 
-                    : 'Seleccionar Página'
+                    ? 'Deseleccionar P?gina' 
+                    : 'Seleccionar P?gina'
                   }
                 </button>
 
@@ -3057,7 +3015,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                   <button
                     onClick={handleSelectAllFiltered}
                     className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-50 text-blue-700 hover:bg-blue-100 rounded-xl font-bold border border-blue-200 transition-all shadow-xs text-xs cursor-pointer"
-                    title="Seleccionar o deseleccionar todas las pólizas encontradas"
+                    title="Seleccionar o deseleccionar todas las p?lizas encontradas"
                   >
                     <CheckCircle className="w-3.5 h-3.5 text-blue-600" />
                     {filteredInsurances.map(i => i.id).filter((id): id is string => !!id).every(id => selectedInsuranceIds.includes(id))
@@ -3067,12 +3025,12 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                   </button>
                 )}
 
-                {/* Limpiar Selección */}
+                {/* Limpiar Selecci?n */}
                 {selectedInsuranceIds.length > 0 && (
                   <button
                     onClick={() => setSelectedInsuranceIds([])}
                     className="flex items-center gap-1 px-2.5 py-1.5 text-xs text-gray-500 hover:text-gray-800 font-bold hover:bg-gray-100 rounded-xl transition-all cursor-pointer"
-                    title="Limpiar selección actual"
+                    title="Limpiar selecci?n actual"
                   >
                     <X className="w-3.5 h-3.5" />
                     Limpiar ({selectedInsuranceIds.length})
@@ -3084,7 +3042,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                   <button
                     onClick={() => setShowDeleteSelectedConfirm(true)}
                     className="flex items-center gap-1.5 px-3 py-1.5 bg-rose-50 text-rose-600 rounded-xl font-bold border border-rose-200 hover:bg-rose-100 transition-all shadow-xs text-xs animate-in fade-in duration-200 cursor-pointer"
-                    title="Eliminar pólizas seleccionadas"
+                    title="Eliminar p?lizas seleccionadas"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
                     Borrar ({selectedInsuranceIds.length})
@@ -3096,7 +3054,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                   <button
                     onClick={() => setShowBulkEditModal(true)}
                     className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 text-amber-800 border border-amber-300 rounded-xl font-bold hover:bg-amber-100 transition-all shadow-xs text-xs animate-in fade-in duration-200 cursor-pointer"
-                    title="Modificar masivamente pólizas seleccionadas"
+                    title="Modificar masivamente p?lizas seleccionadas"
                   >
                     <Edit2 className="w-3.5 h-3.5" />
                     Editar Masivo ({selectedInsuranceIds.length})
@@ -3105,17 +3063,17 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
               </div>
             )}
 
-            {/* Fila Inferior: Descargas, Filtros rápidos, Acciones Masivas y Vistas */}
+            {/* Fila Inferior: Descargas, Filtros r?pidos, Acciones Masivas y Vistas */}
             <div className="flex items-center gap-2 flex-wrap">
-              {/* Descargar Pólizas */}
+              {/* Descargar P?lizas */}
               <button
                 onClick={handleDownloadInsurances}
                 disabled={filteredInsurances.length === 0}
                 className="flex items-center gap-1.5 px-3.5 py-2 bg-emerald-50 text-emerald-700 rounded-xl font-bold border border-emerald-200 hover:bg-emerald-100 transition-all shadow-xs text-xs disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
-                title="Descargar la lista de pólizas actual en formato CSV"
+                title="Descargar la lista de p?lizas actual en formato CSV"
               >
                 <Download className="w-3.5 h-3.5" />
-                Descargar Pólizas
+                Descargar P?lizas
               </button>
 
               {/* No Exportadas */}
@@ -3127,7 +3085,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                       ? 'bg-blue-600 text-white border-blue-700 shadow-blue-200 ring-2 ring-blue-400/40'
                       : 'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100'
                   }`}
-                  title="Filtrar y listar pólizas pendientes de exportación a CareMed en vista de filas"
+                  title="Filtrar y listar p?lizas pendientes de exportaci?n a CareMed en vista de filas"
                 >
                   <FileSpreadsheet className="w-3.5 h-3.5" />
                   No Exportadas ({unexportedCount})
@@ -3139,36 +3097,36 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                 <button
                   onClick={() => setShowDuplicatesModal(true)}
                   className="flex items-center gap-1.5 px-3.5 py-2 bg-amber-50 text-amber-800 rounded-xl font-bold border border-amber-200 hover:bg-amber-100 transition-all shadow-xs text-xs cursor-pointer"
-                  title="Identificar y gestionar pólizas duplicadas"
+                  title="Identificar y gestionar p?lizas duplicadas"
                 >
                   <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
                   Duplicados ({duplicateCount})
                 </button>
               )}
 
-              {/* CareMed (Visible solo cuando la selección contiene únicamente pólizas NO exportadas) */}
+              {/* CareMed (Visible solo cuando la selecci?n contiene ?nicamente p?lizas NO exportadas) */}
               {canExportToCareMed && (
                 <button
                   onClick={handleDownloadCareMedCSV}
                   className="flex items-center gap-1.5 px-3.5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-bold border border-indigo-700 transition-all shadow-md shadow-indigo-100 hover:shadow-indigo-200 text-xs animate-in fade-in duration-200 cursor-pointer active:scale-95"
-                  title="Registrar y exportar pólizas seleccionadas para CareMed"
+                  title="Registrar y exportar p?lizas seleccionadas para CareMed"
                 >
                   <Download className="w-3.5 h-3.5" />
                   CareMed ({selectedInsuranceIds.length})
                 </button>
               )}
 
-              {/* Aviso si la selección contiene pólizas ya exportadas */}
+              {/* Aviso si la selecci?n contiene p?lizas ya exportadas */}
               {selectedInsuranceIds.length > 0 && selectedExportedCount > 0 && (
                 <div
                   className="flex items-center gap-1.5 px-3 py-2 bg-amber-50 text-amber-900 border border-amber-300 rounded-xl text-xs font-semibold shadow-xs animate-in fade-in duration-200"
-                  title={`La selección contiene ${selectedExportedCount} póliza(s) ya exportada(s). Por esta razón no se muestra el botón de CareMed.`}
+                  title={`La selecci?n contiene ${selectedExportedCount} p?liza(s) ya exportada(s). Por esta raz?n no se muestra el bot?n de CareMed.`}
                 >
                   <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
                   <span>
                     {selectedExportedCount === selectedInsuranceIds.length
-                      ? 'Pólizas ya exportadas (CareMed oculto)'
-                      : `Hay ${selectedExportedCount} ${selectedExportedCount === 1 ? 'póliza ya exportada' : 'pólizas ya exportadas'} (CareMed oculto)`
+                      ? 'P?lizas ya exportadas (CareMed oculto)'
+                      : `Hay ${selectedExportedCount} ${selectedExportedCount === 1 ? 'p?liza ya exportada' : 'p?lizas ya exportadas'} (CareMed oculto)`
                     }
                   </span>
                 </div>
@@ -3186,7 +3144,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                 </button>
               )}
 
-              {/* Envío Masivo */}
+              {/* Env?o Masivo */}
               {selectedInsuranceIds.length > 0 && (
                 <button
                   onClick={handleBulkSendEmailsClick}
@@ -3199,7 +3157,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                   ) : (
                     <Send className="w-3.5 h-3.5" />
                   )}
-                  Envío Masivo ({selectedInsuranceIds.length})
+                  Env?o Masivo ({selectedInsuranceIds.length})
                 </button>
               )}
 
@@ -3244,7 +3202,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                 <p className="text-2xl font-black text-gray-900">
                   {caremedExports.reduce((sum, exp) => sum + exp.count, 0)}
                 </p>
-                <p className="text-xs font-bold text-gray-400 uppercase tracking-wider">Pólizas Exportadas</p>
+                <p className="text-xs font-bold text-gray-400 uppercase tracking-wider">P?lizas Exportadas</p>
               </div>
               <div className="p-3 bg-blue-50 text-blue-600 rounded-xl">
                 <ShieldCheck className="w-6 h-6" />
@@ -3259,7 +3217,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                     : 'N/A'
                   }
                 </p>
-                <p className="text-xs font-bold text-gray-400 uppercase tracking-wider mt-1">Última Exportación</p>
+                <p className="text-xs font-bold text-gray-400 uppercase tracking-wider mt-1">?ltima Exportaci?n</p>
               </div>
               <div className="p-3 bg-amber-50 text-amber-600 rounded-xl">
                 <Calendar className="w-6 h-6" />
@@ -3274,7 +3232,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
               </div>
               <p className="text-lg font-bold text-gray-700">No hay exportaciones registradas</p>
               <p className="text-sm text-gray-400 max-w-md">
-                Las pólizas que exporte a Caremed utilizando el botón "CareMed" en el listado de pólizas general aparecerán registradas aquí automáticamente.
+                Las p?lizas que exporte a Caremed utilizando el bot?n "CareMed" en el listado de p?lizas general aparecer?n registradas aqu? autom?ticamente.
               </p>
             </div>
           ) : (
@@ -3292,7 +3250,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                 >
                   <span className="flex items-center gap-2">
                     <FileSpreadsheet className="w-4 h-4" />
-                    Asignación de Invoices (Pendientes)
+                    Asignaci?n de Invoices (Pendientes)
                   </span>
                 </button>
                 <button
@@ -3314,13 +3272,13 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
               <div className="bg-white p-5 rounded-2xl border border-gray-100 shadow-sm flex flex-col md:flex-row gap-5 items-end">
                 <div className="flex-1 w-full space-y-1.5">
                   <label className="text-xs font-bold text-gray-500 uppercase tracking-wider block">
-                    Buscar Asegurado (Nombre, País o Cód. de Póliza)
+                    Buscar Asegurado (Nombre, Pa?s o C?d. de P?liza)
                   </label>
                   <div className="relative">
                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
                     <input
                       type="text"
-                      placeholder="Ej. Juan Pérez, España, POL-1234..."
+                      placeholder="Ej. Juan P?rez, Espa?a, POL-1234..."
                       value={caremedInsuredSearch}
                       onChange={(e) => setCaremedInsuredSearch(e.target.value)}
                       className="w-full pl-9 pr-8 py-2.5 bg-gray-50 hover:bg-gray-100/50 focus:bg-white border border-gray-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none text-xs transition-all text-gray-800 placeholder-gray-400"
@@ -3330,7 +3288,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                         onClick={() => setCaremedInsuredSearch('')}
                         className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 text-xs font-bold w-5 h-5 flex items-center justify-center rounded-full hover:bg-gray-100/50"
                       >
-                        ✕
+                        ?
                       </button>
                     )}
                   </div>
@@ -3338,7 +3296,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
 
                 <div className="w-full md:w-64 space-y-1.5">
                   <label className="text-xs font-bold text-gray-500 uppercase tracking-wider block">
-                    Filtrar por Fecha de Exportación
+                    Filtrar por Fecha de Exportaci?n
                   </label>
                   <div className="relative">
                     <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
@@ -3353,7 +3311,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                         onClick={() => setCaremedDateFilter('')}
                         className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 text-xs font-bold w-5 h-5 flex items-center justify-center rounded-full hover:bg-gray-100/50"
                       >
-                        ✕
+                        ?
                       </button>
                     )}
                   </div>
@@ -3384,7 +3342,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                     {filteredCaremedExports.length === 0 ? (
                       <div className="p-8 text-center text-gray-400 text-xs font-medium bg-gray-50/50 border border-dashed border-gray-200 rounded-xl flex flex-col items-center justify-center gap-2">
                         <AlertTriangle className="w-5 h-5 text-gray-400" />
-                        <span>No hay lotes que coincidan con la búsqueda.</span>
+                        <span>No hay lotes que coincidan con la b?squeda.</span>
                       </div>
                     ) : (
                       <div className="space-y-2 max-h-[600px] overflow-y-auto pr-1 flex-1">
@@ -3436,7 +3394,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                   <span className={`px-2 py-0.5 rounded-md font-bold text-[10px] w-fit ${
                                     isActive ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-100 text-gray-700'
                                   }`}>
-                                    {batch.count} {batch.count === 1 ? 'póliza' : 'pólizas'}
+                                    {batch.count} {batch.count === 1 ? 'p?liza' : 'p?lizas'}
                                   </span>
                                 </div>
                                 <button
@@ -3445,7 +3403,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                     setSelectedBatchForDetail(batch);
                                   }}
                                   className="flex items-center gap-1 px-2.5 py-1 bg-indigo-50 hover:bg-indigo-100 border border-indigo-150 text-indigo-700 rounded-lg text-[10px] font-bold transition-all cursor-pointer shadow-sm"
-                                  title="Ver lista de pólizas en vista de lectura"
+                                  title="Ver lista de p?lizas en vista de lectura"
                                 >
                                   <Eye className="w-3.5 h-3.5" />
                                   Ver Detalle
@@ -3467,8 +3425,8 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                       return (
                         <div className="bg-white p-12 rounded-2xl border border-gray-100 text-center text-gray-400">
                           {filteredCaremedExports.length === 0 
-                            ? 'No se encontraron lotes que coincidan con la búsqueda.'
-                            : 'Selecciona un lote de exportación de la lista para visualizar las pólizas incluidas.'
+                            ? 'No se encontraron lotes que coincidan con la b?squeda.'
+                            : 'Selecciona un lote de exportaci?n de la lista para visualizar las p?lizas incluidas.'
                           }
                         </div>
                       );
@@ -3500,20 +3458,20 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                         <div className="p-4 bg-gray-50 border-b border-gray-100 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                           <div>
                             <div className="text-gray-800 font-bold text-sm flex items-center gap-2">
-                              <span>Pólizas Exportadas el {activeBatch.exportDate}</span>
+                              <span>P?lizas Exportadas el {activeBatch.exportDate}</span>
                               <button
                                 onClick={() => {
                                   setEditingExportDate(activeBatch.exportDate);
                                   setNewExportDateValue(activeBatch.exportDate.substring(0, 10));
                                 }}
                                 className="text-[10px] text-indigo-650 hover:text-indigo-800 underline font-bold bg-indigo-50 px-2 py-0.5 rounded cursor-pointer transition-all"
-                                title="Editar la fecha de exportación de este lote"
+                                title="Editar la fecha de exportaci?n de este lote"
                               >
                                 Editar fecha
                               </button>
                             </div>
                             <div className="text-xs text-gray-500 mt-1 font-medium">
-                              Total de pólizas en este lote: <span className="font-bold text-gray-800">{activeBatch.count}</span>
+                              Total de p?lizas en este lote: <span className="font-bold text-gray-800">{activeBatch.count}</span>
                               {filteredBatchPolicies.length !== activeBatch.count && (
                                 <span className="ml-1.5 text-indigo-600 font-semibold">(Coinciden {filteredBatchPolicies.length})</span>
                               )}
@@ -3522,7 +3480,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                           <button
                             onClick={() => handleDownloadSpecificCareMedCSV(activeBatch.exportDate, activeBatch.policies)}
                             className="flex items-center gap-2 px-3 py-1.5 bg-indigo-50 border border-indigo-200 text-indigo-700 hover:bg-indigo-100 rounded-lg text-xs font-bold transition-all shadow-sm cursor-pointer w-fit"
-                            title="Volver a descargar el archivo CSV original de esta exportación"
+                            title="Volver a descargar el archivo CSV original de esta exportaci?n"
                           >
                             <Download className="w-3.5 h-3.5" />
                             Descargar CSV
@@ -3535,7 +3493,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
                             <input
                               type="text"
-                              placeholder="Filtro rápido dentro de este lote..."
+                              placeholder="Filtro r?pido dentro de este lote..."
                               value={caremedSearchTerm}
                               onChange={(e) => setCaremedSearchTerm(e.target.value)}
                               className="w-full pl-9 pr-8 py-2 bg-gray-50 hover:bg-gray-100/50 focus:bg-white border border-gray-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none text-xs transition-all"
@@ -3545,7 +3503,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                 onClick={() => setCaremedSearchTerm('')}
                                 className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 text-xs font-bold leading-none"
                               >
-                                ✕
+                                ?
                               </button>
                             )}
                           </div>
@@ -3568,17 +3526,17 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-indigo-50/50 border border-indigo-100/60 p-3.5 rounded-xl animate-in translate-y-0.5 duration-200">
                                 <div>
                                   <h4 className="text-xs font-bold text-indigo-905">
-                                    Asignación Masiva de Invoices CareMed
+                                    Asignaci?n Masiva de Invoices CareMed
                                   </h4>
                                   <p className="text-[10px] text-indigo-700 font-medium mt-0.5">
-                                    Has seleccionado <span className="font-bold">{caremedSelectedIds.length}</span> {caremedSelectedIds.length === 1 ? 'póliza' : 'pólizas'} de este lote.
+                                    Has seleccionado <span className="font-bold">{caremedSelectedIds.length}</span> {caremedSelectedIds.length === 1 ? 'p?liza' : 'p?lizas'} de este lote.
                                   </p>
                                 </div>
                                 
                                 <div className="flex items-center gap-2">
                                   <input
                                     type="text"
-                                    placeholder="Nº de Invoice (ej: CM-2026-001)"
+                                    placeholder="N? de Invoice (ej: CM-2026-001)"
                                     value={invoiceInput}
                                     onChange={(e) => setInvoiceInput(e.target.value)}
                                     className="px-3 py-1.5 bg-white border border-gray-300 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 text-xs rounded-lg outline-none min-w-[200px] font-sans text-gray-800"
@@ -3599,7 +3557,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                         <div className="overflow-x-auto">
                           {filteredBatchPolicies.length === 0 ? (
                             <div className="p-8 text-center text-gray-400 text-xs font-bold">
-                              No hay pólizas que coincidan con la búsqueda en este lote.
+                              No hay p?lizas que coincidan con la b?squeda en este lote.
                             </div>
                           ) : (
                             <table className="w-full text-left text-xs border-collapse">
@@ -3621,10 +3579,10 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                     />
                                   </th>
                                   <th className="px-4 py-3">Asegurado</th>
-                                  <th className="px-4 py-3">Asociación / Canal</th>
+                                  <th className="px-4 py-3">Asociaci?n / Canal</th>
                                   <th className="px-4 py-3">Destino</th>
                                   <th className="px-4 py-3">Plan / Fechas</th>
-                                  <th className="px-4 py-3 text-right">Acción</th>
+                                  <th className="px-4 py-3 text-right">Acci?n</th>
                                 </tr>
                               </thead>
                               <tbody className="divide-y divide-gray-100">
@@ -3666,14 +3624,14 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                                 handleDuplicatePolicy(i);
                                               }}
                                               className="p-0.5 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded transition-all cursor-pointer inline-flex items-center"
-                                              title="Duplicar datos básicos a nueva póliza (Agente/Corporativo/Individual, Nombre, Apellido, Fecha de nacimiento)"
+                                              title="Duplicar datos b?sicos a nueva p?liza (Agente/Corporativo/Individual, Nombre, Apellido, Fecha de nacimiento)"
                                             >
                                               <Copy className="w-3 h-3" />
                                             </button>
                                           </div>
-                                          <span className="text-[10px] text-gray-400">Nacimiento: {formatDisplayDate(i.birthDate)} ({i.age} años)</span>
+                                          <span className="text-[10px] text-gray-400">Nacimiento: {formatDisplayDate(i.birthDate)} ({i.age} a?os)</span>
                                           {i.InvoiceCaremed && (
-                                            <span className="inline-flex items-center gap-1 mt-1 px-1.5 py-0.5 rounded text-[9px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-100 w-fit" title="Número de Invoice Caremed">
+                                            <span className="inline-flex items-center gap-1 mt-1 px-1.5 py-0.5 rounded text-[9px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-100 w-fit" title="N?mero de Invoice Caremed">
                                               Invoice: {i.InvoiceCaremed}
                                             </span>
                                           )}
@@ -3691,7 +3649,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                               {clientLabel}: {clientName}
                                             </span>
                                             {subAgentName && (
-                                              <span className="text-[9px] text-gray-400 pl-4 mt-0.5">• Sub: {subAgentName}</span>
+                                              <span className="text-[9px] text-gray-400 pl-4 mt-0.5">? Sub: {subAgentName}</span>
                                             )}
                                           </div>
                                         )}
@@ -3699,7 +3657,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                       <td className="px-4 py-3.5">
                                         <div className="flex flex-col leading-none">
                                           <span className="font-semibold text-gray-800">{i.destinationCountry}</span>
-                                          <span className="text-[9px] text-gray-400 mt-1">{i.originCountry} → {i.city || '-'}</span>
+                                          <span className="text-[9px] text-gray-400 mt-1">{i.originCountry} ? {i.city || '-'}</span>
                                         </div>
                                       </td>
                                       <td className="px-4 py-3.5">
@@ -3712,7 +3670,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                         <button
                                           onClick={() => setSelectedInsuranceForDetail(i)}
                                           className="inline-flex items-center gap-1.5 p-1.5 text-blue-600 hover:text-white hover:bg-blue-600 rounded-lg border border-blue-100 hover:border-blue-600 transition-all cursor-pointer"
-                                          title="Ver detalles completos de la póliza"
+                                          title="Ver detalles completos de la p?liza"
                                         >
                                           <Eye className="w-3.5 h-3.5" />
                                         </button>
@@ -3736,21 +3694,21 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                       Historial General de Archivos Generados
                     </h3>
                     <p className="text-xs text-gray-550 mt-1 font-medium">
-                      Consulte todas las descargas/exportaciones CareMed históricas realizadas. Puede descargar nuevamente el archivo CSV original de cada lote o inspeccionar el detalle completo de los asegurados exportados en esa fecha (vista de lectura).
+                      Consulte todas las descargas/exportaciones CareMed hist?ricas realizadas. Puede descargar nuevamente el archivo CSV original de cada lote o inspeccionar el detalle completo de los asegurados exportados en esa fecha (vista de lectura).
                     </p>
                   </div>
 
                   {filteredAllCaremedExports.length === 0 ? (
                     <div className="p-16 text-center text-gray-400 text-xs font-bold flex flex-col items-center justify-center gap-2">
                       <AlertTriangle className="w-8 h-8 text-gray-300" />
-                      <span>No se encontraron archivos de exportación con los criterios de búsqueda.</span>
+                      <span>No se encontraron archivos de exportaci?n con los criterios de b?squeda.</span>
                     </div>
                   ) : (
                     <div className="overflow-x-auto font-medium">
                       <table className="w-full text-left text-xs border-collapse">
                         <thead className="bg-gray-50/50 text-[10px] uppercase font-bold text-gray-500 tracking-wider border-b border-gray-100">
                           <tr>
-                            <th className="px-5 py-4">Fecha/Hora Exportación</th>
+                            <th className="px-5 py-4">Fecha/Hora Exportaci?n</th>
                             <th className="px-5 py-4">Nombre de archivo</th>
                             <th className="px-5 py-4">Cantidad Asegurados</th>
                             <th className="px-5 py-4">Estado Factura</th>
@@ -3818,7 +3776,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                     <button
                                       onClick={() => handleDownloadSpecificCareMedCSV(batch.exportDate, batch.policies)}
                                       className="inline-flex items-center gap-1 px-3 py-1.5 bg-white hover:bg-gray-50 border border-gray-200 text-gray-700 rounded-xl text-[10.5px] font-bold transition-all shadow-sm cursor-pointer hover:border-gray-300"
-                                      title="Descargar el archivo CSV original de esta exportación"
+                                      title="Descargar el archivo CSV original de esta exportaci?n"
                                     >
                                       <Download className="w-3.5 h-3.5" />
                                       Descargar CSV
@@ -3859,7 +3817,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
             >
               <span className="flex items-center gap-2">
                 <Receipt className="w-4 h-4" />
-                Cotejo Automático
+                Cotejo Autom?tico
               </span>
             </button>
             <button
@@ -3887,14 +3845,14 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
             >
               <span className="flex items-center gap-2">
                 <List className="w-4 h-4" />
-                Detalle de Pólizas e Invoices
+                Detalle de P?lizas e Invoices
               </span>
             </button>
           </div>
 
           {invoiceSubTab === 'cotejo' ? (
             <>
-              {/* Summary stats & interactive filter cards row for Cotejo Automático */}
+              {/* Summary stats & interactive filter cards row for Cotejo Autom?tico */}
               <div className="grid grid-cols-2 lg:grid-cols-4 gap-3.5">
                 {/* 1. Todos los Invoices */}
                 <button
@@ -4017,7 +3975,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                       </button>
                     )}
                   </div>
-                  <p className="text-xs text-gray-450">Busca por número de invoice, nombre del asegurado o estado.</p>
+                  <p className="text-xs text-gray-450">Busca por n?mero de invoice, nombre del asegurado o estado.</p>
                 </div>
 
                 <div className="space-y-3">
@@ -4027,7 +3985,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                       <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
                       <input
                         type="text"
-                        placeholder="ej: CM-2026 o Juan Pérez"
+                        placeholder="ej: CM-2026 o Juan P?rez"
                         value={invoicedSearchTerm}
                         onChange={(e) => setInvoicedSearchTerm(e.target.value)}
                         className="w-full pl-9 pr-8 py-1.5 bg-gray-50 border border-gray-200 focus:ring-2 focus:ring-indigo-550 rounded-xl outline-none text-xs transition-with text-gray-800"
@@ -4037,7 +3995,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                           onClick={() => setInvoicedSearchTerm('')}
                           className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-450 hover:text-gray-650 text-xs font-bold leading-none"
                         >
-                          ✕
+                          ?
                         </button>
                       )}
                     </div>
@@ -4045,7 +4003,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
 
                   {/* Quick Filter Pill Buttons */}
                   <div>
-                    <label className="text-[10px] font-bold text-gray-440 uppercase tracking-wider block mb-1.5">Filtro Rápido</label>
+                    <label className="text-[10px] font-bold text-gray-440 uppercase tracking-wider block mb-1.5">Filtro R?pido</label>
                     <div className="flex flex-wrap gap-1.5">
                       <button
                         type="button"
@@ -4114,7 +4072,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                   </div>
 
                   <div>
-                    <label className="text-[10px] font-bold text-gray-440 uppercase tracking-wider block mb-1">Filtrar por Fecha Exportación</label>
+                    <label className="text-[10px] font-bold text-gray-440 uppercase tracking-wider block mb-1">Filtrar por Fecha Exportaci?n</label>
                     <input
                       type="date"
                       value={invoicedDateFilter}
@@ -4182,7 +4140,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                             <span className="flex items-center gap-1.5 flex-wrap">
                               <ShieldCheck className="w-3.5 h-3.5 text-gray-450" />
                               <span className="font-bold text-indigo-700">
-                                {inv.count} {inv.count === 1 ? 'póliza' : 'pólizas'}
+                                {inv.count} {inv.count === 1 ? 'p?liza' : 'p?lizas'}
                               </span>
                             </span>
                             <span className="flex items-center gap-1.5 flex-wrap text-emerald-700 bg-emerald-50 border border-emerald-100/55 rounded px-1.5 py-0.5 font-bold w-fit mt-0.5">
@@ -4192,18 +4150,18 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                             {hasDbInvoice ? (
                               isExactMatch ? (
                                 <span className="mt-1 flex items-center gap-1 text-[9px] text-emerald-800 bg-emerald-50 rounded px-1.5 py-0.5 border border-emerald-200 font-bold w-fit">
-                                  ✓ Factura Correcta (${dbInv.amount.toLocaleString('en-US', { minimumFractionDigits: 2 })})
+                                  ? Factura Correcta (${dbInv.amount.toLocaleString('en-US', { minimumFractionDigits: 2 })})
                                 </span>
                               ) : isJustified ? (
                                 <span
                                   className="mt-1 flex items-center gap-1 text-[9px] text-emerald-800 bg-emerald-50 rounded px-1.5 py-0.5 border border-emerald-200 font-bold w-fit"
-                                  title={`Aprobado por Super Admin. Justificación: ${dbInv.justification || 'Sin justificación'}`}
+                                  title={`Aprobado por Super Admin. Justificaci?n: ${dbInv.justification || 'Sin justificaci?n'}`}
                                 >
-                                  ✓ OK Justificado (${dbInv.amount.toLocaleString('en-US', { minimumFractionDigits: 2 })})
+                                  ? OK Justificado (${dbInv.amount.toLocaleString('en-US', { minimumFractionDigits: 2 })})
                                 </span>
                               ) : (
                                 <span className="mt-1 flex items-center gap-1 text-[9px] text-rose-800 bg-rose-50 rounded px-1.5 py-0.5 border border-rose-200 font-bold w-fit animate-pulse">
-                                  ⚠️ Diferencia (${dbInv.amount.toLocaleString('en-US', { minimumFractionDigits: 2 })} vs ${totalCalculatedCost.toLocaleString('en-US', { minimumFractionDigits: 2 })})
+                                  ?? Diferencia (${dbInv.amount.toLocaleString('en-US', { minimumFractionDigits: 2 })} vs ${totalCalculatedCost.toLocaleString('en-US', { minimumFractionDigits: 2 })})
                                 </span>
                               )
                             ) : (
@@ -4264,10 +4222,10 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                         <div>
                           <div className="flex items-center gap-2">
                             <Receipt className="w-5 h-5 text-indigo-600" />
-                            <h3 className="font-bold text-sm text-gray-800">Factura Digital Adjunta - Cotejo Automático</h3>
+                            <h3 className="font-bold text-sm text-gray-800">Factura Digital Adjunta - Cotejo Autom?tico</h3>
                           </div>
                           <p className="text-[11px] text-gray-500 mt-1 leading-relaxed">
-                            Sube el PDF original o una imagen de la Factura de CareMed para el Invoice <strong className="font-bold whitespace-nowrap">{activeInvoice.invoiceNumber}</strong>. La IA de Gemini leerá el monto total facturado de forma automática y lo cotejará con el costo a pagar calculado en el sistema.
+                            Sube el PDF original o una imagen de la Factura de CareMed para el Invoice <strong className="font-bold whitespace-nowrap">{activeInvoice.invoiceNumber}</strong>. La IA de Gemini leer? el monto total facturado de forma autom?tica y lo cotejar? con el costo a pagar calculado en el sistema.
                           </p>
                         </div>
                         <div className="flex gap-2 shrink-0">
@@ -4303,7 +4261,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                             <button
                               onClick={() => handleDeleteEntireInvoice(activeInvoice.invoiceNumber)}
                               className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-xl text-xs font-bold transition-all shadow-2xs cursor-pointer flex items-center gap-1.5"
-                              title="Eliminar este invoice completo y desvincular sus pólizas"
+                              title="Eliminar este invoice completo y desvincular sus p?lizas"
                             >
                               <Trash2 className="w-3.5 h-3.5" />
                               <span className="hidden sm:inline">Eliminar Invoice</span>
@@ -4329,7 +4287,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                               />
                             </div>
                             <div>
-                              <label className="block text-[9px] uppercase font-bold text-gray-400 mb-1">Número de Invoice (Auto)</label>
+                              <label className="block text-[9px] uppercase font-bold text-gray-400 mb-1">N?mero de Invoice (Auto)</label>
                               <input
                                 type="text"
                                 disabled
@@ -4376,7 +4334,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
 
                         {batchInvoicesDb.length === 0 ? (
                           <div className="p-8 border border-dashed border-gray-150 rounded-2xl text-center text-xs text-amber-700 bg-amber-50/20 font-bold">
-                            ⚠️ Falta Adjuntar Factura: No se ha detectado ninguna factura digital/física adjunta para el Invoice <strong>{activeInvoice.invoiceNumber}</strong>. Sube el documento original (PDF/Imagen) o regístralo manualmente para que la IA realice el cotejo de costos automático.
+                            ?? Falta Adjuntar Factura: No se ha detectado ninguna factura digital/f?sica adjunta para el Invoice <strong>{activeInvoice.invoiceNumber}</strong>. Sube el documento original (PDF/Imagen) o reg?stralo manualmente para que la IA realice el cotejo de costos autom?tico.
                           </div>
                         ) : (
                           <div className="grid grid-cols-1 gap-3">
@@ -4393,7 +4351,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                       <h5 className="text-[10px] uppercase font-bold text-indigo-600">Editar Factura Adjunta</h5>
                                       <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
                                         <div>
-                                          <label className="block text-[9px] uppercase font-bold text-gray-400 mb-1">Número Invoice</label>
+                                          <label className="block text-[9px] uppercase font-bold text-gray-400 mb-1">N?mero Invoice</label>
                                           <input
                                             type="text"
                                             value={editInvoiceValues.number}
@@ -4421,7 +4379,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                           />
                                         </div>
                                         <div>
-                                          <label className="block text-[9px] uppercase font-bold text-gray-400 mb-1">Notas / Descripción</label>
+                                          <label className="block text-[9px] uppercase font-bold text-gray-400 mb-1">Notas / Descripci?n</label>
                                           <input
                                             type="text"
                                             value={editInvoiceValues.notes}
@@ -4453,10 +4411,10 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                             Invoice: <span className="font-extrabold">{inv.invoiceNumber}</span>
                                           </span>
                                           <span className="text-[10px] text-gray-450 font-semibold">
-                                            {inv.fileName || 'Entrada Manual'} • {inv.fileSize ? `${Math.round(inv.fileSize / 1024)} KB` : 'Sin archivo físico'}
+                                            {inv.fileName || 'Entrada Manual'} ? {inv.fileSize ? `${Math.round(inv.fileSize / 1024)} KB` : 'Sin archivo f?sico'}
                                           </span>
                                           {inv.simulated && (
-                                            <span className="px-1.5 py-0.2 bg-amber-50 text-amber-700 text-[8px] font-bold rounded border border-amber-200 animate-pulse">Test / Simulación IA</span>
+                                            <span className="px-1.5 py-0.2 bg-amber-50 text-amber-700 text-[8px] font-bold rounded border border-amber-200 animate-pulse">Test / Simulaci?n IA</span>
                                           )}
                                           {inv.invoiceDate && (
                                             <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-gray-100 text-gray-750 border border-gray-200 flex items-center gap-1">
@@ -4497,21 +4455,21 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                   <div className="p-3 bg-white border border-gray-100 rounded-2xl space-y-2">
                                     <div className="flex items-center justify-between text-[11px] font-medium text-gray-500">
                                       <span>Costo calculado en sistema para el invoice <strong className="text-gray-700 font-bold">{inv.invoiceNumber}</strong>:</span>
-                                      <span className="font-bold text-gray-900 bg-gray-50 px-2 py-0.5 rounded-lg border border-gray-100">${totalCalculatedCost.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD ({activeInvoice.count} pólizas)</span>
+                                      <span className="font-bold text-gray-900 bg-gray-50 px-2 py-0.5 rounded-lg border border-gray-100">${totalCalculatedCost.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD ({activeInvoice.count} p?lizas)</span>
                                     </div>
 
                                     <div className="flex items-center gap-2 pt-1">
                                       {isExactMatch ? (
                                         <div className="flex items-center gap-1.5 text-emerald-700 text-[10.5px] font-extrabold bg-emerald-50 border border-emerald-255 px-3 py-1.5 rounded-lg w-full">
                                           <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0" />
-                                          <span>✅ COTEJO PERFECTO: El importe de la factura adjunta coincide al 100% con el costo a pagar calculado en el sistema.</span>
+                                          <span>? COTEJO PERFECTO: El importe de la factura adjunta coincide al 100% con el costo a pagar calculado en el sistema.</span>
                                         </div>
                                       ) : inv.differenceJustified || inv.approved ? (
                                         <div className="flex flex-col gap-2 text-emerald-850 text-[10.5px] bg-emerald-50 border border-emerald-250 px-3 py-2.5 rounded-lg w-full font-semibold">
                                           <div className="flex items-center justify-between">
                                             <div className="flex items-center gap-1.5 font-extrabold text-emerald-800">
                                               <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                                              <span>✅ DIFERENCIA APROBADA (OK) POR ADMINISTRACIÓN</span>
+                                              <span>? DIFERENCIA APROBADA (OK) POR ADMINISTRACI?N</span>
                                             </div>
                                             {isSuperAdminOrDirector && (
                                               <div className="flex items-center gap-2">
@@ -4526,7 +4484,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                                   })}
                                                   className="text-[10px] text-emerald-700 underline font-bold hover:text-emerald-900 cursor-pointer"
                                                 >
-                                                  Editar Justificación
+                                                  Editar Justificaci?n
                                                 </button>
                                                 <button
                                                   onClick={() => handleRevokeJustification(inv.id, inv.invoiceNumber)}
@@ -4539,7 +4497,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                           </div>
                                           <div className="bg-white/80 p-2.5 rounded-lg border border-emerald-200 text-xs text-gray-700 font-normal space-y-1">
                                             <div className="flex items-center justify-between">
-                                              <span className="font-bold text-gray-900 text-[10px] uppercase text-emerald-800">Justificación:</span>
+                                              <span className="font-bold text-gray-900 text-[10px] uppercase text-emerald-800">Justificaci?n:</span>
                                               <span className="text-[10px] font-mono font-bold text-amber-850 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200">
                                                 Dif: {difference > 0 ? '+' : ''}${difference.toFixed(2)} USD
                                               </span>
@@ -4555,7 +4513,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                           <div className="flex items-center justify-between">
                                             <div className="flex items-center gap-1.5 font-extrabold text-rose-800">
                                               <AlertTriangle className="w-4 h-4 text-rose-600 animate-pulse shrink-0" />
-                                              <span>⚠️ ALERTA DE DISCREPANCIA DETECTADA</span>
+                                              <span>?? ALERTA DE DISCREPANCIA DETECTADA</span>
                                             </div>
                                             {isSuperAdminOrDirector && (
                                               <button
@@ -4568,7 +4526,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                                   justification: inv.justification || ''
                                                 })}
                                                 className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-black transition-all shadow-xs cursor-pointer inline-flex items-center gap-1.5 hover:scale-105"
-                                                title="Aprobar diferencia con justificación"
+                                                title="Aprobar diferencia con justificaci?n"
                                               >
                                                 <CheckCircle2 className="w-3.5 h-3.5" />
                                                 <span>Aprobar (OK)</span>
@@ -4625,7 +4583,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                             Asegurados Facturados en Invoice: {activeInvoice.invoiceNumber}
                           </div>
                           <div className="text-xs text-gray-550 mt-1 font-semibold">
-                            Total: <span className="font-bold text-indigo-700">{activeInvoice.count} pólizas</span> • Costo total a pagar calculado: <span className="font-bold text-emerald-700">${activeInvoice.totalCalculatedCost.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD</span>
+                            Total: <span className="font-bold text-indigo-700">{activeInvoice.count} p?lizas</span> ? Costo total a pagar calculado: <span className="font-bold text-emerald-700">${activeInvoice.totalCalculatedCost.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD</span>
                           </div>
                         </div>
                         <button
@@ -4642,18 +4600,18 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                       <div className="overflow-x-auto">
                         {invoicedBatchPolicies.length === 0 ? (
                           <div className="p-8 text-center text-gray-400 text-xs font-bold">
-                            No hay pólizas que coincidan con la búsqueda en este invoice.
+                            No hay p?lizas que coincidan con la b?squeda en este invoice.
                           </div>
                         ) : (
                           <table className="w-full text-left text-xs border-collapse">
                             <thead>
                               <tr className="bg-gray-50/50 text-[10px] uppercase font-bold text-gray-400 tracking-wider border-b border-gray-100">
                                 <th className="px-4 py-3">Asegurado/Invoice</th>
-                                <th className="px-4 py-3">Plan/Póliza</th>
-                                <th className="px-4 py-3">Días</th>
-                                <th className="px-4 py-3">Costo Día</th>
+                                <th className="px-4 py-3">Plan/P?liza</th>
+                                <th className="px-4 py-3">D?as</th>
+                                <th className="px-4 py-3">Costo D?a</th>
                                 <th className="px-4 py-3">Costo Total</th>
-                                <th className="px-4 py-3 text-right">Acción</th>
+                                <th className="px-4 py-3 text-right">Acci?n</th>
                               </tr>
                             </thead>
                             <tbody className="divide-y divide-gray-100">
@@ -4675,7 +4633,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                               handleDuplicatePolicy(i);
                                             }}
                                             className="p-0.5 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded transition-all cursor-pointer inline-flex items-center"
-                                            title="Duplicar datos básicos a nueva póliza (Agente/Corporativo/Individual, Nombre, Apellido, Fecha de nacimiento)"
+                                            title="Duplicar datos b?sicos a nueva p?liza (Agente/Corporativo/Individual, Nombre, Apellido, Fecha de nacimiento)"
                                           >
                                             <Copy className="w-3 h-3" />
                                           </button>
@@ -4689,7 +4647,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                           {i.InvoiceCaremed && (
                                             <button
                                               onClick={() => {
-                                                if(confirm(`¿Estás seguro de eliminar el Invoice "${i.InvoiceCaremed}" de esta póliza?`)) {
+                                                if(confirm(`?Est?s seguro de eliminar el Invoice "${i.InvoiceCaremed}" de esta p?liza?`)) {
                                                   handleRemoveInvoiceCaremed(i.id!);
                                                 }
                                               }}
@@ -4705,13 +4663,13 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                     <td className="px-4 py-3.5">
                                       <div className="flex flex-col gap-0.5">
                                         <span className="font-bold text-indigo-600 uppercase tracking-tighter text-xs">{i.plan}{policyName ? ` - ${policyName}` : ''}</span>
-                                        <span className="text-[10px] text-gray-500 font-semibold">Póliza: {i.policyId || i.policyNumber || '-'}</span>
+                                        <span className="text-[10px] text-gray-500 font-semibold">P?liza: {i.policyId || i.policyNumber || '-'}</span>
                                       </div>
                                     </td>
                                     <td className="px-4 py-3.5">
                                       <div className="flex flex-col">
                                         <span className="font-bold text-gray-800 text-xs">{i.days}</span>
-                                        <span className="text-[10px] text-gray-400">días</span>
+                                        <span className="text-[10px] text-gray-400">d?as</span>
                                       </div>
                                     </td>
                                     <td className="px-4 py-3.5">
@@ -4724,7 +4682,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                       <button
                                         onClick={() => setSelectedInsuranceForDetail(i)}
                                         className="inline-flex items-center gap-1.5 p-1.5 text-blue-600 hover:text-white hover:bg-blue-600 rounded-lg border border-blue-100 hover:border-blue-600 transition-all cursor-pointer"
-                                        title="Ver detalles completos de la póliza"
+                                        title="Ver detalles completos de la p?liza"
                                       >
                                         <Eye className="w-3.5 h-3.5" />
                                       </button>
@@ -4747,7 +4705,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
             <div className="space-y-6 animate-in fade-in duration-300">
               {/* Indicadores de Negocio (Clickable Filter Cards) */}
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-3">
-                {/* 1. Número de Invoices */}
+                {/* 1. N?mero de Invoices */}
                 <button
                   type="button"
                   onClick={() => setInvoiceListCorrectFilter('all')}
@@ -4764,10 +4722,10 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                   <p className="text-xl font-black text-gray-900">{invoiceListMetrics.numInvoices}</p>
                 </button>
 
-                {/* 2. Número de Pólizas */}
+                {/* 2. N?mero de P?lizas */}
                 <div className="bg-white rounded-2xl p-4 border border-gray-100 shadow-sm flex flex-col justify-between hover:border-blue-200 transition-all">
                   <div className="flex items-center justify-between text-blue-600 mb-1">
-                    <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400">Número de Pólizas</span>
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400">N?mero de P?lizas</span>
                     <ShieldCheck className="w-4 h-4" />
                   </div>
                   <p className="text-xl font-black text-gray-900">{invoiceListMetrics.numPolicies}</p>
@@ -4862,10 +4820,10 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                       </h3>
                       <p className="text-xs text-gray-500 mt-0.5">
                         {invoiceListCorrectFilter === 'all' && 'Mostrando todos los invoices registrados en el sistema.'}
-                        {invoiceListCorrectFilter === 'pending' && 'Mostrando únicamente facturas pendientes (sin factura digital o con diferencia no justificada).'}
-                        {invoiceListCorrectFilter === 'incorrect' && 'Mostrando únicamente facturas con diferencia de importe.'}
-                        {invoiceListCorrectFilter === 'no_invoice' && 'Mostrando únicamente pólizas e invoices sin factura adjunta.'}
-                        {invoiceListCorrectFilter === 'correct' && 'Mostrando únicamente facturas 100% coincidentes con el sistema.'}
+                        {invoiceListCorrectFilter === 'pending' && 'Mostrando ?nicamente facturas pendientes (sin factura digital o con diferencia no justificada).'}
+                        {invoiceListCorrectFilter === 'incorrect' && 'Mostrando ?nicamente facturas con diferencia de importe.'}
+                        {invoiceListCorrectFilter === 'no_invoice' && 'Mostrando ?nicamente p?lizas e invoices sin factura adjunta.'}
+                        {invoiceListCorrectFilter === 'correct' && 'Mostrando ?nicamente facturas 100% coincidentes con el sistema.'}
                         {invoiceListCorrectFilter === 'justified' && 'Mostrando facturas con diferencias justificadas y aprobadas.'}
                       </p>
                     </div>
@@ -4889,7 +4847,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
 
                   {/* Quick Pill Filter Buttons Bar */}
                   <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-gray-200/60">
-                    <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mr-1">Filtro Rápido:</span>
+                    <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mr-1">Filtro R?pido:</span>
                     <button
                       type="button"
                       onClick={() => setInvoiceListCorrectFilter('all')}
@@ -4970,7 +4928,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                             onClick={() => setInvoicedSearchTerm('')}
                             className="absolute right-2.5 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600 text-xs"
                           >
-                            ✕
+                            ?
                           </button>
                         )}
                       </div>
@@ -5005,7 +4963,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                         className="w-full px-2.5 py-1.5 bg-white border border-gray-200 focus:ring-2 focus:ring-indigo-500 rounded-xl outline-none text-xs text-gray-800 font-semibold"
                       >
                         <option value="all">Todas</option>
-                        <option value="paid">Sí (Pagadas)</option>
+                        <option value="paid">S? (Pagadas)</option>
                         <option value="not_paid">No (Sin Pagar)</option>
                         <option value="partial">Parcial</option>
                       </select>
@@ -5020,7 +4978,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                         className="w-full px-2.5 py-1.5 bg-white border border-gray-200 focus:ring-2 focus:ring-indigo-500 rounded-xl outline-none text-xs text-gray-800 font-semibold"
                       >
                         <option value="all">Todos los Invoices</option>
-                        <option value="pending">Solo Pendientes (Acción requerida)</option>
+                        <option value="pending">Solo Pendientes (Acci?n requerida)</option>
                         <option value="incorrect">Solo con Diferencia</option>
                         <option value="no_invoice">Solo Sin Factura Adjunta</option>
                         <option value="correct">Solo Facturas Correctas</option>
@@ -5037,10 +4995,10 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                           onChange={(e) => setInvoiceListSortField(e.target.value as any)}
                           className="w-full px-2 py-1.5 bg-white border border-gray-200 focus:ring-2 focus:ring-indigo-500 rounded-xl outline-none text-xs text-gray-800 font-semibold"
                         >
-                          <option value="exportDate">Fecha Exportación</option>
+                          <option value="exportDate">Fecha Exportaci?n</option>
                           <option value="invoiceDate">Fecha Invoice</option>
-                          <option value="invoiceNumber">Número Invoice</option>
-                          <option value="policyCount">No. Pólizas</option>
+                          <option value="invoiceNumber">N?mero Invoice</option>
+                          <option value="policyCount">No. P?lizas</option>
                           <option value="totalCalculatedCost">Monto Sistema</option>
                           <option value="difference">Diferencia</option>
                         </select>
@@ -5061,7 +5019,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                   <table className="w-full text-left text-xs border-collapse">
                     <thead>
                       <tr className="bg-gray-50 text-[10px] uppercase font-bold text-gray-500 tracking-wider border-b border-gray-150 select-none">
-                        {/* Header: Fecha de Exportación */}
+                        {/* Header: Fecha de Exportaci?n */}
                         <th
                           onClick={() => {
                             if (invoiceListSortField === 'exportDate') {
@@ -5074,7 +5032,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                           className="px-6 py-4 cursor-pointer hover:bg-gray-100/60 transition-colors"
                         >
                           <div className="flex items-center gap-1.5">
-                            <span>Fecha de Exportación</span>
+                            <span>Fecha de Exportaci?n</span>
                             {invoiceListSortField === 'exportDate' ? (
                               invoiceListSortOrder === 'asc' ? <ArrowUp className="w-3 h-3 text-indigo-600" /> : <ArrowDown className="w-3 h-3 text-indigo-600" />
                             ) : (
@@ -5105,7 +5063,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                           </div>
                         </th>
 
-                        {/* Header: Número de Invoice */}
+                        {/* Header: N?mero de Invoice */}
                         <th
                           onClick={() => {
                             if (invoiceListSortField === 'invoiceNumber') {
@@ -5118,7 +5076,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                           className="px-6 py-4 cursor-pointer hover:bg-gray-100/60 transition-colors"
                         >
                           <div className="flex items-center gap-1.5">
-                            <span>Número de Invoice</span>
+                            <span>N?mero de Invoice</span>
                             {invoiceListSortField === 'invoiceNumber' ? (
                               invoiceListSortOrder === 'asc' ? <ArrowUp className="w-3 h-3 text-indigo-600" /> : <ArrowDown className="w-3 h-3 text-indigo-600" />
                             ) : (
@@ -5127,7 +5085,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                           </div>
                         </th>
 
-                        {/* Header: Número de Pólizas */}
+                        {/* Header: N?mero de P?lizas */}
                         <th
                           onClick={() => {
                             if (invoiceListSortField === 'policyCount') {
@@ -5140,7 +5098,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                           className="px-6 py-4 text-center cursor-pointer hover:bg-gray-100/60 transition-colors"
                         >
                           <div className="flex items-center justify-center gap-1.5">
-                            <span>Número de Pólizas</span>
+                            <span>N?mero de P?lizas</span>
                             {invoiceListSortField === 'policyCount' ? (
                               invoiceListSortOrder === 'asc' ? <ArrowUp className="w-3 h-3 text-indigo-600" /> : <ArrowDown className="w-3 h-3 text-indigo-600" />
                             ) : (
@@ -5222,14 +5180,14 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                   >
                                     <Plus className="w-2.5 h-2.5" /> Sin Factura
                                   </button>
-                                ) : item.isCorrect === 'Sí' ? (
+                                ) : item.isCorrect === 'S?' ? (
                                   <span className="px-2.5 py-1 rounded-full text-[10px] font-black bg-emerald-50 text-emerald-700 border border-emerald-100">
-                                    Sí
+                                    S?
                                   </span>
                                 ) : item.isJustified ? (
                                   <span
                                     className="px-2.5 py-1 rounded-full text-[10px] font-black bg-emerald-50 text-emerald-700 border border-emerald-200 inline-flex items-center gap-1 cursor-help"
-                                    title={`Aprobado por Super Admin. Justificación: ${item.justification || 'Sin justificación'}`}
+                                    title={`Aprobado por Super Admin. Justificaci?n: ${item.justification || 'Sin justificaci?n'}`}
                                   >
                                     <CheckCircle2 className="w-3 h-3 text-emerald-600" /> OK Justificado
                                   </span>
@@ -5254,9 +5212,9 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                 )}
                               </td>
                               <td className="px-6 py-4 text-center">
-                                {item.isPaid === 'Sí' ? (
+                                {item.isPaid === 'S?' ? (
                                   <span className="px-2.5 py-1 rounded-full text-[10px] font-black bg-emerald-50 text-emerald-700 border border-emerald-100">
-                                    Sí
+                                    S?
                                   </span>
                                 ) : item.isPaid === 'Parcial' ? (
                                   <span className="px-2.5 py-1 rounded-full text-[10px] font-black bg-amber-50 text-amber-700 border border-amber-100">
@@ -5269,7 +5227,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                 )}
                               </td>
                               <td className="px-6 py-4 text-center">
-                                {item.isPaid === 'Sí' || item.isPaid === 'Parcial' ? (
+                                {item.isPaid === 'S?' || item.isPaid === 'Parcial' ? (
                                   <span className="font-semibold text-gray-800">{item.paymentDate}</span>
                                 ) : (
                                   <span className="text-gray-400 italic">-</span>
@@ -5284,7 +5242,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                         handleOpenJustifyModal(item);
                                       }}
                                       className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-black transition-all shadow-xs cursor-pointer inline-flex items-center gap-1.5 hover:scale-105"
-                                      title="Aprobar diferencia con justificación (Super Administrador) para retirar del listado de pendientes"
+                                      title="Aprobar diferencia con justificaci?n (Super Administrador) para retirar del listado de pendientes"
                                     >
                                       <CheckCircle2 className="w-3.5 h-3.5" />
                                       <span>OK</span>
@@ -5298,7 +5256,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                         handleOpenJustifyModal(item);
                                       }}
                                       className="px-2.5 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded-xl text-xs font-bold transition-all shadow-xs cursor-pointer inline-flex items-center gap-1"
-                                      title={`Justificación: "${item.justification}". Clic para ver o editar`}
+                                      title={`Justificaci?n: "${item.justification}". Clic para ver o editar`}
                                     >
                                       <CheckCircle2 className="w-3 h-3 text-emerald-600" />
                                       <span>Ver OK</span>
@@ -5353,7 +5311,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                           handleDeleteEntireInvoice(item.invoiceNumber);
                                         }}
                                         className="p-1.5 px-2 text-rose-600 hover:text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-xl text-xs font-bold transition-all shadow-2xs cursor-pointer inline-flex items-center gap-1"
-                                        title="Eliminar invoice completo y desvincular pólizas"
+                                        title="Eliminar invoice completo y desvincular p?lizas"
                                       >
                                         <Trash2 className="w-3.5 h-3.5" />
                                         <span className="hidden sm:inline">Borrar Invoice</span>
@@ -5375,7 +5333,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
             <div className="space-y-6 animate-in fade-in duration-300">
               {/* 1. Dynamic Business Indicators (Clickable Filter Cards) */}
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-                {/* Total Pólizas */}
+                {/* Total P?lizas */}
                 <button
                   type="button"
                   onClick={() => setInvoiceDetailCorrectFilter('all')}
@@ -5386,16 +5344,16 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                   }`}
                 >
                   <div className="flex items-center justify-between text-blue-600 mb-1">
-                    <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400">Total Pólizas</span>
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400">Total P?lizas</span>
                     <ShieldCheck className="w-4 h-4" />
                   </div>
                   <p className="text-xl font-black text-gray-900">{detailedMetrics.totalPolicies}</p>
                 </button>
 
-                {/* Invoices Únicos */}
+                {/* Invoices ?nicos */}
                 <div className="bg-white rounded-2xl p-4 border border-gray-100 shadow-sm flex flex-col justify-between hover:border-indigo-200 transition-all">
                   <div className="flex items-center justify-between text-indigo-600 mb-1">
-                    <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400">Invoices Únicos</span>
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400">Invoices ?nicos</span>
                     <FileSpreadsheet className="w-4 h-4" />
                   </div>
                   <p className="text-xl font-black text-gray-900">{detailedMetrics.uniqueInvoices}</p>
@@ -5475,10 +5433,10 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                     <div>
                       <h3 className="font-black text-base text-gray-900 flex items-center gap-2">
                         <List className="w-5 h-5 text-indigo-600" />
-                        Detalle de Pólizas por Invoice CareMed
+                        Detalle de P?lizas por Invoice CareMed
                       </h3>
                       <p className="text-xs text-gray-500 mt-0.5">
-                        Reporte y listado concentrado de pólizas e invoices con fechas, códigos de póliza, recuento e importes.
+                        Reporte y listado concentrado de p?lizas e invoices con fechas, c?digos de p?liza, recuento e importes.
                       </p>
                     </div>
 
@@ -5535,12 +5493,12 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
 
                   {/* Filter Toolbar */}
                   <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 pt-2">
-                    {/* Búsqueda */}
+                    {/* B?squeda */}
                     <div className="relative">
                       <Search className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
                       <input
                         type="text"
-                        placeholder="Buscar Invoice, Póliza, Asegurado..."
+                        placeholder="Buscar Invoice, P?liza, Asegurado..."
                         value={invoiceDetailSearchTerm}
                         onChange={(e) => setInvoiceDetailSearchTerm(e.target.value)}
                         className="w-full pl-9 pr-8 py-2 bg-white border border-gray-200 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none transition-all"
@@ -5596,7 +5554,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                         <option value="corporates">Solo Corporativos</option>
                         <option value="individuals">Solo Individuales</option>
                         {clients && clients.length > 0 && (
-                          <optgroup label="Agentes y Empresas Específicos">
+                          <optgroup label="Agentes y Empresas Espec?ficos">
                             {[...clients]
                               .sort((a, b) => (a.name || a.company || '').localeCompare(b.name || b.company || ''))
                               .map(cl => (
@@ -5617,8 +5575,8 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                         className="w-full py-2 px-3 bg-white border border-gray-200 rounded-xl text-xs text-gray-700 focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none transition-all cursor-pointer"
                       >
                         <option value="all">Factura Correcta: Todos</option>
-                        <option value="correct">✓ Factura Correcta</option>
-                        <option value="discrepancy">⚠️ Con Diferencia</option>
+                        <option value="correct">? Factura Correcta</option>
+                        <option value="discrepancy">?? Con Diferencia</option>
                         <option value="no_invoice">Sin Factura Adjunta</option>
                       </select>
                     </div>
@@ -5634,13 +5592,13 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                         }}
                         className="w-full py-2 px-3 bg-white border border-gray-200 rounded-xl text-xs text-gray-700 focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none transition-all cursor-pointer"
                       >
-                        <option value="invoiceDate_desc">Fecha Invoice (Más reciente)</option>
-                        <option value="invoiceDate_asc">Fecha Invoice (Más antigua)</option>
-                        <option value="invoiceNumber_asc">Nº Invoice (A - Z)</option>
-                        <option value="invoiceNumber_desc">Nº Invoice (Z - A)</option>
+                        <option value="invoiceDate_desc">Fecha Invoice (M?s reciente)</option>
+                        <option value="invoiceDate_asc">Fecha Invoice (M?s antigua)</option>
+                        <option value="invoiceNumber_asc">N? Invoice (A - Z)</option>
+                        <option value="invoiceNumber_desc">N? Invoice (Z - A)</option>
                         <option value="amount_desc">Cantidad (Mayor a menor)</option>
                         <option value="amount_asc">Cantidad (Menor a mayor)</option>
-                        <option value="policyNumber_asc">Código Póliza (A - Z)</option>
+                        <option value="policyNumber_asc">C?digo P?liza (A - Z)</option>
                       </select>
 
                       {(invoiceDetailSearchTerm || invoiceDetailDateRange.start || invoiceDetailDateRange.end || invoiceDetailAgentFilter !== 'all' || invoiceDetailCorrectFilter !== 'all') && (
@@ -5746,7 +5704,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                               <div className="flex flex-col items-center justify-center gap-1.5">
                                 <FileSpreadsheet className="w-6 h-6 text-gray-300" />
                                 <p className="font-bold text-gray-600 text-xs">No se encontraron registros con los filtros seleccionados.</p>
-                                <p className="text-[10px] text-gray-400">Intenta ajustar o limpiar los filtros de búsqueda y fechas.</p>
+                                <p className="text-[10px] text-gray-400">Intenta ajustar o limpiar los filtros de b?squeda y fechas.</p>
                               </div>
                             </td>
                           </tr>
@@ -5766,7 +5724,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                           setInvoiceSubTab('cotejo');
                                         }}
                                         className="font-mono font-black text-[10px] text-indigo-700 hover:text-indigo-900 hover:underline inline-flex items-center gap-1 group"
-                                        title="Ir a Cotejo Automático de este Invoice"
+                                        title="Ir a Cotejo Autom?tico de este Invoice"
                                       >
                                         <Receipt className="w-3 h-3 text-indigo-500 group-hover:scale-110 transition-transform" />
                                         <span>{group.invoiceNumber}</span>
@@ -5778,7 +5736,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                           title={`Diferencia aprobada por Super Admin:\n"${group.justification}" (Facturado: $${(group.invoiceAmount || 0).toFixed(2)} USD vs Sistema Total: $${group.invoiceSystemTotal.toFixed(2)} USD)`}
                                         >
                                           <CheckCircle className="w-2.5 h-2.5 text-blue-700 shrink-0" />
-                                          <span>✓ OK Justificado</span>
+                                          <span>? OK Justificado</span>
                                         </span>
                                       ) : group.hasDifference ? (
                                         <span
@@ -5801,12 +5759,12 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                           title={`Factura correcta: $${(group.invoiceAmount || 0).toFixed(2)} USD coincide con el sistema`}
                                         >
                                           <CheckCircle className="w-2.5 h-2.5 text-emerald-600 shrink-0" />
-                                          <span>✓ Coincide</span>
+                                          <span>? Coincide</span>
                                         </span>
                                       )}
                                     </div>
                                     {Math.abs(group.invoiceSystemTotal - group.amount) > 0.01 && (
-                                      <div className="text-[8.5px] font-normal text-gray-400 mt-0.5" title={`Total del Invoice completo (todos los códigos): $${group.invoiceSystemTotal.toFixed(2)} USD`}>
+                                      <div className="text-[8.5px] font-normal text-gray-400 mt-0.5" title={`Total del Invoice completo (todos los c?digos): $${group.invoiceSystemTotal.toFixed(2)} USD`}>
                                         Total Invoice: <span className="font-semibold text-gray-600">${group.invoiceSystemTotal.toFixed(2)} USD</span>
                                       </div>
                                     )}
@@ -5831,7 +5789,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                   <td className="px-3 py-1.5 text-center whitespace-nowrap">
                                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200">
                                       <Users className="w-2.5 h-2.5" />
-                                      <span>{group.policyCount} {group.policyCount === 1 ? 'póliza' : 'pólizas'}</span>
+                                      <span>{group.policyCount} {group.policyCount === 1 ? 'p?liza' : 'p?lizas'}</span>
                                     </span>
                                   </td>
 
@@ -5856,7 +5814,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                       }`}
                                       title={isExpanded ? 'Ocultar desglose' : 'Ver desglose de asegurados'}
                                     >
-                                      <span>{isExpanded ? 'Ocultar' : 'Ver Pólizas'}</span>
+                                      <span>{isExpanded ? 'Ocultar' : 'Ver P?lizas'}</span>
                                       {isExpanded ? <ChevronUp className="w-2.5 h-2.5" /> : <ChevronDown className="w-2.5 h-2.5" />}
                                     </button>
                                   </td>
@@ -5869,7 +5827,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                       <div className="bg-white rounded-lg border border-indigo-100 shadow-2xs p-2.5 space-y-1.5">
                                         <div className="flex items-center justify-between pb-1.5 border-b border-gray-100">
                                           <span className="text-[9px] font-black text-gray-700 uppercase tracking-wide">
-                                            Pólizas individuales en Invoice {group.invoiceNumber} - Código {group.policyCode} ({group.policies.length})
+                                            P?lizas individuales en Invoice {group.invoiceNumber} - C?digo {group.policyCode} ({group.policies.length})
                                           </span>
                                         </div>
                                         <div className="divide-y divide-gray-100 text-[10px]">
@@ -5884,7 +5842,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                                     <span className="px-1 py-0.2 rounded text-[8px] font-black bg-rose-100 text-rose-700">CAN</span>
                                                   )}
                                                   <span className="font-semibold text-gray-900">{pItem.insuredFullName}</span>
-                                                  <span className="text-gray-400 text-[9px]">• {pItem.clientName}</span>
+                                                  <span className="text-gray-400 text-[9px]">? {pItem.clientName}</span>
                                                   {pIns.IDseg && pIns.IDseg !== pItem.policyNumber && (
                                                     <span className="text-indigo-600 font-mono text-[9px]">ID Seg: {pIns.IDseg}</span>
                                                   )}
@@ -5896,7 +5854,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                                   <button
                                                     onClick={() => setSelectedInsuranceForDetail(pIns)}
                                                     className="p-0.5 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded"
-                                                    title="Ver póliza"
+                                                    title="Ver p?liza"
                                                   >
                                                     <Eye className="w-3 h-3" />
                                                   </button>
@@ -5997,8 +5955,8 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                             <td colSpan={6} className="px-6 py-12 text-center text-gray-400">
                               <div className="flex flex-col items-center justify-center gap-2">
                                 <FileSpreadsheet className="w-8 h-8 text-gray-300" />
-                                <p className="font-bold text-gray-600 text-sm">No se encontraron pólizas con los filtros seleccionados.</p>
-                                <p className="text-xs text-gray-400">Intenta ajustar o limpiar los filtros de búsqueda y fechas.</p>
+                                <p className="font-bold text-gray-600 text-sm">No se encontraron p?lizas con los filtros seleccionados.</p>
+                                <p className="text-xs text-gray-400">Intenta ajustar o limpiar los filtros de b?squeda y fechas.</p>
                               </div>
                             </td>
                           </tr>
@@ -6018,7 +5976,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                         setInvoiceSubTab('cotejo');
                                       }}
                                       className="font-mono font-black text-indigo-700 hover:text-indigo-900 hover:underline inline-flex items-center gap-1.5 group"
-                                      title="Ir a Cotejo Automático de este Invoice"
+                                      title="Ir a Cotejo Autom?tico de este Invoice"
                                     >
                                       <Receipt className="w-3.5 h-3.5 text-indigo-500 group-hover:scale-110 transition-transform" />
                                       <span>{item.invoiceNumber}</span>
@@ -6076,7 +6034,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                         title={`Diferencia justificada y aprobada por Super Admin:\n"${item.justification}"\n(Factura: $${item.dbInvoiceAmount.toFixed(2)} vs Total Sistema: $${item.totalInvoiceCost.toFixed(2)})`}
                                       >
                                         <CheckCircle className="w-3 h-3 text-blue-700" />
-                                        <span>✓ OK Justificado</span>
+                                        <span>? OK Justificado</span>
                                       </span>
                                       <span className="text-[9px] font-mono font-bold text-blue-700 mt-0.5">
                                         {item.difference > 0 ? '+' : ''}${item.difference.toFixed(2)} USD
@@ -6085,13 +6043,13 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                   ) : item.correctnessStatus === 'correct' ? (
                                     <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-black bg-emerald-50 text-emerald-700 border border-emerald-200 shadow-2xs">
                                       <CheckCircle className="w-3 h-3 text-emerald-600" />
-                                      <span>✓ Correcta</span>
+                                      <span>? Correcta</span>
                                     </span>
                                   ) : item.correctnessStatus === 'discrepancy' ? (
                                     <div className="inline-flex flex-col items-center">
                                       <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-black bg-rose-50 text-rose-700 border border-rose-200 shadow-2xs">
                                         <AlertTriangle className="w-3 h-3 text-rose-600" />
-                                        <span>⚠️ Diferencia</span>
+                                        <span>?? Diferencia</span>
                                       </span>
                                       <span className="text-[9px] font-mono font-bold text-rose-600 mt-0.5">
                                         {item.difference > 0 ? '+' : ''}${item.difference.toFixed(2)} USD
@@ -6104,7 +6062,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                         setInvoiceSubTab('cotejo');
                                       }}
                                       className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 transition-colors"
-                                      title="Click para adjuntar factura en Cotejo Automático"
+                                      title="Click para adjuntar factura en Cotejo Autom?tico"
                                     >
                                       <Clock className="w-3 h-3 text-amber-600" />
                                       <span>Sin Factura Adjunta</span>
@@ -6117,7 +6075,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                   <button
                                     onClick={() => setSelectedInsuranceForDetail(ins)}
                                     className="p-1.5 text-gray-500 hover:text-indigo-600 hover:bg-indigo-50 border border-gray-200 rounded-lg transition-all"
-                                    title="Ver detalle completo de la póliza"
+                                    title="Ver detalle completo de la p?liza"
                                   >
                                     <Eye className="w-3.5 h-3.5" />
                                   </button>
@@ -6136,11 +6094,11 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                   <div className="flex items-center gap-2">
                     {invoiceDetailViewMode === 'concentrated' ? (
                       <span className="font-bold text-gray-700">
-                        Mostrando {concentratedPoliciesData.length} registros concentrados ({detailedMetrics.totalPolicies} pólizas en {detailedMetrics.uniqueInvoices} invoices)
+                        Mostrando {concentratedPoliciesData.length} registros concentrados ({detailedMetrics.totalPolicies} p?lizas en {detailedMetrics.uniqueInvoices} invoices)
                       </span>
                     ) : (
                       <span className="font-bold text-gray-700">
-                        Mostrando {detailedInvoicedPolicies.length} de {insurances.filter(i => !!i.InvoiceCaremed).length} pólizas facturadas ({detailedMetrics.uniqueInvoices} invoices distintos)
+                        Mostrando {detailedInvoicedPolicies.length} de {insurances.filter(i => !!i.InvoiceCaremed).length} p?lizas facturadas ({detailedMetrics.uniqueInvoices} invoices distintos)
                       </span>
                     )}
                   </div>
@@ -6248,7 +6206,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
               onChange={(e) => setActionTypeFilter(e.target.value)}
               className="bg-gray-50 border border-gray-200 rounded-lg px-4 py-2 outline-none focus:ring-2 focus:ring-blue-500 text-sm font-bold text-gray-700"
             >
-              <option value="all">Tipos de Acción (Todos)</option>
+              <option value="all">Tipos de Acci?n (Todos)</option>
               {actionTypes.map(at => (
                 <option key={at.action} value={at.action}>{at.action} - {at.name}</option>
               ))}
@@ -6317,7 +6275,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
             </div>
 
             <div className="flex items-center gap-3 bg-gray-50 px-3 py-1.5 rounded-lg border border-gray-200">
-              <span className="text-xs text-gray-500 font-bold uppercase tracking-wider">Vigencia Póliza</span>
+              <span className="text-xs text-gray-500 font-bold uppercase tracking-wider">Vigencia P?liza</span>
               <div className="flex items-center gap-1.5">
                 <Calendar className="w-3.5 h-3.5 text-gray-400" />
                 <input 
@@ -6370,7 +6328,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 animate-in fade-in duration-300">
           <div className="bg-white rounded-2xl p-5 border border-gray-100 shadow-sm hover:shadow-md transition-all flex items-center justify-between">
             <div className="space-y-1">
-              <h4 className="text-[10px] font-black uppercase text-gray-400 tracking-wider">Pólizas Filtradas</h4>
+              <h4 className="text-[10px] font-black uppercase text-gray-400 tracking-wider">P?lizas Filtradas</h4>
               <p className="text-2xl font-black text-gray-900">{summaryStats.count}</p>
               <p className="text-[9px] font-semibold text-gray-450">Bajo los criterios seleccionados</p>
             </div>
@@ -6410,7 +6368,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
           {profile?.role !== 'client' && (
             <div className="bg-white rounded-2xl p-5 border border-gray-100 shadow-sm hover:shadow-md transition-all flex items-center justify-between">
               <div className="space-y-1 text-left">
-                <h4 className="text-[10px] font-black uppercase text-gray-400 tracking-wider">Comisión</h4>
+                <h4 className="text-[10px] font-black uppercase text-gray-400 tracking-wider">Comisi?n</h4>
                 <p className="text-2xl font-black text-indigo-600">
                   ${summaryStats.comisiones.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} <span className="text-[10px] font-bold text-gray-400">USD</span>
                 </p>
@@ -6434,14 +6392,14 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
             <div>
               <div className="flex items-center gap-2">
                 <h4 className="text-sm font-bold text-blue-950">
-                  Pólizas Pendientes de Exportación CareMed
+                  P?lizas Pendientes de Exportaci?n CareMed
                 </h4>
                 <span className="px-2 py-0.5 bg-blue-200 text-blue-800 text-[10px] font-black rounded-full uppercase">
                   {filteredInsurances.length} pendientes
                 </span>
               </div>
               <p className="text-xs text-blue-700 font-medium mt-0.5">
-                Seleccione en las filas las pólizas que desea exportar y haga clic en <strong>Exportar CareMed</strong> para generar el archivo y registrarlas.
+                Seleccione en las filas las p?lizas que desea exportar y haga clic en <strong>Exportar CareMed</strong> para generar el archivo y registrarlas.
               </p>
             </div>
           </div>
@@ -6468,8 +6426,8 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                 <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
                 <span>
                   {selectedExportedCount === selectedInsuranceIds.length
-                    ? 'Pólizas ya exportadas (botón CareMed oculto)'
-                    : `${selectedExportedCount} ${selectedExportedCount === 1 ? 'póliza ya exportada' : 'pólizas ya exportadas'} seleccionada(s) (CareMed oculto)`
+                    ? 'P?lizas ya exportadas (bot?n CareMed oculto)'
+                    : `${selectedExportedCount} ${selectedExportedCount === 1 ? 'p?liza ya exportada' : 'p?lizas ya exportadas'} seleccionada(s) (CareMed oculto)`
                   }
                 </span>
               </div>
@@ -6477,7 +6435,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
             <button
               onClick={() => setCaremedExportedFilter('all')}
               className="px-3 py-1.5 text-xs text-blue-600 hover:text-blue-900 font-bold hover:bg-blue-100 rounded-xl transition-all cursor-pointer"
-              title="Restablecer filtro a todas las pólizas"
+              title="Restablecer filtro a todas las p?lizas"
             >
               Ver Todas
             </button>
@@ -6488,11 +6446,11 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
       <div className="space-y-4">
         {loading ? (
           <div className="bg-white p-12 rounded-2xl border border-gray-100 text-center text-gray-400">
-            Cargando pólizas...
+            Cargando p?lizas...
           </div>
         ) : filteredInsurances.length === 0 ? (
           <div className="bg-white p-12 rounded-2xl border border-gray-100 text-center text-gray-400">
-            No se encontraron pólizas.
+            No se encontraron p?lizas.
           </div>
         ) : (
           <>
@@ -6500,30 +6458,26 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
               <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
                 {paginatedInsurances.map((i) => {
               const requestDate = i.createdAt?.toDate ? i.createdAt.toDate() : new Date(i.createdAt);
-              const policy = policyMap.get(i.policyId);
-              const plan = i.plan || policy?.plan || (i.policyId ? i.policyId.split('-')[0] : '');
+              const policy = policies.find(p => p.id === i.policyId);
+              const plan = i.plan || policy?.plan || i.policyId.split('-')[0];
               const policyName = i.policyName || policy?.name || '';
               
-              const mul = 1;
-              const finalPrice = getInsuranceFinalPrice(i);
-              const totalPaid = i.totalPaid || 0;
-              const balanceToPay = finalPrice - totalPaid;
-              const displayStatus = getInsuranceDisplayStatus(i);
+              const balanceToPay = getInsurancePaymentBalance(i);
+              const displayStatus = getInsurancePaymentDisplayStatus(i);
               const isPaidStatus = displayStatus === 'paid';
 
               const hasPendingPayments = !isPaidStatus && balanceToPay >= 2;
               const isCommissionPending = (i.commissionStatus === 'pending' || !i.commissionStatus) && (i.agentCommission || 0) > 0;
-              const isSelected = selectedInsuranceSet.has(i.id || '');
 
               return (
-                <div key={i.id} className={`bg-white rounded-2xl border ${isSelected ? 'border-indigo-300 ring-2 ring-indigo-50/50 bg-indigo-50/10' : 'border-gray-100'} p-6 hover:shadow-md transition-all flex flex-col gap-6`}>
+                <div key={i.id} className={`bg-white rounded-2xl border ${selectedInsuranceIds.includes(i.id || '') ? 'border-indigo-300 ring-2 ring-indigo-50/50 bg-indigo-50/10' : 'border-gray-100'} p-6 hover:shadow-md transition-all flex flex-col gap-6`}>
                   <div className="flex flex-col md:flex-row justify-between gap-4">
                     <div className="flex items-start gap-4">
                       {(isSuperAdminOrDirector || canManageClosedState) && (
                         <input
                           id={`select-card-${i.id}`}
                           type="checkbox"
-                          checked={isSelected}
+                          checked={selectedInsuranceIds.includes(i.id || '')}
                           onChange={() => handleToggleSelectInsurance(i.id || '')}
                           className="w-4 h-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 cursor-pointer self-center accent-indigo-650"
                         />
@@ -6541,18 +6495,13 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                               handleDuplicatePolicy(i);
                             }}
                             className="p-1 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-md transition-all cursor-pointer inline-flex items-center"
-                            title="Duplicar datos básicos a nueva póliza (Agente/Corporativo/Individual, Nombre, Apellido, Fecha de nacimiento)"
+                            title="Duplicar datos b?sicos a nueva p?liza (Agente/Corporativo/Individual, Nombre, Apellido, Fecha de nacimiento)"
                           >
                             <Copy className="w-3.5 h-3.5" />
                           </button>
                           {i.isCorrected && (
                             <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[8px] font-black bg-rose-100 text-rose-800 border border-rose-200 uppercase select-none align-middle tracking-wider">
                               CORREGIDO
-                            </span>
-                          )}
-                          {i.isCancelled && (
-                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[8px] font-black bg-rose-100 text-rose-800 border border-rose-200 uppercase select-none align-middle tracking-wider">
-                              CANCELADO
                             </span>
                           )}
                         </p>
@@ -6562,10 +6511,10 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                         </div>
                         <div className="flex items-center gap-1 text-[10px] text-gray-400 mt-0.5">
                           <Baby className="w-3 h-3" />
-                          <span>Nacimiento: {formatDisplayDate(i.birthDate)} ({i.age} años) • {i.gender || '-'}</span>
+                          <span>Nacimiento: {formatDisplayDate(i.birthDate)} ({i.age} a?os) ? {i.gender || '-'}</span>
                         </div>
                         {i.Caremed && (
-                          <div className="mt-1" title="Fecha y Hora de la exportación a CareMed">
+                          <div className="mt-1" title="Fecha y Hora de la exportaci?n a CareMed">
                             <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-black bg-emerald-50 text-emerald-700 border border-emerald-100 font-mono">
                               CareMed: {i.Caremed}
                             </span>
@@ -6583,7 +6532,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                             );
                           }
 
-                          const client = clientMap.get(i.clientId);
+                          const client = clients.find(c => c.id === i.clientId);
                           const clientLabel = i.clientType === 'Agent' ? 'Agente' : 'Corporativo';
                           const clientName = client ? (client.commercialName || client.legalName || `${client.firstName || ''} ${client.lastName || ''}`.trim()) : 'Faltante';
                           
@@ -6600,7 +6549,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                 </span>
                                 {subAgentName && (
                                   <span className="flex items-center gap-1 text-gray-500 font-medium pl-4">
-                                    • Subagente: {subAgentName}
+                                    ? Subagente: {subAgentName}
                                   </span>
                                 )}
                               </div>
@@ -6627,16 +6576,8 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                             </span>
                           );
                         })()}
-                        <span className={`px-3 py-1 text-[10px] font-black rounded-full border ${
-                          displayStatus === 'paid' ? 'bg-green-100 text-green-700 border-green-200' : 
-                          displayStatus === 'pending' ? 'bg-yellow-100 text-yellow-700 border-yellow-200' : 
-                          displayStatus === 'partially_paid' ? 'bg-blue-100 text-blue-700 border-blue-200' :
-                          'bg-red-100 text-red-700 border-red-200'
-                        }`}>
-                          {displayStatus === 'paid' ? 'PAGADO' : 
-                           displayStatus === 'pending' ? 'PENDIENTE' : 
-                           displayStatus === 'partially_paid' ? 'PAGO PARCIAL' :
-                           'CANCELADO'}
+                        <span className={`px-3 py-1 text-[10px] font-black rounded-full border ${getInsurancePaymentStatusBadgeClass(displayStatus)}`}>
+                          {getInsurancePaymentStatusLabel(displayStatus)}
                         </span>
                         <p className="text-[10px] text-gray-400 font-mono">{i.id}</p>
                         {i.actionType && (
@@ -6670,7 +6611,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                             {formatDisplayDate(i.startDate)} al {formatDisplayDate(i.endDate)}
                           </span>
                           <span className="opacity-70 ml-4">
-                            {i.days} días 
+                            {i.days} d?as 
                             {i.days > 39 && ` (${Math.ceil(i.days / 30.4)} meses)`}
                           </span>
                         </div>
@@ -6679,7 +6620,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
 
                     <div className="space-y-3">
                       <div>
-                        <p className="text-[9px] text-gray-400 font-bold uppercase tracking-tighter mb-1">Información Comercial</p>
+                        <p className="text-[9px] text-gray-400 font-bold uppercase tracking-tighter mb-1">Informaci?n Comercial</p>
                         <div className="flex flex-col gap-2">
                           <div>
                             <p className="text-[8px] text-gray-400 font-bold uppercase mb-0.5">Plan</p>
@@ -6688,7 +6629,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                             </span>
                           </div>
                           <div>
-                            <p className="text-[8px] text-gray-400 font-bold uppercase mb-0.5">Tipo de Póliza</p>
+                            <p className="text-[8px] text-gray-400 font-bold uppercase mb-0.5">Tipo de P?liza</p>
                             <span className={`inline-flex px-2 py-1 text-[10px] font-bold rounded uppercase border w-fit ${
                               policyName.includes('Oro') ? 'bg-amber-50 text-amber-700 border-amber-100' :
                               policyName.includes('Plata') ? 'bg-slate-100 text-slate-700 border-slate-200' :
@@ -6707,7 +6648,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                       <div className="grid grid-cols-2 gap-2">
                         <div>
                           <p className="text-[8px] text-gray-400 font-bold uppercase">Precio</p>
-                          <p className="text-xs font-black text-gray-900">{formatPriceWithSign(finalPrice, i.actionType?.toUpperCase() === 'CAN')}</p>
+                          <p className="text-xs font-black text-gray-900">{formatPriceWithSign(i.totalFinal || i.totalPrice || 0, i.actionType?.toUpperCase() === 'CAN')}</p>
                         </div>
                         {profile?.role !== 'agent' && (
                           <div>
@@ -6716,7 +6657,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                           </div>
                         )}
                         <div>
-                          <p className="text-[8px] text-gray-400 font-bold uppercase text-indigo-400">Comisión</p>
+                          <p className="text-[8px] text-gray-400 font-bold uppercase text-indigo-400">Comisi?n</p>
                           <p className="text-xs font-black text-indigo-600">{formatPriceWithSign(i.agentCommission || 0, i.actionType?.toUpperCase() === 'CAN')}</p>
                         </div>
                         <div>
@@ -6744,20 +6685,14 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                         <Mail className="w-3.5 h-3.5" />
                         Email
                       </button>
-                      {(() => {
-                        const waContacts = getPolicyWhatsAppContacts(i, clients, usersList);
-                        if (!waContacts.hasAnyPhone) return null;
-                        return (
-                          <button 
-                            onClick={() => setSelectedInsuranceForWhatsApp(i)}
-                            className="p-1.5 bg-emerald-50 text-emerald-600 hover:bg-emerald-100 hover:text-emerald-700 border border-emerald-200/80 rounded-lg transition-all shadow-xs flex items-center justify-center hover:scale-105 active:scale-95"
-                            title={`Enviar cartas por WhatsApp (${waContacts.label})`}
-                            aria-label={`Enviar cartas por WhatsApp (${waContacts.label})`}
-                          >
-                            <MessageCircle className="w-4 h-4" />
-                          </button>
-                        );
-                      })()}
+                      <button 
+                        onClick={() => setSelectedInsuranceForWhatsApp(i)}
+                        className="flex items-center gap-2 px-3 py-1.5 bg-emerald-50 text-emerald-700 text-[10px] font-bold rounded-lg hover:bg-emerald-100 transition-all"
+                        title="Enviar Cartas por WhatsApp"
+                      >
+                        <MessageCircle className="w-3.5 h-3.5" />
+                        WhatsApp
+                      </button>
                       <button 
                         onClick={() => setSelectedInsuranceForDetail(i)}
                         className="flex items-center gap-2 px-3 py-1.5 bg-blue-50 text-blue-600 text-[10px] font-bold rounded-lg hover:bg-blue-100 transition-all"
@@ -6772,7 +6707,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                         <Receipt className="w-3.5 h-3.5" />
                         Pagos
                       </button>
-                      {canManageClosedState && i.actionType !== 'CAN' && !i.isCorrected && !i.isCancelled && (i as any).Caremed && (
+                      {canManageClosedState && i.actionType !== 'CAN' && !i.isCorrected && (i as any).Caremed && (
                         <>
                           <button 
                             onClick={() => {
@@ -6802,7 +6737,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                               setModalInitialAction('extension');
                             }}
                             className="flex items-center gap-2 px-3 py-1.5 bg-blue-50 text-blue-600 text-[10px] font-bold rounded-lg hover:bg-blue-100 transition-all cursor-pointer"
-                            title="Extensión del Seguro"
+                            title="Extensi?n del Seguro"
                           >
                             <Plus className="w-3.5 h-3.5" />
                             Extension
@@ -6825,14 +6760,14 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                           onClick={() => handleConfirmCommission(i.id!)}
                           className="px-3 py-1.5 bg-indigo-600 text-white text-[10px] font-bold rounded-lg hover:bg-indigo-700 transition-all shadow-sm shadow-indigo-100"
                         >
-                          Confirmar Comisión
+                          Confirmar Comisi?n
                         </button>
                       )}
                       {isSuperAdminOrDirector && (
                         <button 
                           onClick={() => setInsuranceToDelete(i)}
                           className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all"
-                          title="Borrar Póliza"
+                          title="Borrar P?liza"
                         >
                           <Trash2 className="w-4 h-4" />
                         </button>
@@ -6856,7 +6791,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                           checked={paginatedInsurances.length > 0 && paginatedInsurances.map(i => i.id).filter((id): id is string => !!id).every(id => selectedInsuranceIds.includes(id))}
                           onChange={handleSelectAllCurrentPage}
                           className="w-4 h-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 cursor-pointer accent-indigo-650"
-                          title="Seleccionar todo en esta página"
+                          title="Seleccionar todo en esta p?gina"
                         />
                       </th>
                     )}
@@ -6890,39 +6825,35 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                     </th>
                     <th className="px-6 py-4 font-bold">Nacimiento / Edad</th>
                     <th className="px-6 py-4 font-bold">Ruta</th>
-                    <th className="px-6 py-4 font-bold">Fechas / Duración</th>
-                    <th className="px-6 py-4 font-bold">Acción</th>
+                    <th className="px-6 py-4 font-bold">Fechas / Duraci?n</th>
+                    <th className="px-6 py-4 font-bold">Acci?n</th>
                     <th className="px-6 py-4 font-bold">Estado Vigencia</th>
-                    <th className="px-6 py-4 font-bold">Información Comercial</th>
+                    <th className="px-6 py-4 font-bold">Informaci?n Comercial</th>
                     <th className="px-6 py-4 font-bold text-right">Precio</th>
                     {profile?.role !== 'agent' && <th className="px-6 py-4 font-bold text-right">Costo</th>}
-                    <th className="px-6 py-4 font-bold text-right">Comisión</th>
+                    <th className="px-6 py-4 font-bold text-right">Comisi?n</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
                   {paginatedInsurances.map((i) => {
-                    const policy = policyMap.get(i.policyId);
-                    const plan = i.plan || policy?.plan || (i.policyId ? i.policyId.split('-')[0] : '');
+                    const policy = policies.find(p => p.id === i.policyId);
+                    const plan = i.plan || policy?.plan || i.policyId.split('-')[0];
                     const policyName = i.policyName || policy?.name || '';
                     
-                    const mul = 1;
-                    const finalPrice = getInsuranceFinalPrice(i);
-                    const totalPaid = i.totalPaid || 0;
-                    const balanceToPay = finalPrice - totalPaid;
-                    const displayStatus = getInsuranceDisplayStatus(i);
+                    const balanceToPay = getInsurancePaymentBalance(i);
+                    const displayStatus = getInsurancePaymentDisplayStatus(i);
                     const isPaidStatus = displayStatus === 'paid';
 
                     const isCommissionPending = (i.commissionStatus === 'pending' || !i.commissionStatus) && (i.agentCommission || 0) > 0;
                     const hasPendingPayments = !isPaidStatus && balanceToPay >= 2;
-                    const isSelected = selectedInsuranceSet.has(i.id || '');
 
                     return (
-                      <tr key={i.id} className={`hover:bg-gray-50 transition-colors ${isSelected ? 'bg-indigo-50/20 hover:bg-indigo-50/30' : ''}`}>
+                      <tr key={i.id} className={`hover:bg-gray-50 transition-colors ${selectedInsuranceIds.includes(i.id || '') ? 'bg-indigo-50/20 hover:bg-indigo-50/30' : ''}`}>
                         {(isSuperAdminOrDirector || canManageClosedState) && (
                           <td className="px-4 py-4 text-center">
                             <input
                               type="checkbox"
-                              checked={isSelected}
+                              checked={selectedInsuranceIds.includes(i.id || '')}
                               onChange={() => handleToggleSelectInsurance(i.id || '')}
                               className="w-4 h-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 cursor-pointer accent-indigo-600"
                             />
@@ -6944,18 +6875,13 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                   handleDuplicatePolicy(i);
                                 }}
                                 className="p-1 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-md transition-all cursor-pointer inline-flex items-center"
-                                title="Duplicar datos básicos a nueva póliza (Agente/Corporativo/Individual, Nombre, Apellido, Fecha de nacimiento)"
+                                title="Duplicar datos b?sicos a nueva p?liza (Agente/Corporativo/Individual, Nombre, Apellido, Fecha de nacimiento)"
                               >
                                 <Copy className="w-3.5 h-3.5" />
                               </button>
                               {i.isCorrected && (
                                 <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[8px] font-black bg-rose-100 text-rose-800 border border-rose-200 uppercase select-none align-middle tracking-wider">
                                   CORREGIDO
-                                </span>
-                              )}
-                              {i.isCancelled && (
-                                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[8px] font-black bg-rose-100 text-rose-800 border border-rose-200 uppercase select-none align-middle tracking-wider">
-                                  CANCELADO
                                 </span>
                               )}
                             </span>
@@ -6966,7 +6892,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                               </span>
                             )}
                             {i.Caremed && (
-                              <span className="inline-block w-max px-1 rounded text-[9px] font-black bg-emerald-50 text-emerald-700 border border-emerald-100 font-mono mt-0.5" title="Fecha y Hora de la exportación a CareMed">
+                              <span className="inline-block w-max px-1 rounded text-[9px] font-black bg-emerald-50 text-emerald-700 border border-emerald-100 font-mono mt-0.5" title="Fecha y Hora de la exportaci?n a CareMed">
                                 CareMed: {i.Caremed}
                               </span>
                             )}
@@ -6981,7 +6907,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                 );
                               }
 
-                              const client = clientMap.get(i.clientId);
+                              const client = clients.find(c => c.id === i.clientId);
                               const clientLabel = i.clientType === 'Agent' ? 'Agente' : 'Corp';
                               const clientName = client ? (client.commercialName || client.legalName || `${client.firstName || ''} ${client.lastName || ''}`.trim()) : 'Fal.';
                               
@@ -6995,7 +6921,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                     {clientLabel}: {clientName}
                                   </span>
                                   {subAgentName && (
-                                    <span className="block text-gray-500 font-medium font-sans mt-0.5 pl-3.5">• Sub: {subAgentName}</span>
+                                    <span className="block text-gray-500 font-medium font-sans mt-0.5 pl-3.5">? Sub: {subAgentName}</span>
                                   )}
                                 </div>
                               );
@@ -7017,19 +6943,13 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                               >
                                 <Mail className="w-3.5 h-3.5" />
                               </button>
-                              {(() => {
-                                const waContacts = getPolicyWhatsAppContacts(i, clients, usersList);
-                                if (!waContacts.hasAnyPhone) return null;
-                                return (
-                                  <button 
-                                    onClick={() => setSelectedInsuranceForWhatsApp(i)}
-                                    className="p-1 text-emerald-600 hover:bg-emerald-50 rounded-md transition-all"
-                                    title={`Enviar cartas por WhatsApp (${waContacts.label})`}
-                                  >
-                                    <MessageCircle className="w-3.5 h-3.5" />
-                                  </button>
-                                );
-                              })()}
+                              <button 
+                                onClick={() => setSelectedInsuranceForWhatsApp(i)}
+                                className="p-1 text-emerald-600 hover:bg-emerald-50 rounded-md transition-all"
+                                title="Enviar Cartas por WhatsApp"
+                              >
+                                <MessageCircle className="w-3.5 h-3.5" />
+                              </button>
                               <button 
                                 onClick={() => setSelectedInsuranceForDetail(i)}
                                 className="p-1 text-blue-600 hover:bg-blue-50 rounded-md transition-all"
@@ -7057,12 +6977,12 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                 <button 
                                   onClick={() => handleConfirmCommission(i.id!)}
                                   className="p-1 text-indigo-600 hover:bg-indigo-50 rounded-md transition-all"
-                                  title="Confirmar Comisión"
+                                  title="Confirmar Comisi?n"
                                 >
                                   <DollarSign className="w-3.5 h-3.5" />
                                 </button>
                               )}
-                              {canManageClosedState && i.actionType !== 'CAN' && !i.isCorrected && !i.isCancelled && (i as any).Caremed && (
+                              {canManageClosedState && i.actionType !== 'CAN' && !i.isCorrected && (i as any).Caremed && (
                                 <>
                                   <button 
                                     onClick={() => {
@@ -7090,7 +7010,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                       setModalInitialAction('extension');
                                     }}
                                     className="p-1 text-blue-600 hover:bg-blue-50 rounded-md transition-all cursor-pointer"
-                                    title="Extensión del Seguro"
+                                    title="Extensi?n del Seguro"
                                   >
                                     <Plus className="w-3.5 h-3.5" />
                                   </button>
@@ -7112,8 +7032,8 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                           <div className="flex flex-col">
                             <span className="text-xs text-gray-600">{formatDisplayDate(i.birthDate)}</span>
                             <div className="flex items-center gap-1">
-                              <span className="text-[10px] font-bold text-blue-600">{i.age} años</span>
-                              <span className="text-[10px] text-gray-400">•</span>
+                              <span className="text-[10px] font-bold text-blue-600">{i.age} a?os</span>
+                              <span className="text-[10px] text-gray-400">?</span>
                               <span className="text-[10px] font-medium text-gray-500">{i.gender || '-'}</span>
                             </div>
                           </div>
@@ -7129,7 +7049,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                           <div className="flex flex-col text-[10px] text-gray-600">
                             <span>{formatDisplayDate(i.startDate)} al {formatDisplayDate(i.endDate)}</span>
                             <span className="font-bold text-blue-600">
-                              {i.days} días 
+                              {i.days} d?as 
                               {i.days > 39 && ` (${Math.ceil(i.days / 30.4)} meses)`}
                             </span>
                           </div>
@@ -7165,16 +7085,8 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                 }`}>
                                   {opStatus.toUpperCase()}
                                 </span>
-                                <span className={`px-2 py-0.5 text-[8px] font-bold rounded-full border ${
-                                  displayStatus === 'paid' ? 'bg-green-100 text-green-700 border-green-200' : 
-                                  displayStatus === 'pending' ? 'bg-yellow-100 text-yellow-700 border-yellow-200' : 
-                                  displayStatus === 'partially_paid' ? 'bg-blue-100 text-blue-700 border-blue-200' :
-                                  'bg-red-100 text-red-700 border-red-200'
-                                }`}>
-                                  {displayStatus === 'paid' ? 'PAGADO' : 
-                                   displayStatus === 'pending' ? 'PENDIENTE' : 
-                                   displayStatus === 'partially_paid' ? 'PAGO PARCIAL' :
-                                   'CANCELADO'}
+                                <span className={`px-2 py-0.5 text-[8px] font-bold rounded-full border ${getInsurancePaymentStatusBadgeClass(displayStatus)}`}>
+                                  {getInsurancePaymentStatusLabel(displayStatus)}
                                 </span>
                               </div>
                             );
@@ -7192,7 +7104,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                             </div>
                           </div>
                         </td>
-                        <td className="px-6 py-4 text-right font-bold text-gray-900 text-sm">{formatPriceWithSign(finalPrice, i.actionType?.toUpperCase() === 'CAN')}</td>
+                        <td className="px-6 py-4 text-right font-bold text-gray-900 text-sm">{formatPriceWithSign(i.totalFinal || i.totalPrice || 0, i.actionType?.toUpperCase() === 'CAN')}</td>
                         {profile?.role !== 'agent' && (
                           <td className="px-6 py-4 text-right font-bold text-red-600 text-sm">{formatPriceWithSign(i.totalCost || 0, i.actionType?.toUpperCase() === 'CAN')}</td>
                         )}
@@ -7210,10 +7122,10 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
            <div className="flex flex-col sm:flex-row items-center justify-between gap-4 bg-white px-6 py-4 rounded-xl border border-gray-100 shadow-sm mt-4">
              <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
                <p className="text-sm text-gray-500">
-                 Mostrando <span className="font-bold text-gray-900">{filteredInsurances.length === 0 ? 0 : ((currentPage - 1) * pageSize) + 1}</span> a <span className="font-bold text-gray-900">{Math.min(currentPage * pageSize, filteredInsurances.length)}</span> de <span className="font-bold text-gray-900">{filteredInsurances.length}</span> pólizas
+                 Mostrando <span className="font-bold text-gray-900">{filteredInsurances.length === 0 ? 0 : ((currentPage - 1) * pageSize) + 1}</span> a <span className="font-bold text-gray-900">{Math.min(currentPage * pageSize, filteredInsurances.length)}</span> de <span className="font-bold text-gray-900">{filteredInsurances.length}</span> p?lizas
                </p>
                <div className="flex items-center gap-2 border-l border-gray-200 pl-4">
-                 <span className="text-xs text-gray-500">Filas por página:</span>
+                 <span className="text-xs text-gray-500">Filas por p?gina:</span>
                  <select
                    value={pageSize}
                    onChange={(e) => {
@@ -7276,7 +7188,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
         isOpen={!!selectedInsuranceForTransactions}
         onClose={() => setSelectedInsuranceForTransactions(null)}
         insuranceId={selectedInsuranceForTransactions || undefined}
-        title="Transacciones de la Póliza"
+        title="Transacciones de la P?liza"
       />
 
       <InsuranceDetailModal 
@@ -7306,7 +7218,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
             <div className="bg-indigo-600 p-5 text-white flex justify-between items-center">
               <div className="flex items-center gap-3">
                 <Calendar className="w-5 h-5 text-white" />
-                <h3 className="text-base font-bold">Editar Fecha de Exportación</h3>
+                <h3 className="text-base font-bold">Editar Fecha de Exportaci?n</h3>
               </div>
               <button onClick={() => setEditingExportDate(null)} className="p-2 hover:bg-white/10 rounded-xl transition-all cursor-pointer">
                 <X className="w-5 h-5" />
@@ -7324,7 +7236,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                 />
               </div>
               <p className="text-[11px] text-gray-450 leading-relaxed font-medium">
-                Se actualizarán todas las pólizas vinculadas a este lote y las facturas adjuntas asociadas de manera automática en la base de datos.
+                Se actualizar?n todas las p?lizas vinculadas a este lote y las facturas adjuntas asociadas de manera autom?tica en la base de datos.
               </p>
               <div className="flex gap-3 pt-2 justify-end">
                 <button
@@ -7352,6 +7264,15 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
         isOpen={!!selectedInsuranceForEmail}
         onClose={() => setSelectedInsuranceForEmail(null)}
         insurance={selectedInsuranceForEmail}
+        policies={policies}
+        policyLetters={policyLetters}
+        companySettings={settings}
+      />
+
+      <WhatsAppLettersModal
+        isOpen={!!selectedInsuranceForWhatsApp}
+        onClose={() => setSelectedInsuranceForWhatsApp(null)}
+        insurance={selectedInsuranceForWhatsApp}
         policies={policies}
         policyLetters={policyLetters}
         companySettings={settings}
@@ -7387,19 +7308,6 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
         companySettings={settings}
       />
 
-      {selectedInsuranceForWhatsApp && (
-        <WhatsAppPolicyLettersModal
-          isOpen={Boolean(selectedInsuranceForWhatsApp)}
-          onClose={() => setSelectedInsuranceForWhatsApp(null)}
-          insurance={selectedInsuranceForWhatsApp}
-          policies={policies}
-          policyLetters={policyLetters}
-          clients={clients}
-          users={usersList}
-          companySettings={settings}
-        />
-      )}
-
       {languageModal.isOpen && (
         <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-[200] p-4">
           <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in duration-200">
@@ -7429,13 +7337,13 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                     />
                     <div className="flex-1">
                       <p className="text-sm font-bold text-gray-900">
-                        {letter.language === 'es' ? 'Español' : 
-                         letter.language === 'en' ? 'Inglés' : 
-                         letter.language === 'de' ? 'Alemán' : 
+                        {letter.language === 'es' ? 'Espa?ol' : 
+                         letter.language === 'en' ? 'Ingl?s' : 
+                         letter.language === 'de' ? 'Alem?n' : 
                          letter.language === 'it' ? 'Italiano' : 
-                         letter.language === 'fr' ? 'Francés' : 
-                         letter.language === 'es_spain' ? 'España' : 
-                         letter.language === 'embajada_spain' ? 'Embajada España' : 
+                         letter.language === 'fr' ? 'Franc?s' : 
+                         letter.language === 'es_spain' ? 'Espa?a' : 
+                         letter.language === 'embajada_spain' ? 'Embajada Espa?a' : 
                          letter.language === 'covid' ? 'Coronavirus' : 
                          letter.language === 'policy' ? 'Policy' : 
                          letter.language.toUpperCase()}
@@ -7454,20 +7362,6 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
               >
                 Cancelar
               </button>
-              {languageModal.insurance && getPolicyWhatsAppContacts(languageModal.insurance, clients, usersList).hasAnyPhone && (
-                <button
-                  onClick={() => {
-                    const ins = languageModal.insurance;
-                    setLanguageModal(prev => ({ ...prev, isOpen: false }));
-                    setSelectedInsuranceForWhatsApp(ins);
-                  }}
-                  className="py-3 px-4 bg-emerald-600 text-white rounded-xl hover:bg-emerald-700 transition-all flex items-center justify-center hover:scale-105 active:scale-95 shadow-md shadow-emerald-100"
-                  title="Enviar cartas por WhatsApp"
-                  aria-label="Enviar cartas por WhatsApp"
-                >
-                  <MessageCircle className="w-5 h-5" />
-                </button>
-              )}
               <button
                 onClick={handleConfirmLanguages}
                 disabled={languageModal.selectedLanguages.length === 0}
@@ -7491,7 +7385,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
             <div className="space-y-2">
               <h3 className="text-xl font-bold text-gray-900 tracking-tight">Enviando Correos Masivos</h3>
               <p className="text-sm text-gray-505 leading-relaxed text-gray-500">
-                Por favor, mantén esta ventana abierta mientras se preparan y envían los certificados de seguro.
+                Por favor, mant?n esta ventana abierta mientras se preparan y env?an los certificados de seguro.
               </p>
             </div>
             
@@ -7525,8 +7419,8 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
               <div className="flex items-center gap-3 text-left">
                 <Edit2 className="w-6 h-6 text-white" />
                 <div>
-                  <h3 className="text-lg font-black tracking-tight">Modificación Masiva de Pólizas</h3>
-                  <p className="text-xs text-amber-100 font-semibold mt-0.5">Modificando {selectedInsuranceIds.length} pólizas seleccionadas</p>
+                  <h3 className="text-lg font-black tracking-tight">Modificaci?n Masiva de P?lizas</h3>
+                  <p className="text-xs text-amber-100 font-semibold mt-0.5">Modificando {selectedInsuranceIds.length} p?lizas seleccionadas</p>
                 </div>
               </div>
               <button 
@@ -7540,7 +7434,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
 
             <form onSubmit={handleBulkEditSubmit} className="flex-1 overflow-y-auto p-6 space-y-6">
               <p className="text-xs text-gray-500 font-semibold leading-relaxed text-left">
-                Selecciona las casillas de los campos que deseas actualizar masivamente en las pólizas seleccionadas. Los campos que no estén seleccionados permanecerán sin cambios.
+                Selecciona las casillas de los campos que deseas actualizar masivamente en las p?lizas seleccionadas. Los campos que no est?n seleccionados permanecer?n sin cambios.
               </p>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6 text-left">
@@ -7597,12 +7491,12 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                       onChange={(e) => setBulkEditFields(prev => ({ ...prev, updateCommission: e.target.checked }))}
                       className="w-4 h-4 rounded border-gray-300 text-amber-600 focus:ring-amber-500 accent-amber-600"
                     />
-                    <span className="text-xs font-black text-gray-700 uppercase tracking-wider">Modificar Comisión Agente (USD)</span>
+                    <span className="text-xs font-black text-gray-700 uppercase tracking-wider">Modificar Comisi?n Agente (USD)</span>
                   </label>
                   <input 
                     type="number"
                     step="0.01"
-                    placeholder="Nueva comisión"
+                    placeholder="Nueva comisi?n"
                     value={bulkEditFields.commission}
                     onChange={(e) => setBulkEditFields(prev => ({ ...prev, commission: e.target.value }))}
                     disabled={!bulkEditFields.updateCommission}
@@ -7739,9 +7633,9 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                   </div>
                 </div>
 
-                {/* PAÍS ORIGEN Y DESTINO */}
+                {/* PA?S ORIGEN Y DESTINO */}
                 <div className="p-4 rounded-2xl border border-gray-100 bg-gray-50/50 space-y-4 col-span-1 md:col-span-2">
-                  <span className="text-xs font-black text-gray-700 uppercase tracking-wider block">País de Origen y Destino</span>
+                  <span className="text-xs font-black text-gray-700 uppercase tracking-wider block">Pa?s de Origen y Destino</span>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div className="space-y-2">
                       <label className="flex items-center gap-2 cursor-pointer">
@@ -7751,7 +7645,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                           onChange={(e) => setBulkEditFields(prev => ({ ...prev, updateOriginCountry: e.target.checked }))}
                           className="w-3.5 h-3.5 rounded border-gray-300 text-amber-600 focus:ring-amber-500 accent-amber-600"
                         />
-                        <span className="text-[10px] font-black text-gray-500 uppercase tracking-wider">Modificar País de Origen</span>
+                        <span className="text-[10px] font-black text-gray-500 uppercase tracking-wider">Modificar Pa?s de Origen</span>
                       </label>
                       <select 
                         value={bulkEditFields.originCountry}
@@ -7775,7 +7669,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                           onChange={(e) => setBulkEditFields(prev => ({ ...prev, updateDestinationCountry: e.target.checked }))}
                           className="w-3.5 h-3.5 rounded border-gray-300 text-amber-600 focus:ring-amber-500 accent-amber-600"
                         />
-                        <span className="text-[10px] font-black text-gray-500 uppercase tracking-wider">Modificar País de Destino</span>
+                        <span className="text-[10px] font-black text-gray-500 uppercase tracking-wider">Modificar Pa?s de Destino</span>
                       </label>
                       <select 
                         value={bulkEditFields.destinationCountry}
@@ -7806,7 +7700,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                   </label>
                   <input 
                     type="text"
-                    placeholder="Número de Invoice (dejar vacío para remover Invoice)"
+                    placeholder="N?mero de Invoice (dejar vac?o para remover Invoice)"
                     value={bulkEditFields.invoiceCaremed}
                     onChange={(e) => setBulkEditFields(prev => ({ ...prev, invoiceCaremed: e.target.value }))}
                     disabled={!bulkEditFields.updateInvoice}
@@ -7852,11 +7746,11 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
               <div className="p-3 bg-red-50 rounded-2xl">
                 <AlertTriangle className="w-8 h-8" />
               </div>
-              <h3 className="text-lg font-black tracking-tight">Confirmar Eliminación Masiva</h3>
+              <h3 className="text-lg font-black tracking-tight">Confirmar Eliminaci?n Masiva</h3>
             </div>
             <p className="text-gray-600 mb-8 leading-relaxed">
-              ¿Estás seguro de que deseas eliminar las <span className="font-bold text-red-600">{selectedInsuranceIds.length} pólizas seleccionadas</span> del sistema? 
-              Esta acción es irreversible y borrará permanentemente todos los registros de seguros seleccionados.
+              ?Est?s seguro de que deseas eliminar las <span className="font-bold text-red-600">{selectedInsuranceIds.length} p?lizas seleccionadas</span> del sistema? 
+              Esta acci?n es irreversible y borrar? permanentemente todos los registros de seguros seleccionados.
             </p>
             <div className="flex gap-3">
               <button 
@@ -7877,7 +7771,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                     Borrando...
                   </>
                 ) : (
-                  'Sí, Borrar Seleccionadas'
+                  'S?, Borrar Seleccionadas'
                 )}
               </button>
             </div>
@@ -7891,11 +7785,11 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
           <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-6">
             <div className="flex items-center gap-3 text-red-600 mb-4">
               <AlertTriangle className="w-6 h-6" />
-              <h3 className="text-lg font-bold">Confirmar Eliminación</h3>
+              <h3 className="text-lg font-bold">Confirmar Eliminaci?n</h3>
             </div>
             <p className="text-gray-600 mb-6">
-              ¿Estás seguro de que deseas eliminar la póliza de <span className="font-bold">{insuranceToDelete.firstName} {insuranceToDelete.lastName}</span>? 
-              Esta acción no se puede deshacer y eliminará permanentemente el registro.
+              ?Est?s seguro de que deseas eliminar la p?liza de <span className="font-bold">{insuranceToDelete.firstName} {insuranceToDelete.lastName}</span>? 
+              Esta acci?n no se puede deshacer y eliminar? permanentemente el registro.
             </p>
             <div className="flex justify-end gap-3">
               <button 
@@ -7908,7 +7802,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                 onClick={() => handleDeleteInsurance(insuranceToDelete.id!)}
                 className="px-4 py-2 bg-red-600 text-white font-bold rounded-lg hover:bg-red-700 transition-colors"
               >
-                Eliminar Póliza
+                Eliminar P?liza
               </button>
             </div>
           </div>
@@ -7970,18 +7864,18 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
 
               <div>
                 <label className="block text-xs font-bold text-gray-700 mb-1.5">
-                  Escribe la Justificación de la Diferencia <span className="text-rose-500">*</span>
+                  Escribe la Justificaci?n de la Diferencia <span className="text-rose-500">*</span>
                 </label>
                 <textarea
                   value={justifyingInvoice.justificationText}
                   onChange={(e) => setJustifyingInvoice(prev => prev ? { ...prev, justificationText: e.target.value } : null)}
-                  placeholder="Ej. Recargo autorizado por extensión / Descuento acordado / Ajuste por tipo de cambio / Comisión de emisión..."
+                  placeholder="Ej. Recargo autorizado por extensi?n / Descuento acordado / Ajuste por tipo de cambio / Comisi?n de emisi?n..."
                   rows={4}
                   className="w-full text-xs p-3 border border-gray-200 rounded-2xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent outline-hidden resize-none transition-all placeholder:text-gray-400 bg-white"
                   autoFocus
                 />
                 <p className="text-[10.5px] text-gray-400 mt-1.5 leading-relaxed">
-                  Al confirmar, esta factura quedará marcada como <strong>Aprobada con Justificación</strong> y dejará de aparecer en el <strong>Listado de Invoices</strong> de forma inmediata.
+                  Al confirmar, esta factura quedar? marcada como <strong>Aprobada con Justificaci?n</strong> y dejar? de aparecer en el <strong>Listado de Invoices</strong> de forma inmediata.
                 </p>
               </div>
             </div>

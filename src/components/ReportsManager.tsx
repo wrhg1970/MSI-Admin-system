@@ -27,17 +27,19 @@ import { InsuranceRequest, Client, ClientType, UserProfile, CustomRole, Policy, 
 import { usePermissions } from '../hooks/usePermissions';
 import { format, parseISO } from 'date-fns';
 import { getNormalizedYYYYMMDD, getPolicyEffectiveCost } from '../lib/policyUtils';
+import { useFirestoreData } from '../context/FirestoreDataContext';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import { drawVectorLogo } from '../lib/pdfGenerator';
 import { useCompany } from '../App';
 import MonthlyClosingModal from './MonthlyClosingModal';
 import MonthlyReportModal from './MonthlyReportModal';
+import { getInsuranceExpectedAmount, getInsurancePaymentBalance, isInsuranceDeudor } from '../utils/paymentUtils';
 
 const formatMonthsDays = (days: number): string => {
-  if (!days || days <= 0) return '0 días';
+  if (!days || days <= 0) return '0 d?as';
   if (days < 40) {
-    return `${days} Días`;
+    return `${days} D?as`;
   }
   const calculatedMonths = Math.floor(days / 30.4);
   const additionalDays = Math.max(0, days - Math.round(calculatedMonths * 30.4));
@@ -55,6 +57,131 @@ const formatMonthsDays = (days: number): string => {
   } else {
     return `${days} d`;
   }
+};
+
+/** Same Ventas Totales rule as Gesti?n de P?lizas (summaryStats). */
+const getPolicySalesAmount = (ins: InsuranceRequest): number => {
+  const isCan = ins.actionType?.toUpperCase() === 'CAN';
+  const p = ins.totalFinal || ins.totalPrice || 0;
+  return isCan ? -Math.abs(p) : (p < 0 ? p : Math.abs(p));
+};
+
+/** Same Comisi?n rule as Gesti?n de P?lizas (summaryStats). */
+const getPolicyCommissionAmount = (ins: InsuranceRequest): number => {
+  const isCan = ins.actionType?.toUpperCase() === 'CAN';
+  const com = ins.agentCommission || 0;
+  return isCan ? -Math.abs(com) : (com < 0 ? com : Math.abs(com));
+};
+
+/** Same expected amount and deudor rule as Inicio / Cuentas por Cobrar. */
+const getPolicyExpectedAmount = (ins: InsuranceRequest): number => {
+  return getInsuranceExpectedAmount(ins);
+};
+
+const getPolicyReceivableBalance = (ins: InsuranceRequest): number => {
+  return getInsurancePaymentBalance(ins);
+};
+
+const isPolicyDeudor = (ins: InsuranceRequest): boolean => {
+  return isInsuranceDeudor(ins);
+};
+
+type PayableInvoiceGroup = {
+  invoice: string;
+  count: number;
+  pendingAmount: number;
+  invoiceDate: string;
+  exportDate: string;
+  status: 'paid' | 'pending' | 'partial';
+  insurances: InsuranceRequest[];
+};
+
+/** Same invoice grouping and Monto por Pagar as Cuentas por Pagar (AdminPanel). */
+const buildPayableInvoiceGroups = (
+  sourceInsurances: InsuranceRequest[],
+  paymentsList: Payment[],
+  caremedInvoicesList: { invoiceNumber?: string; amount?: any; invoiceDate?: string }[],
+  dateStart: string,
+  dateEnd: string
+): PayableInvoiceGroup[] => {
+  const providerPaid = new Map<string, number>();
+  paymentsList.forEach(p => {
+    if (p.type === 'provider_payment' && p.insuranceId) {
+      providerPaid.set(p.insuranceId, (providerPaid.get(p.insuranceId) || 0) + (Number(p.amount) || 0));
+    }
+  });
+
+  const groups: Record<string, {
+    invoice: string;
+    insurances: InsuranceRequest[];
+    totalCost: number;
+    paidAmount: number;
+  }> = {};
+
+  sourceInsurances.forEach(ins => {
+    if (!ins.InvoiceCaremed) return;
+    const invKey = ins.InvoiceCaremed.trim();
+    if (!invKey) return;
+    if (!groups[invKey]) {
+      groups[invKey] = { invoice: invKey, insurances: [], totalCost: 0, paidAmount: 0 };
+    }
+    const g = groups[invKey];
+    g.insurances.push(ins);
+    const currentCost = getPolicyEffectiveCost(ins);
+    g.totalCost += currentCost;
+    let paid = providerPaid.get(ins.id || '') || 0;
+    if (ins.providerPaymentStatus === 'paid') {
+      paid = currentCost;
+    }
+    g.paidAmount += paid;
+  });
+
+  return Object.values(groups).map(g => {
+    const dbInv = caremedInvoicesList.find(
+      d => (d.invoiceNumber || '').toLowerCase().trim() === g.invoice.toLowerCase().trim()
+    );
+    const dbInvoiceAmount = dbInv
+      ? (typeof dbInv.amount === 'number' ? dbInv.amount : parseFloat(String(dbInv.amount)) || 0)
+      : null;
+
+    const allPoliciesPaid = g.insurances.length > 0 && g.insurances.every(ins => ins.providerPaymentStatus === 'paid');
+    const payableBase = dbInvoiceAmount !== null ? dbInvoiceAmount : g.totalCost;
+    const rawPending = payableBase - g.paidAmount;
+    const settledAgainstPayable = Math.abs(rawPending) <= 0.01 && (g.paidAmount !== 0 || payableBase === 0);
+    const markedPaidWithoutInvoice = allPoliciesPaid && dbInvoiceAmount === null;
+
+    let pendingAmount = 0;
+    let status: 'paid' | 'pending' | 'partial' = 'pending';
+    if (settledAgainstPayable || markedPaidWithoutInvoice) {
+      pendingAmount = 0;
+      status = 'paid';
+    } else {
+      pendingAmount = rawPending;
+      status = Math.abs(g.paidAmount) > 0.01 ? 'partial' : 'pending';
+    }
+
+    const sortedInsurances = [...g.insurances].sort((a, b) => ((b as any).Caremed || '').localeCompare((a as any).Caremed || ''));
+    const exportDate = (sortedInsurances[0] as any)?.Caremed ? String((sortedInsurances[0] as any).Caremed).substring(0, 10) : '';
+    const rawInvoiceDate = dbInv?.invoiceDate || '';
+    const invoiceDate = rawInvoiceDate ? String(rawInvoiceDate).substring(0, 10) : (exportDate || '');
+
+    return {
+      invoice: g.invoice,
+      count: g.insurances.length,
+      pendingAmount,
+      invoiceDate,
+      exportDate,
+      status,
+      insurances: g.insurances
+    };
+  }).filter(g => {
+    if (g.status === 'paid' && Math.abs(g.pendingAmount) <= 0.01) return false;
+    const invDate = (g.invoiceDate || g.exportDate || '').substring(0, 10);
+    if (!invDate) return false;
+    if (dateStart && invDate < dateStart) return false;
+    if (dateEnd && invDate > dateEnd) return false;
+    return true;
+  });
 };
 
 const getRequestDateString = (ins: InsuranceRequest): string => {
@@ -120,10 +247,15 @@ const sortInsurances = (list: InsuranceRequest[], sortBy: 'requestDate' | 'name'
 export default function ReportsManager({ profile, rolePermissions }: { profile: UserProfile | null, rolePermissions: CustomRole | null }) {
   const { settings: companySettings } = useCompany();
   const { hasPermission } = usePermissions(profile, rolePermissions);
+  const { insurances: contextInsurances, payments: contextPayments } = useFirestoreData();
   const [insurances, setInsurances] = useState<InsuranceRequest[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
   const [policies, setPolicies] = useState<Policy[]>([]);
   const [payments, setPayments] = useState<Payment[]>([]);
+  const [caremedInvoices, setCaremedInvoices] = useState<any[]>([]);
+  const [liveReportInsurances, setLiveReportInsurances] = useState<InsuranceRequest[]>([]);
+  const [liveReportPayments, setLiveReportPayments] = useState<Payment[]>([]);
+  const [liveReportCaremed, setLiveReportCaremed] = useState<any[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
   const [subcategories, setSubcategories] = useState<Subcategory[]>([]);
   const [exchangeRates, setExchangeRates] = useState<ExchangeRate[]>([]);
@@ -216,14 +348,15 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
 
         const qExchangeRates = query(collection(db, 'exchangeRates'), orderBy('date', 'desc'));
 
-        const [insurancesSnap, clientsSnap, policiesSnap, paymentsSnap, categoriesSnap, subcategoriesSnap, exchangeRatesSnap] = await Promise.all([
+        const [insurancesSnap, clientsSnap, policiesSnap, paymentsSnap, categoriesSnap, subcategoriesSnap, exchangeRatesSnap, caremedInvoicesSnap] = await Promise.all([
           getDocsFromServerOrCache(qInsurances),
           getDocsFromServerOrCache(collection(db, 'clients')),
           getDocsFromServerOrCache(collection(db, 'policies')),
           getDocsFromServerOrCache(qPayments),
           getDocsFromServerOrCache(collection(db, 'categories')),
           getDocsFromServerOrCache(collection(db, 'subcategories')),
-          getDocsFromServerOrCache(qExchangeRates)
+          getDocsFromServerOrCache(qExchangeRates),
+          getDocsFromServerOrCache(collection(db, 'caremedInvoices'))
         ]);
 
         setInsurances(insurancesSnap.docs.map(doc => ({ id: doc.id, ...(doc.data() as any) } as InsuranceRequest)));
@@ -233,6 +366,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
         setCategories(categoriesSnap.docs.map(doc => ({ id: doc.id, ...(doc.data() as any) } as Category)));
         setSubcategories(subcategoriesSnap.docs.map(doc => ({ id: doc.id, ...(doc.data() as any) } as Subcategory)));
         setExchangeRates(exchangeRatesSnap.docs.map(doc => ({ id: doc.id, ...(doc.data() as any) } as ExchangeRate)));
+        setCaremedInvoices(caremedInvoicesSnap.docs.map(doc => ({ id: doc.id, ...(doc.data() as any) })));
       } catch (error) {
         handleFirestoreError(error, OperationType.GET, 'reports data');
       } finally {
@@ -242,6 +376,32 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
 
     fetchData();
   }, [limitToCurrentMonth]);
+
+  const fetchLiveMonthlyReportData = async (): Promise<{
+    insurances: InsuranceRequest[];
+    payments: Payment[];
+    caremedInvoices: any[];
+  }> => {
+    const [insSnap, paySnap, invSnap] = await Promise.all([
+      getDocsFromServer(collection(db, 'insurances')),
+      getDocsFromServer(collection(db, 'payments')),
+      getDocsFromServer(collection(db, 'caremedInvoices'))
+    ]);
+    const liveInsurances = insSnap.docs.map(d => ({ id: d.id, ...(d.data() as any) } as InsuranceRequest));
+    const livePayments = paySnap.docs.map(d => ({ id: d.id, ...(d.data() as any) } as Payment));
+    const liveCaremed = invSnap.docs.map(d => ({ id: d.id, ...(d.data() as any) }));
+    setLiveReportInsurances(liveInsurances);
+    setLiveReportPayments(livePayments);
+    setLiveReportCaremed(liveCaremed);
+    return { insurances: liveInsurances, payments: livePayments, caremedInvoices: liveCaremed };
+  };
+
+  useEffect(() => {
+    if (!showReportModal) return;
+    fetchLiveMonthlyReportData().catch((error) => {
+      console.warn('No se pudo refrescar el reporte mensual en tiempo real:', error);
+    });
+  }, [showReportModal]);
 
   const filteredInsurances = useMemo(() => {
     return insurances.filter(ins => {
@@ -321,7 +481,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
   const totalPages = Math.ceil(filteredInsurances.length / pageSize);
 
   const exportToCSV = () => {
-    const headers = ['ID', 'Cliente', 'Tipo Cliente', 'Plan', 'Póliza', 'Fecha', 'Total', 'Costo', 'Margen', 'Comisión', 'Estado Pago'];
+    const headers = ['ID', 'Cliente', 'Tipo Cliente', 'Plan', 'P?liza', 'Fecha', 'Total', 'Costo', 'Margen', 'Comisi?n', 'Estado Pago'];
     const rows = filteredInsurances.map(ins => [
       ins.id,
       `${ins.firstName} ${ins.lastName}`,
@@ -359,18 +519,18 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
 
     const headers = [
       'Fecha de solicitud',
-      'Tipo Acción',
+      'Tipo Acci?n',
       'Nombre',
       'Apellido',
       'Fecha Nac.',
-      'Cód Origen',
+      'C?d Origen',
       'Fecha Salida',
-      'Cód Dest.',
+      'C?d Dest.',
       'Fecha Regreso',
-      'Meses/Días',
+      'Meses/D?as',
       'Precio USD',
       'Descuento USD',
-      'Comisión USD',
+      'Comisi?n USD',
       'Precio Total USD'
     ];
 
@@ -404,29 +564,28 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
   };
 
   const generateCSVForToCollect = () => {
-    const rawFiltered = insurances.filter(ins => {
-      const insDate = getNormalizedYYYYMMDD(ins.requestDate) || getNormalizedYYYYMMDD(ins.createdAt);
-      const matchesDate = insDate >= reportDates.start && insDate <= reportDates.end;
+    const reportSource = contextInsurances.length > 0 ? contextInsurances : insurances;
+    const rawFiltered = reportSource.filter(ins => {
       const matchesClient = reportClientId === 'All' || ins.clientId === reportClientId;
-      return matchesDate && matchesClient;
+      return matchesClient;
     });
     const sorted = sortInsurances(rawFiltered, reportSortBy);
-    const toCollect = sorted.filter(ins => ins.status === 'pending');
+    const toCollect = sorted.filter(isPolicyDeudor);
 
     const headers = [
-      'Tipo Acción',
+      'Tipo Acci?n',
       'Nombre',
       'Apellido',
       'Fecha Nac.',
-      'Cód Origen',
+      'C?d Origen',
       'Fecha Salida',
-      'Cód Dest.',
+      'C?d Dest.',
       'Fecha Regreso',
-      'Meses/Días',
+      'Meses/D?as',
       'Precio USD',
       'Descuento USD',
       'Precio Total USD',
-      'Comisión USD'
+      'Comisi?n USD'
     ];
 
     const rows = toCollect.map(ins => [
@@ -457,8 +616,25 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
     document.body.removeChild(link);
   };
 
-  const getFilteredReportData = () => {
-    const rawFiltered = insurances.filter(ins => {
+  const getFilteredReportData = (
+    liveInsurances?: InsuranceRequest[],
+    livePayments?: Payment[],
+    liveCaremedInvoices?: any[]
+  ) => {
+    const reportSource = (liveInsurances && liveInsurances.length > 0)
+      ? liveInsurances
+      : (liveReportInsurances.length > 0
+        ? liveReportInsurances
+        : (contextInsurances.length > 0 ? contextInsurances : insurances));
+    const paymentsSource = (livePayments && livePayments.length > 0)
+      ? livePayments
+      : (liveReportPayments.length > 0
+        ? liveReportPayments
+        : (contextPayments.length > 0 ? contextPayments : payments));
+    const caremedSource = (liveCaremedInvoices && liveCaremedInvoices.length > 0)
+      ? liveCaremedInvoices
+      : (liveReportCaremed.length > 0 ? liveReportCaremed : caremedInvoices);
+    const rawFiltered = reportSource.filter(ins => {
       const getSafeDateStr = (val: any) => {
         if (!val) return '';
         if (typeof val.toDate === 'function') {
@@ -472,7 +648,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
         }
       };
       const insDate = getNormalizedYYYYMMDD(ins.requestDate) || getNormalizedYYYYMMDD(ins.createdAt);
-      const matchesDate = insDate >= reportDates.start && insDate <= reportDates.end;
+      const matchesDate = reportType === 'to_collect' ? true : (insDate >= reportDates.start && insDate <= reportDates.end);
       const matchesClient = reportClientId === 'All' || ins.clientId === reportClientId;
       return matchesDate && matchesClient;
     });
@@ -480,7 +656,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
     const filtered = sortInsurances(rawFiltered, reportSortBy);
 
     if (reportType === 'altas') {
-      const totalSales = filtered.reduce((acc, curr) => acc + (curr.totalFinal || 0), 0);
+      const totalSales = filtered.reduce((acc, curr) => acc + getPolicySalesAmount(curr), 0);
       
       const getClientName = (clientId?: string) => {
         if (!clientId) return 'Individual/Otros';
@@ -513,7 +689,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
             groupKey: t,
             groupName: labelMap[t] || t,
             count: list.length,
-            total: list.reduce((sum, i) => sum + (i.totalFinal || 0), 0),
+            total: list.reduce((sum, i) => sum + getPolicySalesAmount(i), 0),
             insurances: list
           };
         });
@@ -521,7 +697,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
         groupedData.title = 'Por Tipo de Seguro';
         const groups: Record<string, InsuranceRequest[]> = {};
         filtered.forEach(ins => {
-          const key = ins.policyName || ins.policyId || 'Sin Póliza';
+          const key = ins.policyName || ins.policyId || 'Sin P?liza';
           if (!groups[key]) groups[key] = [];
           groups[key].push(ins);
         });
@@ -531,7 +707,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
             groupKey: policyName,
             groupName: policyName,
             count: list.length,
-            total: list.reduce((sum, i) => sum + (i.totalFinal || 0), 0),
+            total: list.reduce((sum, i) => sum + getPolicySalesAmount(i), 0),
             insurances: list
           };
         }).sort((a, b) => b.total - a.total);
@@ -552,7 +728,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
             groupKey: clientId,
             groupName: name,
             count: list.length,
-            total: list.reduce((sum, i) => sum + (i.totalFinal || 0), 0),
+            total: list.reduce((sum, i) => sum + getPolicySalesAmount(i), 0),
             insurances: list
           };
         }).sort((a, b) => b.total - a.total);
@@ -565,10 +741,10 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
         groupedData
       };
     } else if (reportType === 'to_collect') {
-      const toCollect = filtered.filter(ins => ins.status === 'pending');
-      const totalSales = toCollect.reduce((acc, curr) => acc + (curr.totalFinal || 0), 0);
+      const toCollect = filtered.filter(isPolicyDeudor);
+      const totalSales = toCollect.reduce((acc, curr) => acc + getPolicyExpectedAmount(curr), 0);
       const totalPaid = toCollect.reduce((acc, curr) => acc + (curr.totalPaid || 0), 0);
-      const totalPending = totalSales - totalPaid;
+      const totalPending = toCollect.reduce((acc, curr) => acc + getPolicyReceivableBalance(curr), 0);
 
       const getClientName = (clientId?: string) => {
         if (!clientId) return 'Individual/Otros';
@@ -599,7 +775,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
         };
         groupedData.items = types.map(t => {
           const list = toCollect.filter(ins => ins.clientType === t);
-          const tTotal = list.reduce((sum, i) => sum + (i.totalFinal || 0), 0);
+          const tTotal = list.reduce((sum, i) => sum + getPolicyExpectedAmount(i), 0);
           const tPaid = list.reduce((sum, i) => sum + (i.totalPaid || 0), 0);
           return {
             groupKey: t,
@@ -607,7 +783,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
             count: list.length,
             total: tTotal,
             totalPaid: tPaid,
-            totalPending: tTotal - tPaid,
+            totalPending: list.reduce((sum, i) => sum + getPolicyReceivableBalance(i), 0),
             insurances: list
           };
         });
@@ -615,13 +791,13 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
         groupedData.title = 'Por Tipo de Seguro';
         const groups: Record<string, InsuranceRequest[]> = {};
         toCollect.forEach(ins => {
-          const key = ins.policyName || ins.policyId || 'Sin Póliza';
+          const key = ins.policyName || ins.policyId || 'Sin P?liza';
           if (!groups[key]) groups[key] = [];
           groups[key].push(ins);
         });
 
         groupedData.items = Object.entries(groups).map(([policyName, list]) => {
-          const tTotal = list.reduce((sum, i) => sum + (i.totalFinal || 0), 0);
+          const tTotal = list.reduce((sum, i) => sum + getPolicyExpectedAmount(i), 0);
           const tPaid = list.reduce((sum, i) => sum + (i.totalPaid || 0), 0);
           return {
             groupKey: policyName,
@@ -629,7 +805,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
             count: list.length,
             total: tTotal,
             totalPaid: tPaid,
-            totalPending: tTotal - tPaid,
+            totalPending: list.reduce((sum, i) => sum + getPolicyReceivableBalance(i), 0),
             insurances: list
           };
         }).sort((a, b) => b.totalPending - a.totalPending);
@@ -646,7 +822,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
 
         groupedData.items = Object.entries(groups).map(([clientId, list]) => {
           const name = clientId === 'Individual/Otros' ? 'Individual/Otros' : getClientName(clientId);
-          const tTotal = list.reduce((sum, i) => sum + (i.totalFinal || 0), 0);
+          const tTotal = list.reduce((sum, i) => sum + getPolicyExpectedAmount(i), 0);
           const tPaid = list.reduce((sum, i) => sum + (i.totalPaid || 0), 0);
           return {
             groupKey: clientId,
@@ -654,11 +830,13 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
             count: list.length,
             total: tTotal,
             totalPaid: tPaid,
-            totalPending: tTotal - tPaid,
+            totalPending: list.reduce((sum, i) => sum + getPolicyReceivableBalance(i), 0),
             insurances: list
           };
         }).sort((a, b) => b.totalPending - a.totalPending);
       }
+
+      groupedData.items = groupedData.items.filter(item => item.count > 0 && item.totalPending > 0.01);
 
       const totalDiscounts = toCollect.reduce((acc, curr) => acc + (curr.discount || 0), 0);
       const totalCommissions = toCollect.reduce((acc, curr) => acc + (curr.agentCommission || 0), 0);
@@ -674,24 +852,34 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
         groupedData
       };
     } else if (reportType === 'to_pay') {
-      const toPay = filtered.filter(ins => ins.status === 'paid' && (!ins.providerPaymentStatus || ins.providerPaymentStatus === 'pending'));
-      const totalCost = toPay.reduce((acc, curr) => acc + (curr.totalCost || 0), 0);
+      const clientScoped = reportClientId === 'All'
+        ? reportSource
+        : reportSource.filter(ins => ins.clientId === reportClientId);
+      const invoiceGroups = buildPayableInvoiceGroups(
+        clientScoped,
+        paymentsSource,
+        caremedSource,
+        reportDates.start,
+        reportDates.end
+      );
+      const toPay = invoiceGroups.flatMap(g => g.insurances);
+      const totalCost = invoiceGroups.reduce((acc, g) => acc + g.pendingAmount, 0);
       return {
         filtered: toPay,
         totalCost,
-        count: toPay.length
+        count: invoiceGroups.length,
+        invoiceGroups
       };
     } else if (reportType === 'commissions') {
-      const pending = filtered.filter(ins => ins.commissionStatus === 'confirmed');
-      const totalSales = pending.reduce((acc, curr) => acc + (curr.totalFinal || 0), 0);
-      const totalCommissions = pending.reduce((acc, curr) => acc + (curr.agentCommission || 0), 0);
-      const totalDiscounts = pending.reduce((acc, curr) => acc + (curr.discount || 0), 0);
+      const totalSales = filtered.reduce((acc, curr) => acc + (curr.totalFinal || 0), 0);
+      const totalCommissions = filtered.reduce((acc, curr) => acc + getPolicyCommissionAmount(curr), 0);
+      const totalDiscounts = filtered.reduce((acc, curr) => acc + (curr.discount || 0), 0);
       return {
-        filtered: pending,
+        filtered,
         totalSales,
         totalCommissions,
         totalDiscounts,
-        count: pending.length
+        count: filtered.length
       };
     } else if (reportType === 'income_statement') {
       const getPaymentDateStr = (pDate: any) => {
@@ -702,12 +890,12 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
         return '';
       };
 
-      const rangeInsurances = insurances.filter(ins => {
+      const rangeInsurances = reportSource.filter(ins => {
         const insDate = getNormalizedYYYYMMDD(ins.requestDate) || getNormalizedYYYYMMDD(ins.createdAt);
         return insDate >= reportDates.start && insDate <= reportDates.end;
       });
 
-      const rangePayments = payments.filter(p => {
+      const rangePayments = paymentsSource.filter(p => {
         const pDate = getPaymentDateStr(p.date);
         return pDate >= reportDates.start && pDate <= reportDates.end;
       });
@@ -777,6 +965,18 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
   };
 
   const generatePDF = async () => {
+    let liveIns = liveReportInsurances.length > 0 ? liveReportInsurances : (contextInsurances.length > 0 ? contextInsurances : insurances);
+    let livePays = liveReportPayments.length > 0 ? liveReportPayments : (contextPayments.length > 0 ? contextPayments : payments);
+    let liveInv = liveReportCaremed.length > 0 ? liveReportCaremed : caremedInvoices;
+    try {
+      const fresh = await fetchLiveMonthlyReportData();
+      liveIns = fresh.insurances;
+      livePays = fresh.payments;
+      liveInv = fresh.caremedInvoices;
+    } catch (error) {
+      console.warn('No se pudo refrescar el reporte mensual en tiempo real:', error);
+    }
+
     const isDetailed = (reportType === 'altas' || reportType === 'to_collect') && reportFormat === 'detailed';
     const doc = new jsPDF({
       orientation: isDetailed ? 'landscape' : 'portrait'
@@ -861,7 +1061,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
       }
     };
 
-    const rawFiltered = insurances.filter(ins => {
+    const rawFiltered = liveIns.filter(ins => {
       const insDate = getNormalizedYYYYMMDD(ins.requestDate) || getNormalizedYYYYMMDD(ins.createdAt);
       const matchesDate = insDate >= reportDates.start && insDate <= reportDates.end;
       const matchesClient = reportClientId === 'All' || ins.clientId === reportClientId;
@@ -874,7 +1074,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
     let data: any[][] = [];
 
     if (reportType === 'altas') {
-      const reportData = getFilteredReportData() as {
+      const reportData = getFilteredReportData(liveIns, livePays, liveInv) as {
         filtered: InsuranceRequest[];
         totalSales: number;
         count: number;
@@ -894,7 +1094,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
 
       if (reportFormat === 'consolidated') {
         title = `Reporte Consolidado de Altas de Seguros (${groupedData.title})`;
-        headers = ['Grupo / Cliente', 'Cantidad de Pólizas', 'Venta Total'];
+        headers = ['Grupo / Cliente', 'Cantidad de P?lizas', 'Venta Total'];
         const bodyData = groupedData.items.map(item => [
           item.groupName,
           item.count.toString(),
@@ -947,22 +1147,22 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
           doc.setFontSize(11);
           doc.setFont("helvetica", "bold");
           doc.setTextColor(17, 24, 39);
-          doc.text(`${group.groupName} (${group.count} pólizas, Total: $${group.total.toFixed(2)})`, 14, currentY + 6);
+          doc.text(`${group.groupName} (${group.count} p?lizas, Total: $${group.total.toFixed(2)})`, 14, currentY + 6);
           
           const groupHeaders = [
             'Fecha Sol.',
-            'Tipo Acción',
+            'Tipo Acci?n',
             'Nombre',
             'Apellido',
             'Fecha Nac.',
-            'Cód Origen',
+            'C?d Origen',
             'Fecha Salida',
-            'Cód Dest.',
+            'C?d Dest.',
             'Fecha Regreso',
-            'Meses/Días',
+            'Meses/D?as',
             'Precio USD',
             'Descuento USD',
-            'Comisión USD',
+            'Comisi?n USD',
             'Precio Total USD'
           ];
           const groupBody = group.insurances.map(ins => [
@@ -1003,10 +1203,10 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
         doc.setFontSize(12);
         doc.setFont("helvetica", "bold");
         doc.setTextColor(17, 24, 39);
-        doc.text(`VENTA TOTAL GENERAL: $${totalSales.toFixed(2)} (${count} Pólizas)`, 14, currentY + 8);
+        doc.text(`VENTA TOTAL GENERAL: $${totalSales.toFixed(2)} (${count} P?lizas)`, 14, currentY + 8);
       }
     } else if (reportType === 'to_collect') {
-      const reportData = getFilteredReportData() as {
+      const reportData = getFilteredReportData(liveIns, livePays, liveInv) as {
         filtered: InsuranceRequest[];
         totalSales: number;
         totalPaid: number;
@@ -1117,7 +1317,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
 
       if (reportFormat === 'consolidated') {
         title = `Reporte Consolidado de Seguros por Cobrar (${groupedData.title})`;
-        headers = ['Grupo / Cliente', 'Cantidad de Pólizas', 'Saldo Deudor Total'];
+        headers = ['Grupo / Cliente', 'Cantidad de P?lizas', 'Saldo Deudor Total'];
         const bodyData = groupedData.items.map(item => [
           item.groupName,
           item.count.toString(),
@@ -1184,22 +1384,22 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
           doc.setFontSize(11);
           doc.setFont("helvetica", "bold");
           doc.setTextColor(17, 24, 39);
-          doc.text(`${group.groupName} (${group.count} pólizas, Saldo Deudor: $${group.totalPending.toFixed(2)})`, 14, currentY + 6);
+          doc.text(`${group.groupName} (${group.count} p?lizas, Saldo Deudor: $${group.totalPending.toFixed(2)})`, 14, currentY + 6);
           
           const groupHeaders = [
-            'Tipo Acción',
+            'Tipo Acci?n',
             'Nombre',
             'Apellido',
             'Fecha Nac.',
-            'Cód Origen',
+            'C?d Origen',
             'Fecha Salida',
-            'Cód Dest.',
+            'C?d Dest.',
             'Fecha Regreso',
-            'Meses/Días',
+            'Meses/D?as',
             'Precio USD',
             'Descuento USD',
             'Precio Total USD',
-            'Comisión USD'
+            'Comisi?n USD'
           ];
           const groupBody = group.insurances.map(ins => [
             ins.actionType || '',
@@ -1238,37 +1438,31 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
         doc.setFontSize(10);
         doc.setFont("helvetica", "bold");
         doc.setTextColor(17, 24, 39);
-        doc.text(`SALDO DEUDOR GENERAL: $${totalPending.toFixed(2)} / VENTA TOTAL GENERAL: $${totalSales.toFixed(2)} (${count} Pólizas)`, 14, currentY + 6);
+        doc.text(`SALDO DEUDOR GENERAL: $${totalPending.toFixed(2)} / VENTA TOTAL GENERAL: $${totalSales.toFixed(2)} (${count} P?lizas)`, 14, currentY + 6);
         
         drawSummaryBlock(doc, currentY + 11);
       }
     } else if (reportType === 'to_pay') {
       title = 'Reporte de Seguros por Pagar (Proveedores)';
-      const toPay = filtered.filter(ins => ins.status === 'paid' && (!ins.providerPaymentStatus || ins.providerPaymentStatus === 'pending'));
+      const payData = getFilteredReportData(liveIns, livePays, liveInv) as {
+        filtered: InsuranceRequest[];
+        totalCost: number;
+        count: number;
+        invoiceGroups: PayableInvoiceGroup[];
+      };
+      const invoiceGroups = payData.invoiceGroups || [];
+      const totalCostSum = payData.totalCost || 0;
 
       if (reportFormat === 'consolidated') {
-        const grouped: { [key: string]: { invoice: string, count: number, totalCost: number } } = {};
-        toPay.forEach(ins => {
-          const inv = ins.InvoiceCaremed || 'No asignado';
-          if (!grouped[inv]) {
-            grouped[inv] = { invoice: inv, count: 0, totalCost: 0 };
-          }
-          grouped[inv].count += 1;
-          grouped[inv].totalCost += getPolicyEffectiveCost(ins);
-        });
-
-        const bodyData = Object.values(grouped).map(g => [
+        const bodyData = invoiceGroups.map(g => [
           g.invoice,
           g.count.toString(),
-          `$${g.totalCost.toFixed(2)}`
+          `$${g.pendingAmount.toFixed(2)}`
         ]);
-
-        const totalCount = toPay.length;
-        const totalCostSum = toPay.reduce((acc, curr) => acc + getPolicyEffectiveCost(curr), 0);
 
         bodyData.push([
           'TOTALES',
-          totalCount.toString(),
+          invoiceGroups.reduce((acc, g) => acc + g.count, 0).toString(),
           `$${totalCostSum.toFixed(2)}`
         ]);
 
@@ -1282,19 +1476,30 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
 
         autoTable(doc, {
           startY: 45,
-          head: [['Invoice', 'Número de Seguros', 'Saldo por Pagar']],
+          head: [['Invoice', 'N?mero de Seguros', 'Monto por Pagar']],
           body: bodyData,
           theme: 'striped',
           headStyles: { fillColor: [5, 150, 105] }, // emerald-600
           margin: { top: 45 },
         });
       } else {
-        headers = ['Asegurado', 'Póliza', 'Fecha Sol.', 'Costo'];
-        data = toPay.map(ins => [
-          `${ins.firstName} ${ins.lastName}`,
-          ins.policyName || ins.policyId,
-          ins.requestDate || '',
-          `$${(ins.totalCost || 0).toFixed(2)}`
+        headers = ['Invoice', 'Asegurado', 'P?liza', 'Fecha Invoice', 'Monto por Pagar'];
+        data = invoiceGroups.flatMap(g =>
+          g.insurances.map((ins, idx) => [
+            g.invoice,
+            `${ins.firstName} ${ins.lastName}`,
+            ins.policyName || ins.policyId,
+            g.invoiceDate || '',
+            idx === 0 ? `$${g.pendingAmount.toFixed(2)}` : ''
+          ])
+        );
+
+        data.push([
+          'TOTALES',
+          '',
+          '',
+          `${payData.count} invoices`,
+          `$${totalCostSum.toFixed(2)}`
         ]);
 
         doc.setFontSize(18);
@@ -1315,15 +1520,22 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
         });
       }
     } else if (reportType === 'commissions') {
-      const pending = filtered.filter(ins => ins.commissionStatus === 'confirmed');
-      const totalInsurances = pending.length;
-      const totalSales = pending.reduce((acc, curr) => acc + (curr.totalFinal || 0), 0);
-      const totalCommissions = pending.reduce((acc, curr) => acc + (curr.agentCommission || 0), 0);
-      const totalDiscounts = pending.reduce((acc, curr) => acc + (curr.discount || 0), 0);
+      const commData = getFilteredReportData(liveIns, livePays, liveInv) as {
+        filtered: InsuranceRequest[];
+        totalSales: number;
+        totalCommissions: number;
+        totalDiscounts: number;
+        count: number;
+      };
+      const pending = commData.filtered;
+      const totalInsurances = commData.count;
+      const totalSales = commData.totalSales;
+      const totalCommissions = commData.totalCommissions;
+      const totalDiscounts = commData.totalDiscounts;
 
       const policyCounts: { [key: string]: number } = {};
       pending.forEach(ins => {
-        const pName = ins.policyName || ins.policyId || 'Sin Póliza';
+        const pName = ins.policyName || ins.policyId || 'Sin P?liza';
         policyCounts[pName] = (policyCounts[pName] || 0) + 1;
       });
 
@@ -1358,7 +1570,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
       // Section 2: breakdown by policy type (number of insurances)
       autoTable(landscapeDoc, {
         startY: (landscapeDoc as any).lastAutoTable.finalY + 12,
-        head: [['Tipo de Póliza', 'Número de Seguros']],
+        head: [['Tipo de P?liza', 'N?mero de Seguros']],
         body: Object.entries(policyCounts).map(([p, c]) => [p, c.toString()]),
         theme: 'grid',
         headStyles: { fillColor: [100, 100, 100] },
@@ -1374,7 +1586,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
       drawTopRightLogo(landscapeDoc, true);
       landscapeDoc.setFontSize(9);
       landscapeDoc.setTextColor(100);
-      landscapeDoc.text(`Página 2 - Listado de Registros`, 14, 26);
+      landscapeDoc.text(`P?gina 2 - Listado de Registros`, 14, 26);
 
       const detailedHeaders = [
         'Fecha Sol.',
@@ -1382,9 +1594,9 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
         'Nombre',
         'Apellido',
         'F. Nac.',
-        'Cód Origen',
+        'C?d Origen',
         'F. Salida',
-        'Cód Dest.',
+        'C?d Dest.',
         'F. Regreso',
         'Meses/Dias',
         'Prec. USD',
@@ -1402,7 +1614,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
         const tc = getExchangeRateForRequestDate(ins, exchangeRates);
         const precioUSD = ins.totalPrice || 0;
         const descuentoUSD = ins.discount || 0;
-        const comisionUSD = ins.agentCommission || 0;
+        const comisionUSD = getPolicyCommissionAmount(ins);
         const totalUSD = ins.totalFinal || 0;
 
         const precioMXP = precioUSD * tc;
@@ -1439,12 +1651,12 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
       // Compute overall sums for detailed table footer
       const sumPrecioUSD = pending.reduce((acc, curr) => acc + (curr.totalPrice || 0), 0);
       const sumDescuentoUSD = pending.reduce((acc, curr) => acc + (curr.discount || 0), 0);
-      const sumComisionUSD = pending.reduce((acc, curr) => acc + (curr.agentCommission || 0), 0);
+      const sumComisionUSD = pending.reduce((acc, curr) => acc + getPolicyCommissionAmount(curr), 0);
       const sumTotalUSD = pending.reduce((acc, curr) => acc + (curr.totalFinal || 0), 0);
 
       const sumPrecioMXP = pending.reduce((acc, curr) => acc + ((curr.totalPrice || 0) * getExchangeRateForRequestDate(curr, exchangeRates)), 0);
       const sumDescuentoMXP = pending.reduce((acc, curr) => acc + ((curr.discount || 0) * getExchangeRateForRequestDate(curr, exchangeRates)), 0);
-      const sumComisionMXP = pending.reduce((acc, curr) => acc + ((curr.agentCommission || 0) * getExchangeRateForRequestDate(curr, exchangeRates)), 0);
+      const sumComisionMXP = pending.reduce((acc, curr) => acc + (getPolicyCommissionAmount(curr) * getExchangeRateForRequestDate(curr, exchangeRates)), 0);
       const sumTotalMXP = pending.reduce((acc, curr) => acc + ((curr.totalFinal || 0) * getExchangeRateForRequestDate(curr, exchangeRates)), 0);
 
       detailedRows.push([
@@ -1487,13 +1699,13 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
       };
 
       // Filter insurances in range
-      const rangeInsurances = insurances.filter(ins => {
+      const rangeInsurances = liveIns.filter(ins => {
         const insDate = ins.requestDate || (ins.createdAt?.toDate ? ins.createdAt.toDate().toISOString().split('T')[0] : '');
         return insDate >= reportDates.start && insDate <= reportDates.end;
       });
 
       // Filter payments in range
-      const rangePayments = payments.filter(p => {
+      const rangePayments = livePays.filter(p => {
         const pDate = getPaymentDateStr(p.date);
         return pDate >= reportDates.start && pDate <= reportDates.end;
       });
@@ -1725,7 +1937,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
       )}
       <header className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Reportes y Estadísticas</h1>
+          <h1 className="text-2xl font-bold text-gray-900">Reportes y Estad?sticas</h1>
           <p className="text-gray-500">Visualiza el rendimiento y genera informes detallados</p>
         </div>
         <div className="flex flex-wrap items-center gap-2.5">
@@ -1745,7 +1957,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
               setShowMonthlyClosingModal(true);
             }}
             className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-indigo-600 to-indigo-700 hover:from-indigo-700 hover:to-indigo-800 text-white font-bold text-sm rounded-xl transition-all shadow-md shadow-indigo-200 cursor-pointer"
-            title="Generar auditoría y PDF de Cierre de Mes"
+            title="Generar auditor?a y PDF de Cierre de Mes"
           >
             <CalendarCheck className="w-4 h-4" />
             Cierre de Mes
@@ -1757,7 +1969,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
               setShowMonthlyReportModal(true);
             }}
             className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-blue-600 to-slate-800 hover:from-blue-700 hover:to-slate-900 text-white font-bold text-sm rounded-xl transition-all shadow-md shadow-blue-200 cursor-pointer"
-            title="Generar reporte mensual consolidado (números finales)"
+            title="Generar reporte mensual consolidado (n?meros finales)"
           >
             <BarChart3 className="w-4 h-4" />
             Reporte Mensual
@@ -1826,13 +2038,13 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
           </div>
 
           <div>
-            <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1 ml-1">Tipo de Póliza</label>
+            <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1 ml-1">Tipo de P?liza</label>
             <select 
               value={policyNameFilter}
               onChange={(e) => setPolicyNameFilter(e.target.value)}
               className="w-full px-4 py-2.5 bg-gray-50 border border-gray-100 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none text-sm appearance-none"
             >
-              <option value="All">Todas las pólizas</option>
+              <option value="All">Todas las p?lizas</option>
               {uniquePolicies.map(p => <option key={p} value={p}>{p}</option>)}
             </select>
           </div>
@@ -1886,7 +2098,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
           </div>
 
           <div>
-            <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1 ml-1">Estado Comisión</label>
+            <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1 ml-1">Estado Comisi?n</label>
             <select 
               value={commissionStatusFilter}
               onChange={(e) => setCommissionStatusFilter(e.target.value)}
@@ -1951,7 +2163,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
             <div className="p-2 bg-indigo-50 rounded-xl">
               <CheckCircle2 className="w-5 h-5 text-indigo-600" />
             </div>
-            <h3 className="font-bold text-gray-900">Ventas del Día</h3>
+            <h3 className="font-bold text-gray-900">Ventas del D?a</h3>
           </div>
           <p className="text-xl font-black text-gray-900">${stats.todaySales.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD</p>
           <p className="text-[10px] text-gray-400 font-bold uppercase tracking-tighter mt-1">
@@ -2033,7 +2245,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                     />
                   </th>
                   <th className="px-6 py-4">Cliente</th>
-                  <th className="px-6 py-4">Plan / Póliza</th>
+                  <th className="px-6 py-4">Plan / P?liza</th>
                   <th className="px-6 py-4">Fecha</th>
                   <th className="px-6 py-4 text-right">Costo</th>
                   <th className="px-6 py-4 text-right">Total</th>
@@ -2085,7 +2297,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                   Mostrando <span className="font-bold text-gray-900">{filteredInsurances.length === 0 ? 0 : ((currentPage - 1) * pageSize) + 1}</span> a <span className="font-bold text-gray-900">{Math.min(currentPage * pageSize, filteredInsurances.length)}</span> de <span className="font-bold text-gray-900">{filteredInsurances.length}</span> registros
                 </p>
                 <div className="flex items-center gap-2 border-l border-gray-200 pl-4">
-                  <span className="text-xs text-gray-500">Filas por página:</span>
+                  <span className="text-xs text-gray-500">Filas por p?gina:</span>
                   <select
                     value={pageSize}
                     onChange={(e) => {
@@ -2145,7 +2357,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
             <div className="p-2 bg-indigo-50 rounded-xl">
               <BarChart3 className="w-5 h-5 text-indigo-600" />
             </div>
-            <h3 className="font-bold text-gray-900">Reportes Rápidos</h3>
+            <h3 className="font-bold text-gray-900">Reportes R?pidos</h3>
           </div>
           <div className="space-y-3">
             <button 
@@ -2275,7 +2487,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
           <div className="mt-8 p-4 bg-blue-600 rounded-2xl text-white">
             <h4 className="font-bold mb-1">Tip de Reportes</h4>
             <p className="text-[10px] opacity-80 leading-relaxed">
-              Utiliza los filtros superiores para refinar los resultados. Puedes exportar cualquier vista filtrada a formato CSV para análisis externo.
+              Utiliza los filtros superiores para refinar los resultados. Puedes exportar cualquier vista filtrada a formato CSV para an?lisis externo.
             </p>
           </div>
         </div>
@@ -2334,7 +2546,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                     <option value="Tarjeta">Tarjeta</option>
                     <option value="Efectivo">Efectivo</option>
                     <option value="Cheque">Cheque</option>
-                    <option value="Descuento comision">Descuento comisión</option>
+                    <option value="Descuento comision">Descuento comisi?n</option>
                   </select>
                 </div>
 
@@ -2342,7 +2554,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                   <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1.5 ml-1">Comprobante / Referencia</label>
                   <input 
                     type="text"
-                    placeholder="Número de rastreo o referencia"
+                    placeholder="N?mero de rastreo o referencia"
                     value={paymentForm.receipt}
                     onChange={(e) => setPaymentForm(prev => ({ ...prev, receipt: e.target.value }))}
                     className="w-full px-4 py-3.5 bg-gray-50 border border-gray-100 rounded-2xl focus:ring-2 focus:ring-emerald-500 outline-none text-sm font-medium"
@@ -2404,7 +2616,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                        reportType === 'to_pay' ? 'Reporte Seguros por Pagar' : 
                        reportType === 'income_statement' ? 'Estado de Resultados' : 'Reporte Comisiones Pendientes'}
                     </h2>
-                    <p className="text-sm text-gray-500 font-medium">Visualiza los datos del reporte en tiempo real y expórtalos</p>
+                    <p className="text-sm text-gray-500 font-medium">Visualiza los datos del reporte en tiempo real y exp?rtalos</p>
                   </div>
                 </div>
                 <button 
@@ -2418,7 +2630,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
                 {/* Left Column: Controls */}
                 <div className="space-y-5 lg:border-r lg:border-gray-100 lg:pr-8">
-                  <h3 className="text-xs font-black text-gray-400 tracking-widest uppercase mb-1">Configuración</h3>
+                  <h3 className="text-xs font-black text-gray-400 tracking-widest uppercase mb-1">Configuraci?n</h3>
                   
                   <div>
                     <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1.5 ml-1">Fecha Inicio</label>
@@ -2479,7 +2691,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                       >
                         <option value="all">Tipo de Cliente (Agente, Corporativo o Individual)</option>
                         <option value="Agent">Por Agente</option>
-                        <option value="policy">Por Tipo de Seguro (Póliza)</option>
+                        <option value="policy">Por Tipo de Seguro (P?liza)</option>
                         <option value="Corporate">Por Corporativos</option>
                         <option value="Individual">Por Individuales</option>
                       </select>
@@ -2494,7 +2706,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                         onChange={(e) => setReportFormat(e.target.value as 'detailed' | 'consolidated')}
                         className="w-full px-4 py-3.5 bg-gray-50 border border-gray-100 rounded-2xl focus:ring-2 focus:ring-blue-500 outline-none text-sm font-medium appearance-none"
                       >
-                        <option value="detailed">Detallado (Estándar)</option>
+                        <option value="detailed">Detallado (Est?ndar)</option>
                         <option value="consolidated">Consolidado (Resumen)</option>
                       </select>
                     </div>
@@ -2551,7 +2763,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                       onClick={() => setShowReportModal(false)}
                       className="w-full px-6 py-3 bg-white text-gray-500 font-bold rounded-xl hover:bg-gray-100 transition-all border border-gray-200 text-sm"
                     >
-                      Cerrar diálogo
+                      Cerrar di?logo
                     </button>
                   </div>
                 </div>
@@ -2605,7 +2817,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                                     <thead>
                                       <tr className="border-b border-gray-100 text-[10px] font-black text-gray-400 uppercase tracking-wider pb-2">
                                         <th className="pb-2">Grupo / Cliente</th>
-                                        <th className="pb-2 text-center">Pólizas</th>
+                                        <th className="pb-2 text-center">P?lizas</th>
                                         <th className="pb-2 text-right">Venta Total</th>
                                       </tr>
                                     </thead>
@@ -2639,25 +2851,25 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                                       <div key={item.groupKey || idx} className="space-y-2">
                                         <div className="flex justify-between items-center bg-purple-50/50 px-4 py-2 rounded-xl border border-purple-100/50">
                                           <span className="text-xs font-bold text-purple-900">{item.groupName}</span>
-                                          <span className="text-[10px] font-black text-purple-700 bg-white px-2 py-0.5 rounded-md border border-purple-100">{item.count} pólizas • ${item.total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                                          <span className="text-[10px] font-black text-purple-700 bg-white px-2 py-0.5 rounded-md border border-purple-100">{item.count} p?lizas ? ${item.total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                                         </div>
                                         <div className="overflow-x-auto bg-white rounded-2xl border border-gray-100 p-3 shadow-sm">
                                           <table className="w-full text-left border-collapse">
                                             <thead>
                                               <tr className="border-b border-gray-100 text-[9px] font-black text-gray-400 uppercase tracking-wider pb-1">
                                                 <th className="pb-1.5 whitespace-nowrap">Fecha Sol.</th>
-                                                <th className="pb-1.5 whitespace-nowrap">Tipo Acción</th>
+                                                <th className="pb-1.5 whitespace-nowrap">Tipo Acci?n</th>
                                                 <th className="pb-1.5 whitespace-nowrap">Nombre</th>
                                                 <th className="pb-1.5 whitespace-nowrap">Apellido</th>
                                                 <th className="pb-1.5 whitespace-nowrap">Fecha Nac.</th>
-                                                <th className="pb-1.5 whitespace-nowrap">Cód Origen</th>
+                                                <th className="pb-1.5 whitespace-nowrap">C?d Origen</th>
                                                 <th className="pb-1.5 whitespace-nowrap">Fecha Salida</th>
-                                                <th className="pb-1.5 whitespace-nowrap">Cód Dest.</th>
+                                                <th className="pb-1.5 whitespace-nowrap">C?d Dest.</th>
                                                 <th className="pb-1.5 whitespace-nowrap">Fecha Regreso</th>
-                                                <th className="pb-1.5 whitespace-nowrap">Meses/Días</th>
+                                                <th className="pb-1.5 whitespace-nowrap">Meses/D?as</th>
                                                 <th className="pb-1.5 whitespace-nowrap text-right">Precio USD</th>
                                                 <th className="pb-1.5 whitespace-nowrap text-right">Descuento USD</th>
-                                                <th className="pb-1.5 whitespace-nowrap text-right">Comisión USD</th>
+                                                <th className="pb-1.5 whitespace-nowrap text-right">Comisi?n USD</th>
                                                 <th className="pb-1.5 whitespace-nowrap text-right">Precio Total USD</th>
                                               </tr>
                                             </thead>
@@ -2766,7 +2978,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                                     <thead>
                                       <tr className="border-b border-gray-100 text-[10px] font-black text-gray-400 uppercase tracking-wider pb-2">
                                         <th className="pb-2">Grupo / Cliente</th>
-                                        <th className="pb-2 text-center">Pólizas</th>
+                                        <th className="pb-2 text-center">P?lizas</th>
                                         <th className="pb-2 text-right">Venta Total</th>
                                         <th className="pb-2 text-right">Cobrado</th>
                                         <th className="pb-2 text-right">Saldo Deudor</th>
@@ -2805,26 +3017,26 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                                         <div className="flex justify-between items-center bg-rose-50/50 px-4 py-2 rounded-xl border border-rose-100/50">
                                           <span className="text-xs font-bold text-rose-900">{item.groupName}</span>
                                           <span className="text-[10px] font-black text-rose-700 bg-white px-2 py-0.5 rounded-md border border-rose-100">
-                                            {item.count} pólizas • Saldo: ${item.totalPending.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                            {item.count} p?lizas ? Saldo: ${item.totalPending.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                                           </span>
                                         </div>
                                         <div className="overflow-x-auto bg-white rounded-2xl border border-gray-100 p-3 shadow-sm">
                                           <table className="w-full text-left border-collapse">
                                             <thead>
                                               <tr className="border-b border-gray-100 text-[9px] font-black text-gray-400 uppercase tracking-wider pb-1">
-                                                <th className="pb-1.5 whitespace-nowrap">Tipo Acción</th>
+                                                <th className="pb-1.5 whitespace-nowrap">Tipo Acci?n</th>
                                                 <th className="pb-1.5 whitespace-nowrap">Nombre</th>
                                                 <th className="pb-1.5 whitespace-nowrap">Apellido</th>
                                                 <th className="pb-1.5 whitespace-nowrap">Fecha Nac.</th>
-                                                <th className="pb-1.5 whitespace-nowrap">Cód Origen</th>
+                                                <th className="pb-1.5 whitespace-nowrap">C?d Origen</th>
                                                 <th className="pb-1.5 whitespace-nowrap">Fecha Salida</th>
-                                                <th className="pb-1.5 whitespace-nowrap">Cód Dest.</th>
+                                                <th className="pb-1.5 whitespace-nowrap">C?d Dest.</th>
                                                 <th className="pb-1.5 whitespace-nowrap">Fecha Regreso</th>
-                                                <th className="pb-1.5 whitespace-nowrap">Meses/Días</th>
+                                                <th className="pb-1.5 whitespace-nowrap">Meses/D?as</th>
                                                 <th className="pb-1.5 whitespace-nowrap text-right">Precio USD</th>
                                                 <th className="pb-1.5 whitespace-nowrap text-right">Descuento USD</th>
                                                 <th className="pb-1.5 whitespace-nowrap text-right">Precio Total USD</th>
-                                                <th className="pb-1.5 whitespace-nowrap text-right">Comisión USD</th>
+                                                <th className="pb-1.5 whitespace-nowrap text-right">Comisi?n USD</th>
                                               </tr>
                                             </thead>
                                             <tbody className="divide-y divide-gray-50 text-[11px]">
@@ -2864,28 +3076,23 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                       }
 
                       if (reportType === 'to_pay') {
-                        const { filtered, totalCost, count } = data as { filtered: InsuranceRequest[], totalCost: number, count: number };
+                        const { totalCost, count, invoiceGroups = [] } = data as {
+                          filtered: InsuranceRequest[];
+                          totalCost: number;
+                          count: number;
+                          invoiceGroups?: PayableInvoiceGroup[];
+                        };
                         
                         if (reportFormat === 'consolidated') {
-                          const grouped: { [key: string]: { invoice: string, count: number, totalCost: number } } = {};
-                          filtered.forEach(ins => {
-                            const inv = ins.InvoiceCaremed || 'No asignado';
-                            if (!grouped[inv]) {
-                              grouped[inv] = { invoice: inv, count: 0, totalCost: 0 };
-                            }
-                            grouped[inv].count += 1;
-                            grouped[inv].totalCost += getPolicyEffectiveCost(ins);
-                          });
-
                           return (
                             <div className="space-y-6">
                               <div className="grid grid-cols-2 gap-4">
                                 <div className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm">
-                                  <p className="text-[10px] font-bold text-gray-400 uppercase">Total de Seguros por Pagar</p>
+                                  <p className="text-[10px] font-bold text-gray-400 uppercase">Invoices por Pagar</p>
                                   <p className="text-xl font-black text-emerald-600 mt-1">{count}</p>
                                 </div>
                                 <div className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm">
-                                  <p className="text-[10px] font-bold text-gray-400 uppercase">Saldo por Pagar Total</p>
+                                  <p className="text-[10px] font-bold text-gray-400 uppercase">Monto por Pagar Total</p>
                                   <p className="text-xl font-black text-gray-900 mt-1">${totalCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
                                 </div>
                               </div>
@@ -2895,21 +3102,21 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                                   <thead>
                                     <tr className="border-b border-gray-200 text-[10px] font-black text-gray-400 uppercase tracking-widest">
                                       <th className="pb-2">Invoice</th>
-                                      <th className="pb-2 text-center">Número de Seguros</th>
-                                      <th className="pb-2 text-right">Saldo por Pagar</th>
+                                      <th className="pb-2 text-center">N?mero de Seguros</th>
+                                      <th className="pb-2 text-right">Monto por Pagar</th>
                                     </tr>
                                   </thead>
                                   <tbody className="divide-y divide-gray-100 text-xs">
-                                    {Object.values(grouped).length === 0 ? (
+                                    {invoiceGroups.length === 0 ? (
                                       <tr>
                                         <td colSpan={3} className="py-8 text-center text-gray-400 italic">No hay seguros por pagar.</td>
                                       </tr>
                                     ) : (
-                                      Object.values(grouped).map((g, idx) => (
-                                        <tr key={idx}>
+                                      invoiceGroups.map((g, idx) => (
+                                        <tr key={g.invoice || idx}>
                                           <td className="py-2 font-semibold text-gray-800">{g.invoice}</td>
                                           <td className="py-2 text-center font-medium text-gray-600">{g.count}</td>
-                                          <td className="py-2 text-right font-bold text-emerald-600">${g.totalCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+                                          <td className="py-2 text-right font-bold text-emerald-600">${g.pendingAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
                                         </tr>
                                       ))
                                     )}
@@ -2924,11 +3131,11 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                           <div className="space-y-6">
                             <div className="grid grid-cols-2 gap-4">
                               <div className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm">
-                                <p className="text-[10px] font-bold text-gray-400 uppercase">Seguros Pendientes Pago</p>
+                                <p className="text-[10px] font-bold text-gray-400 uppercase">Invoices por Pagar</p>
                                 <p className="text-xl font-black text-emerald-600 mt-1">{count}</p>
                               </div>
                               <div className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm">
-                                <p className="text-[10px] font-bold text-gray-400 uppercase">Costo Total a Proveedores</p>
+                                <p className="text-[10px] font-bold text-gray-400 uppercase">Monto por Pagar Total</p>
                                 <p className="text-xl font-black text-gray-900 mt-1">${totalCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
                               </div>
                             </div>
@@ -2937,26 +3144,30 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                               <table className="w-full text-left border-collapse">
                                 <thead>
                                   <tr className="border-b border-gray-200 text-[10px] font-black text-gray-400 uppercase tracking-widest">
+                                    <th className="pb-2">Invoice</th>
                                     <th className="pb-2">Asegurado</th>
-                                    <th className="pb-2">Póliza</th>
-                                    <th className="pb-2">Fecha Sol.</th>
-                                    <th className="pb-2 text-right">Costo</th>
+                                    <th className="pb-2">P?liza</th>
+                                    <th className="pb-2">Fecha Invoice</th>
+                                    <th className="pb-2 text-right">Monto por Pagar</th>
                                   </tr>
                                 </thead>
                                 <tbody className="divide-y divide-gray-100 text-xs">
-                                  {filtered.length === 0 ? (
+                                  {invoiceGroups.length === 0 ? (
                                     <tr>
-                                      <td colSpan={4} className="py-8 text-center text-gray-400 italic">No hay seguros por pagar a proveedores.</td>
+                                      <td colSpan={5} className="py-8 text-center text-gray-400 italic">No hay seguros por pagar a proveedores.</td>
                                     </tr>
                                   ) : (
-                                    filtered.map((ins, idx) => (
-                                      <tr key={ins.id || idx}>
-                                        <td className="py-2 font-medium">{ins.firstName} {ins.lastName}</td>
-                                        <td className="py-2 text-gray-600 font-bold">{ins.policyName || ins.policyId}</td>
-                                        <td className="py-2 text-gray-500">{ins.requestDate || ''}</td>
-                                        <td className="py-2 text-right font-bold text-gray-900">${(ins.totalCost || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
-                                      </tr>
-                                    ))
+                                    invoiceGroups.flatMap((g) =>
+                                      g.insurances.map((ins, idx) => (
+                                        <tr key={`${g.invoice}-${ins.id || idx}`}>
+                                          <td className="py-2 font-semibold text-gray-800">{idx === 0 ? g.invoice : ''}</td>
+                                          <td className="py-2 font-medium">{ins.firstName} {ins.lastName}</td>
+                                          <td className="py-2 text-gray-600 font-bold">{ins.policyName || ins.policyId}</td>
+                                          <td className="py-2 text-gray-500">{idx === 0 ? (g.invoiceDate || '') : ''}</td>
+                                          <td className="py-2 text-right font-bold text-emerald-600">{idx === 0 ? `$${g.pendingAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : ''}</td>
+                                        </tr>
+                                      ))
+                                    )
                                   )}
                                 </tbody>
                               </table>
@@ -2977,7 +3188,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                         // Calculate number of insurances per policy type
                         const policyCounts: { [key: string]: number } = {};
                         filtered.forEach(ins => {
-                          const pName = ins.policyName || ins.policyId || 'Sin Póliza';
+                          const pName = ins.policyName || ins.policyId || 'Sin P?liza';
                           policyCounts[pName] = (policyCounts[pName] || 0) + 1;
                         });
 
@@ -3008,7 +3219,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
 
                             {/* Insurances by Policy Type */}
                             <div className="space-y-3">
-                              <h4 className="text-xs font-black text-gray-500 uppercase tracking-widest">Seguros por Tipo de Póliza</h4>
+                              <h4 className="text-xs font-black text-gray-500 uppercase tracking-widest">Seguros por Tipo de P?liza</h4>
                               <div className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
                                 <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
                                   {Object.entries(policyCounts).map(([policyName, countVal], idx) => (
@@ -3018,7 +3229,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                                     </div>
                                   ))}
                                   {Object.keys(policyCounts).length === 0 && (
-                                    <p className="col-span-full text-center text-xs text-gray-400 italic py-2">No hay datos por póliza.</p>
+                                    <p className="col-span-full text-center text-xs text-gray-400 italic py-2">No hay datos por p?liza.</p>
                                   )}
                                 </div>
                               </div>
@@ -3036,19 +3247,19 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                                       <th className="p-3 whitespace-nowrap">Nombre</th>
                                       <th className="p-3 whitespace-nowrap">Apellido</th>
                                       <th className="p-3 whitespace-nowrap">Fecha Nac.</th>
-                                      <th className="p-3 whitespace-nowrap">Cód Origen</th>
+                                      <th className="p-3 whitespace-nowrap">C?d Origen</th>
                                       <th className="p-3 whitespace-nowrap">Fecha Salida</th>
-                                      <th className="p-3 whitespace-nowrap">Cód Destino</th>
+                                      <th className="p-3 whitespace-nowrap">C?d Destino</th>
                                       <th className="p-3 whitespace-nowrap">Fecha Regreso</th>
                                       <th className="p-3 whitespace-nowrap">Meses/Dias</th>
                                       <th className="p-3 whitespace-nowrap text-right">Precio USD</th>
                                       <th className="p-3 whitespace-nowrap text-right">Descuento USD</th>
-                                      <th className="p-3 whitespace-nowrap text-right">Comisión USD</th>
+                                      <th className="p-3 whitespace-nowrap text-right">Comisi?n USD</th>
                                       <th className="p-3 whitespace-nowrap text-right">Precio Total USD</th>
                                       <th className="p-3 whitespace-nowrap text-right">T.C.</th>
                                       <th className="p-3 whitespace-nowrap text-right">Precio MXP</th>
                                       <th className="p-3 whitespace-nowrap text-right">Descuento MXP</th>
-                                      <th className="p-3 whitespace-nowrap text-right">Comisión MXP</th>
+                                      <th className="p-3 whitespace-nowrap text-right">Comisi?n MXP</th>
                                       <th className="p-3 whitespace-nowrap text-right">Precio Total MXP</th>
                                     </tr>
                                   </thead>
@@ -3062,7 +3273,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                                         const tc = getExchangeRateForRequestDate(ins, exchangeRates);
                                         const precioUSD = ins.totalPrice || 0;
                                         const descuentoUSD = ins.discount || 0;
-                                        const comisionUSD = ins.agentCommission || 0;
+                                        const comisionUSD = getPolicyCommissionAmount(ins);
                                         const totalUSD = ins.totalFinal || 0;
 
                                         const precioMXP = precioUSD * tc;
