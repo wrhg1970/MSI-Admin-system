@@ -175,7 +175,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
   const [invoiceListSortField, setInvoiceListSortField] = useState<'exportDate' | 'invoiceDate' | 'invoiceNumber' | 'policyCount' | 'totalCalculatedCost' | 'difference'>('exportDate');
   const [invoiceListSortOrder, setInvoiceListSortOrder] = useState<'asc' | 'desc'>('desc');
 
-  // Detailed sub-tab (Detalle de P?lizas por Invoice) filters & sort states
+  // Detailed sub-tab (Detalle de Pólizas por Invoice) filters & sort states
   const [invoiceDetailViewMode, setInvoiceDetailViewMode] = useState<'concentrated' | 'detailed'>('concentrated');
   const [expandedGroupKeys, setExpandedGroupKeys] = useState<string[]>([]);
   const [invoiceDetailSearchTerm, setInvoiceDetailSearchTerm] = useState('');
@@ -491,6 +491,12 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
     } else if (filterType === 'unpaid') {
       setStatusFilter('unpaid');
       setRequestDateRange({ start: '', end: '' });
+    } else if (filterType === 'active') {
+      setOperationalStatusFilter('Activo');
+      setRequestDateRange({ start: '', end: '' });
+    } else if (filterType === 'pending') {
+      setStatusFilter('pending');
+      setRequestDateRange({ start: '', end: '' });
     }
   }, [searchParams]);
 
@@ -702,7 +708,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
 
       setInvoiceMessage({
         type: 'success',
-        text: `Se ha asignado el invoice "${invoiceInput.trim()}" a ${caremedSelectedIds.length} p?lizas con ?xito.`
+        text: `Se ha asignado el invoice "${invoiceInput.trim()}" a ${caremedSelectedIds.length} pólizas con éxito.`
       });
       setCaremedSelectedIds([]);
       setInvoiceInput('');
@@ -715,7 +721,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
       console.error("Error assigning Invoice Caremed:", error);
       setInvoiceMessage({
         type: 'error',
-        text: 'No se pudo asignar el invoice. Por favor intente m?s tarde.'
+        text: 'No se pudo asignar el invoice. Por favor intente más tarde.'
       });
     } finally {
       setInvoiceSaving(false);
@@ -729,7 +735,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
       });
     } catch (error) {
       console.error("Error removing Invoice Caremed:", error);
-      alert("Error al remover el invoice de la p?liza.");
+      alert("Error al remover el invoice de la póliza.");
     }
   };
 
@@ -766,14 +772,14 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
 
           const resText = await response.text();
           if (!resText || resText.trim().startsWith("<") || resText.includes("<!DOCTYPE") || resText.includes("<html")) {
-            throw new Error("El servicio est? inicializando o bajo alta demanda. Reintentando...");
+            throw new Error("El servicio está inicializando o bajo alta demanda. Reintentando...");
           }
 
           let parsedData: any = {};
           try {
             parsedData = JSON.parse(resText);
           } catch {
-            throw new Error(`El servidor devolvi? una respuesta no v?lida (${response.status}). Intenta nuevamente.`);
+            throw new Error(`El servidor devolvió una respuesta no válida (${response.status}). Intenta nuevamente.`);
           }
 
           if (!response.ok || parsedData.error) {
@@ -799,7 +805,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
 
       await addDoc(collection(db, 'caremedInvoices'), {
         exportDate,
-        invoiceNumber: customInvoiceNumber || data.invoiceNumber || 'SIN_N?MERO',
+        invoiceNumber: customInvoiceNumber || data.invoiceNumber || 'SIN_NÚMERO',
         amount: Number(data.amount) || 0,
         fileName: file.name,
         fileSize: file.size,
@@ -822,13 +828,13 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
   const handleAddManualInvoice = async (exportDate: string, customInvoiceNumber?: string) => {
     const finalInvoiceNumber = (customInvoiceNumber || manualInvoice.number).trim();
     if (!finalInvoiceNumber || !manualInvoice.amount.trim()) {
-      alert("Por favor ingresa un n?mero de factura y un importe.");
+      alert("Por favor ingresa un número de factura y un importe.");
       return;
     }
 
     const amt = parseFloat(manualInvoice.amount);
     if (isNaN(amt)) {
-      alert("El importe debe ser un n?mero v?lido.");
+      alert("El importe debe ser un número válido.");
       return;
     }
 
@@ -855,7 +861,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
 
   const handleDeleteCaremedInvoice = async (invoiceId: string) => {
     if (!isSuperAdminOrDirector) {
-      alert("Acceso denegado: Solo el Administrador, Director o Super Administrador tiene autorizaci?n para eliminar facturas digitales adjuntas.");
+      alert("Acceso denegado: Solo el Administrador, Director o Super Administrador tiene autorización para eliminar facturas digitales adjuntas.");
       return;
     }
 
@@ -863,7 +869,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
     const invoiceNum = invToDelete?.invoiceNumber || '';
     const invoiceAmt = invToDelete?.amount ? `$${Number(invToDelete.amount).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD` : '';
 
-    if (!confirm(`?Est?s seguro de eliminar esta factura digital adjunta (${invoiceNum}${invoiceAmt ? ` - ${invoiceAmt}` : ''})?\n\nEsta acci?n eliminar? el archivo/registro del comprobante y el cotejo autom?tico de esta factura.`)) return;
+    if (!confirm(`¿Estás seguro de eliminar esta factura digital adjunta (${invoiceNum}${invoiceAmt ? ` - ${invoiceAmt}` : ''})?\n\nEsta acción eliminará el archivo/registro del comprobante y el cotejo automático de esta factura.`)) return;
 
     try {
       await deleteDoc(doc(db, 'caremedInvoices', invoiceId));
@@ -872,15 +878,15 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
         await logInsuranceActivity({
           insuranceId: invoiceId,
           type: 'delete_invoice',
-          description: `Elimin? la factura digital adjunta para el Invoice ${invoiceNum} (${invoiceAmt}).`,
+          description: `Eliminó la factura digital adjunta para el Invoice ${invoiceNum} (${invoiceAmt}).`,
           date: new Date(),
           createdBy: auth.currentUser?.email || 'Admin'
         });
       } catch (logErr) {
-        console.warn("No se pudo registrar en bit?cora:", logErr);
+        console.warn("No se pudo registrar en bitácora:", logErr);
       }
 
-      alert("Factura digital eliminada con ?xito.");
+      alert("Factura digital eliminada con éxito.");
     } catch (err: any) {
       console.error("Error deleting invoice:", err);
       alert("Fallo al borrar la factura digital: " + err.message);
@@ -889,13 +895,13 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
 
   const handleDeleteEntireInvoice = async (invoiceNumber: string) => {
     if (!isSuperAdminOrDirector) {
-      alert("Acceso denegado: Solo el Administrador, Director o Super Administrador puede realizar esta acci?n.");
+      alert("Acceso denegado: Solo el Administrador, Director o Super Administrador puede realizar esta acción.");
       return;
     }
 
     const targetPolicies = insurances.filter(ins => (ins.InvoiceCaremed || '').trim().toLowerCase() === invoiceNumber.trim().toLowerCase());
 
-    if (!confirm(`?Est?s seguro de eliminar el invoice "${invoiceNumber}"?\n\nEsta acci?n:\n1. Desvincular? sus ${targetPolicies.length} p?lizas asociadas.\n2. Eliminar? cualquier factura digital adjunta de este invoice.\n3. Restablecer? el estado de las p?lizas a pendiente de facturar.`)) return;
+    if (!confirm(`¿Estás seguro de eliminar el invoice "${invoiceNumber}"?\n\nEsta acción:\n1. Desvinculará sus ${targetPolicies.length} pólizas asociadas.\n2. Eliminará cualquier factura digital adjunta de este invoice.\n3. Restablecerá el estado de las pólizas a pendiente de facturar.`)) return;
 
     try {
       setInvoiceSaving(true);
@@ -926,19 +932,19 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
         await logInsuranceActivity({
           insuranceId: invoiceNumber,
           type: 'delete_invoice_group',
-          description: `Elimin? el invoice completo ${invoiceNumber} (desvinculadas ${targetPolicies.length} p?lizas y eliminadas ${attachedInvs.length} facturas adjuntas).`,
+          description: `Eliminó el invoice completo ${invoiceNumber} (desvinculadas ${targetPolicies.length} pólizas y eliminadas ${attachedInvs.length} facturas adjuntas).`,
           date: new Date(),
           createdBy: auth.currentUser?.email || 'Admin'
         });
       } catch (logErr) {
-        console.warn("No se pudo registrar en bit?cora:", logErr);
+        console.warn("No se pudo registrar en bitácora:", logErr);
       }
 
       if (selectedInvoiceNumber === invoiceNumber) {
         setSelectedInvoiceNumber(null);
       }
 
-      alert(`Invoice "${invoiceNumber}" y sus registros asociados han sido eliminados con ?xito.`);
+      alert(`Invoice "${invoiceNumber}" y sus registros asociados han sido eliminados con éxito.`);
     } catch (err: any) {
       console.error("Error deleting entire invoice:", err);
       alert("Error al eliminar el invoice: " + err.message);
@@ -958,7 +964,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
       : caremedInvoices.find(d => (d.invoiceNumber || '').toLowerCase().trim() === item.invoiceNumber.toLowerCase().trim());
 
     if (!dbInv) {
-      alert("No se encontr? la factura adjunta en la base de datos.");
+      alert("No se encontró la factura adjunta en la base de datos.");
       return;
     }
 
@@ -979,7 +985,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
       return;
     }
     if (!justifyingInvoice.justificationText.trim()) {
-      alert("Por favor escribe la justificaci?n de la diferencia antes de confirmar.");
+      alert("Por favor escribe la justificación de la diferencia antes de confirmar.");
       return;
     }
 
@@ -997,19 +1003,19 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
         await logInsuranceActivity({
           insuranceId: justifyingInvoice.dbInvoiceId,
           type: 'approve_invoice_difference',
-          description: `Director/Super Admin aprob? la diferencia en el Invoice ${justifyingInvoice.invoiceNumber} (Dif: ${justifyingInvoice.difference > 0 ? '+' : ''}$${justifyingInvoice.difference.toFixed(2)} USD). Justificaci?n: "${justifyingInvoice.justificationText.trim()}"`,
+          description: `Director/Super Admin aprobó la diferencia en el Invoice ${justifyingInvoice.invoiceNumber} (Dif: ${justifyingInvoice.difference > 0 ? '+' : ''}$${justifyingInvoice.difference.toFixed(2)} USD). Justificación: "${justifyingInvoice.justificationText.trim()}"`,
           date: new Date(),
           createdBy: auth.currentUser?.email || 'Director'
         });
       } catch (logErr) {
-        console.warn("No se pudo registrar en bit?cora:", logErr);
+        console.warn("No se pudo registrar en bitácora:", logErr);
       }
 
-      alert(`Diferencia del Invoice ${justifyingInvoice.invoiceNumber} aprobada y justificada exitosamente. El invoice ya no aparecer? en el listado de pendientes.`);
+      alert(`Diferencia del Invoice ${justifyingInvoice.invoiceNumber} aprobada y justificada exitosamente. El invoice ya no aparecerá en el listado de pendientes.`);
       setJustifyingInvoice(null);
     } catch (err: any) {
       console.error("Error saving justification:", err);
-      alert("Error al guardar la justificaci?n: " + err.message);
+      alert("Error al guardar la justificación: " + err.message);
     } finally {
       setIsSavingJustification(false);
     }
@@ -1017,10 +1023,10 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
 
   const handleRevokeJustification = async (invoiceId: string, invoiceNumber: string) => {
     if (!isSuperAdminOrDirector) {
-      alert("Acceso denegado: Solo el Director o Super Administrador puede modificar esta aprobaci?n.");
+      alert("Acceso denegado: Solo el Director o Super Administrador puede modificar esta aprobación.");
       return;
     }
-    if (!confirm(`?Deseas revocar la aprobaci?n de diferencia del Invoice ${invoiceNumber}? Volver? a mostrarse en el listado de pendientes.`)) return;
+    if (!confirm(`¿Deseas revocar la aprobación de diferencia del Invoice ${invoiceNumber}? Volverá a mostrarse en el listado de pendientes.`)) return;
 
     try {
       await updateDoc(doc(db, 'caremedInvoices', invoiceId), {
@@ -1030,10 +1036,10 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
         approvedBy: '',
         approvedAt: ''
       });
-      alert(`Aprobaci?n revocada para el Invoice ${invoiceNumber}.`);
+      alert(`Aprobación revocada para el Invoice ${invoiceNumber}.`);
     } catch (err: any) {
       console.error("Error revoking justification:", err);
-      alert("Error al revocar la aprobaci?n: " + err.message);
+      alert("Error al revocar la aprobación: " + err.message);
     }
   };
 
@@ -1049,13 +1055,13 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
 
   const handleSaveEditInvoice = async (invoiceId: string) => {
     if (!editInvoiceValues.number.trim() || !editInvoiceValues.amount.trim()) {
-      alert("Se requiere n?mero e importe");
+      alert("Se requiere número e importe");
       return;
     }
 
     const amt = parseFloat(editInvoiceValues.amount);
     if (isNaN(amt)) {
-      alert("El importe debe ser un n?mero");
+      alert("El importe debe ser un número");
       return;
     }
 
@@ -1120,17 +1126,17 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
         });
       }
 
-      alert("Fecha de exportaci?n actualizada correctamente.");
+      alert("Fecha de exportación actualizada correctamente.");
       setEditingExportDate(null);
     } catch (err: any) {
       console.error("Error updating export date:", err);
-      alert("Hubo un error al actualizar la fecha de exportaci?n: " + err.message);
+      alert("Hubo un error al actualizar la fecha de exportación: " + err.message);
     } finally {
       setInvoiceSaving(false);
     }
   };
 
-  // Duplicates calculation based on the 8 fields: Tipo de acci?n, Nombre Completo, Fecha de nacimiento, Fecha de inicio, Origen, Destino, Plan, P?liza
+  // Duplicates calculation based on the 8 fields: Tipo de acción, Nombre Completo, Fecha de nacimiento, Fecha de inicio, Origen, Destino, Plan, Póliza
   const duplicateGroups = useMemo(() => {
     return findDuplicatePolicyGroups(insurances, policies);
   }, [insurances, policies]);
@@ -1394,13 +1400,13 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
         'Fecha de Nacimiento': ins.birthDate || '',
         'Edad': ins.age || '',
         'Solicitud': ins.requestDate || '',
-        'Acci?n': ins.actionType || 'NEW',
+        'Acción': ins.actionType || 'NEW',
         'Origen': ins.originCountry || '',
         'Destino': ins.destinationCountry || '',
         'Ciudad': ins.city || '',
         'Inicio': ins.startDate || '',
         'Fin': ins.endDate || '',
-        'D?as': ins.days || '',
+        'Días': ins.days || '',
         'Seguro': ins.policyName || '',
         'Plan': ins.plan || '',
         'Tipo de Cliente': ins.clientType || '',
@@ -1411,11 +1417,11 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
         'Descuento USD': ins.discount || 0,
         'Total Cobrado USD': ins.totalFinal || 0,
         'Costo USD': ins.totalCost || 0,
-        'Comisi?n Agencia USD': ins.agentCommission || 0,
+        'Comisión Agencia USD': ins.agentCommission || 0,
         'Total Pagado USD': ins.totalPaid || 0,
-        'Estado de Emisi?n': ins.status === 'pending' ? 'Pendiente' : ins.status === 'reviewed' ? 'Revisado' : ins.status === 'issued' ? 'Emitido' : ins.status === 'cancelled' ? 'Cancelado' : ins.status,
-        'Fecha de Creaci?n': creationDate,
-        'Deportes Extremos': ins.isExtremeSports ? 'S?' : 'No',
+        'Estado de Emisión': ins.status === 'pending' ? 'Pendiente' : ins.status === 'reviewed' ? 'Revisado' : ins.status === 'issued' ? 'Emitido' : ins.status === 'cancelled' ? 'Cancelado' : ins.status,
+        'Fecha de Creación': creationDate,
+        'Deportes Extremos': ins.isExtremeSports ? 'Sí' : 'No',
         'Notas': ins.notes || ''
       };
     });
@@ -1433,14 +1439,14 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
 
   const handleDownloadCareMedCSV = async () => {
     if (selectedInsuranceIds.length === 0) {
-      alert('Por favor selecciona al menos una p?liza para exportar a CareMed.');
+      alert('Por favor selecciona al menos una póliza para exportar a CareMed.');
       return;
     }
 
     const selectedInsurancesList = insurances.filter(ins => ins.id && selectedInsuranceIds.includes(ins.id));
     const alreadyExported = selectedInsurancesList.filter(ins => !!ins.Caremed);
     if (alreadyExported.length > 0) {
-      alert(`No se puede exportar: se han seleccionado ${alreadyExported.length} p?liza(s) que ya fueron exportadas a CareMed previamente.`);
+      alert(`No se puede exportar: se han seleccionado ${alreadyExported.length} póliza(s) que ya fueron exportadas a CareMed previamente.`);
       return;
     }
 
@@ -1516,10 +1522,10 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
         URL.revokeObjectURL(url);
       });
 
-      alert(`Se exportaron con ?xito ${selectedInsurancesList.length} p?lizas. Se gener? un archivo por cada c?digo de p?liza.`);
+      alert(`Se exportaron con éxito ${selectedInsurancesList.length} pólizas. Se generó un archivo por cada código de póliza.`);
     } catch (err: any) {
       console.error(err);
-      alert('Ocurri? un error al exportar a CareMed: ' + err.message);
+      alert('Ocurrió un error al exportar a CareMed: ' + err.message);
     }
   };
 
@@ -1645,7 +1651,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
           await logInsuranceActivity({
             insuranceId: ins.id,
             type: 'manual',
-            description: `Modificaci?n masiva por Super Administrador`,
+            description: `Modificación masiva por Super Administrador`,
             updatedFields: Object.keys(updatePayload),
             createdAt: serverTimestamp()
           });
@@ -1653,7 +1659,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
       });
 
       await Promise.all(updatePromises);
-      alert(`Se modificaron con ?xito ${selectedInsurancesList.length} p?lizas de manera masiva.`);
+      alert(`Se modificaron con éxito ${selectedInsurancesList.length} pólizas de manera masiva.`);
       setShowBulkEditModal(false);
       setSelectedInsuranceIds([]);
       setBulkEditFields({
@@ -1681,7 +1687,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
       });
     } catch (err: any) {
       console.error("Error bulk editing insurances:", err);
-      alert("Hubo un error al realizar la modificaci?n masiva: " + err.message);
+      alert("Hubo un error al realizar la modificación masiva: " + err.message);
     } finally {
       setBulkEditing(false);
     }
@@ -1811,13 +1817,13 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
   }) => {
     const selectedInsurancesList = insurances.filter(ins => ins.id && selectedInsuranceIds.includes(ins.id));
     if (selectedInsurancesList.length === 0) {
-      alert('Por favor selecciona al menos una p?liza para enviar por correo.');
+      alert('Por favor selecciona al menos una póliza para enviar por correo.');
       return;
     }
 
     setIsBulkSending(true);
     setShowBulkEmailModal(false);
-    setBulkSendProgress({ current: 0, total: selectedInsurancesList.length, statusText: 'Iniciando generaci?n de certificados...' });
+    setBulkSendProgress({ current: 0, total: selectedInsurancesList.length, statusText: 'Iniciando generación de certificados...' });
 
     const successes: string[] = [];
     const failures: { name: string; error: string }[] = [];
@@ -1834,7 +1840,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
       });
 
       if (!emailTo) {
-        failures.push({ name: fullName, error: 'La p?liza no tiene un correo electr?nico registrado.' });
+        failures.push({ name: fullName, error: 'La póliza no tiene un correo electrónico registrado.' });
         continue;
       }
 
@@ -1863,13 +1869,13 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
             .replace(/{Nombre}/g, fullName)
             .replace(/{fecha_nacimiento}/g, formatToShow(ins.birthDate))
             .replace(/{Fecha_nacimiento}/g, formatToShow(ins.birthDate))
-            .replace(/Codigo de la Poliza\s+-\s+Nombre P?liza \(Admin\)/g, policyInfo)
-            .replace(/Codigo de la Poliza\s+-\s+Nombre P?liza/g, policyInfo)
+            .replace(/Codigo de la Poliza\s+-\s+Nombre Póliza \(Admin\)/g, policyInfo)
+            .replace(/Codigo de la Poliza\s+-\s+Nombre Póliza/g, policyInfo)
             .replace(/{poliza_info}/g, policyInfo)
             .replace(/{poliza}/g, policyInfo)
             .replace(/{Poliza}/g, policyInfo)
-            .replace(/{Pais Origen}/g, getCountryName(ins.originCountry) || 'M?xico')
-            .replace(/{origen}/g, getCountryName(ins.originCountry) || 'M?xico')
+            .replace(/{Pais Origen}/g, getCountryName(ins.originCountry) || 'México')
+            .replace(/{origen}/g, getCountryName(ins.originCountry) || 'México')
             .replace(/{Pais Destino}/g, getCountryName(ins.destinationCountry) || '')
             .replace(/{destino}/g, getCountryName(ins.destinationCountry) || '')
             .replace(/{Fecha_inicio}/g, formatToShow(ins.startDate))
@@ -1897,7 +1903,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
               data: base64
             });
           } else {
-            failures.push({ name: fullName, error: 'No se encontraron cartas de los idiomas seleccionados para esta p?liza.' });
+            failures.push({ name: fullName, error: 'No se encontraron cartas de los idiomas seleccionados para esta póliza.' });
             continue;
           }
         } else if (config.pdfMergeMode === 'merged' && selectedLetters.length > 1) {
@@ -1933,7 +1939,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
         });
 
         if (!response.ok) {
-          let errMessage = 'Error de env?o de correo en servidor';
+          let errMessage = 'Error de envío de correo en servidor';
           try {
             const contentType = response.headers.get('content-type');
             if (contentType && contentType.includes('application/json')) {
@@ -1952,7 +1958,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
           throw new Error(errMessage);
         }
 
-        // Log bulk email dispatch to policy's activity log (bit?cora)
+        // Log bulk email dispatch to policy's activity log (bitácora)
         try {
           const now = new Date();
           const userEmail = auth.currentUser?.email || 'Sistema';
@@ -1966,7 +1972,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
           await logInsuranceActivity({
             insuranceId: ins.id,
             type: 'automatic',
-            description: `P?liza de seguro enviada por correo electr?nico (Env?o masivo) a: ${emailTo} ${attachDesc}. Enviado el d?a ${format(now, 'dd/MM/yyyy')} a las ${format(now, 'HH:mm:ss')} por el usuario ${userEmail}.`,
+            description: `Póliza de seguro enviada por correo electrónico (Envío masivo) a: ${emailTo} ${attachDesc}. Enviado el día ${format(now, 'dd/MM/yyyy')} a las ${format(now, 'HH:mm:ss')} por el usuario ${userEmail}.`,
             date: now,
             createdBy: userEmail
           });
@@ -1984,9 +1990,9 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
     setIsBulkSending(false);
     setBulkSendProgress(null);
 
-    let summaryMessage = `Env?o masivo finalizado.\n\n`;
+    let summaryMessage = `Envío masivo finalizado.\n\n`;
     if (successes.length > 0) {
-      summaryMessage += `? Enviado con ?xito a ${successes.length} pasajeros:\n${successes.slice(0, 10).join(', ')}${successes.length > 10 ? ' y m?s...' : ''}\n\n`;
+      summaryMessage += `? Enviado con éxito a ${successes.length} pasajeros:\n${successes.slice(0, 10).join(', ')}${successes.length > 10 ? ' y más...' : ''}\n\n`;
     }
     if (failures.length > 0) {
       summaryMessage += `? Fallas en ${failures.length} pasajeros:\n${failures.map(f => `- ${f.name}: ${f.error}`).join('\n')}\n`;
@@ -1999,7 +2005,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
   const handleBulkSendEmailsClick = () => {
     const selectedInsurancesList = insurances.filter(ins => ins.id && selectedInsuranceIds.includes(ins.id));
     if (selectedInsurancesList.length === 0) {
-      alert('Por favor selecciona al menos una p?liza para enviar por correo.');
+      alert('Por favor selecciona al menos una póliza para enviar por correo.');
       return;
     }
     setShowBulkEmailModal(true);
@@ -2035,7 +2041,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
 
       setSelectedInsuranceIds([]);
       setShowDeleteSelectedConfirm(false);
-      alert('Las p?lizas seleccionadas han sido eliminadas.');
+      alert('Las pólizas seleccionadas han sido eliminadas.');
     } catch (error) {
       handleFirestoreError(error, OperationType.DELETE, 'insurances_selected');
     } finally {
@@ -2174,7 +2180,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
     const available = getAvailableLettersForInsurance(insurance, policyLetters, policies);
     
     if (available.length === 0) {
-      alert('No se encontraron cartas vinculadas a esta p?liza en el cat?logo. Se generar? el formato por defecto.');
+      alert('No se encontraron cartas vinculadas a esta póliza en el catálogo. Se generará el formato por defecto.');
       await generatePDF(insurance, undefined, policies, settings?.logoUrl);
       return;
     }
@@ -2243,7 +2249,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
           hasAttachedInvoice = true;
           difference = dbInv.amount - totalCalculatedCost;
           if (Math.abs(difference) < 0.05) {
-            isCorrect = 'S?';
+            isCorrect = 'Sí';
           } else {
             isCorrect = 'No';
           }
@@ -2256,7 +2262,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
         let isPaid = 'No';
         if (totalPolicies > 0) {
           if (paidPolicies === totalPolicies) {
-            isPaid = 'S?';
+            isPaid = 'Sí';
           } else if (paidPolicies > 0) {
             isPaid = 'Parcial';
           }
@@ -2313,19 +2319,19 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
           }
         }
 
-        if (invoiceListPaidFilter === 'paid' && item.isPaid !== 'S?') return false;
+        if (invoiceListPaidFilter === 'paid' && item.isPaid !== 'Sí') return false;
         if (invoiceListPaidFilter === 'not_paid' && item.isPaid !== 'No') return false;
         if (invoiceListPaidFilter === 'partial' && item.isPaid !== 'Parcial') return false;
 
         // Filtro de Estado de Factura / Diferencia
         if (invoiceListCorrectFilter === 'pending') {
           // Pendientes: Sin factura O con diferencia que NO ha sido justificada
-          if (item.hasAttachedInvoice && (item.isCorrect === 'S?' || item.isJustified)) {
+          if (item.hasAttachedInvoice && (item.isCorrect === 'Sí' || item.isJustified)) {
             return false;
           }
         } else if (invoiceListCorrectFilter === 'incorrect') {
           // Solo los que tienen diferencia de importe
-          if (!item.hasAttachedInvoice || item.isCorrect === 'S?') {
+          if (!item.hasAttachedInvoice || item.isCorrect === 'Sí') {
             return false;
           }
         } else if (invoiceListCorrectFilter === 'no_invoice') {
@@ -2335,7 +2341,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
           }
         } else if (invoiceListCorrectFilter === 'correct') {
           // Solo los que tienen factura correcta (sin diferencia)
-          if (!item.hasAttachedInvoice || item.isCorrect !== 'S?') {
+          if (!item.hasAttachedInvoice || item.isCorrect !== 'Sí') {
             return false;
           }
         } else if (invoiceListCorrectFilter === 'justified') {
@@ -2392,7 +2398,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
     let unpaidAmount = 0;
 
     dataset.forEach(item => {
-      if (item.isPaid !== 'S?') {
+      if (item.isPaid !== 'Sí') {
         unpaidCount++;
       }
       item.rawGroup.policies.forEach(p => {
@@ -2414,7 +2420,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
     };
   }, [filteredAndSortedInvoiceList]);
 
-  // Statistics for Cotejo Autom?tico sub-tab
+  // Statistics for Cotejo Automático sub-tab
   const cotejoMetrics = useMemo(() => {
     let correctCount = 0;
     let differenceCount = 0;
@@ -2801,7 +2807,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
     doc.setFont('helvetica', 'normal');
     doc.setFontSize(8.5);
     doc.setTextColor(200, 210, 235);
-    doc.text(`Generado: ${format(new Date(), 'dd/MM/yyyy HH:mm')} | Total P?lizas: ${detailedMetrics.totalPolicies} | Invoices: ${detailedMetrics.uniqueInvoices} | Monto Total: $${detailedMetrics.totalAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD`, 14, 21);
+    doc.text(`Generado: ${format(new Date(), 'dd/MM/yyyy HH:mm')} | Total Pólizas: ${detailedMetrics.totalPolicies} | Invoices: ${detailedMetrics.uniqueInvoices} | Monto Total: $${detailedMetrics.totalAmount.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD`, 14, 21);
 
     // Draw logo if available
     if (loadedLogo) {
@@ -2848,15 +2854,15 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
       else if (invoiceDetailCorrectFilter === 'no_invoice') filterParts.push('Factura: Sin Factura Adjunta');
     }
     if (invoiceDetailSearchTerm) {
-      filterParts.push(`B?squeda: "${invoiceDetailSearchTerm}"`);
+      filterParts.push(`Búsqueda: "${invoiceDetailSearchTerm}"`);
     }
-    filterDesc += filterParts.length > 0 ? filterParts.join(' | ') : 'Todas las p?lizas facturadas';
+    filterDesc += filterParts.length > 0 ? filterParts.join(' | ') : 'Todas las pólizas facturadas';
 
     doc.text(filterDesc, 18, 39.5);
 
     doc.setFont('helvetica', 'normal');
     doc.setTextColor(100, 116, 139);
-    doc.text(`Concentrado: ${concentratedPoliciesData.length} registros | ${detailedMetrics.totalPolicies} p?lizas acumuladas`, 18, 44.5);
+    doc.text(`Concentrado: ${concentratedPoliciesData.length} registros | ${detailedMetrics.totalPolicies} pólizas acumuladas`, 18, 44.5);
 
     // Table Content - EXACT 5 COLUMNS REQUESTED BY USER
     const tableHeaders = [
@@ -2927,11 +2933,11 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
       },
       margin: { left: 14, right: 14, bottom: 15 },
       didDrawPage: (data) => {
-        const str = `P?gina ${data.pageNumber} de ${doc.internal.pages.length - 1}`;
+        const str = `Página ${data.pageNumber} de ${doc.internal.pages.length - 1}`;
         doc.setFontSize(8);
         doc.setTextColor(148, 163, 184);
         doc.text(str, pageWidth - 14, pageHeight - 8, { align: 'right' });
-        doc.text('MSI Seguros Internacionales - Sistema de Gesti?n', 14, pageHeight - 8);
+        doc.text('MSI Seguros Internacionales - Sistema de Gestión', 14, pageHeight - 8);
       }
     });
 
@@ -2982,31 +2988,31 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
       <header className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">
-            {tab === 'caremed' ? 'Exportaci?n Caremed' : tab === 'invoices' ? 'Invoices CareMed' : 'Gesti?n de P?lizas'}
+            {tab === 'caremed' ? 'Exportación Caremed' : tab === 'invoices' ? 'Invoices CareMed' : 'Gestión de Pólizas'}
           </h1>
           <p className="text-gray-500">
             {tab === 'caremed' 
-              ? 'Consulte y visualice de manera eficiente las p?lizas exportadas' 
+              ? 'Consulte y visualice de manera eficiente las pólizas exportadas' 
               : tab === 'invoices' 
-                ? 'Historial de lotes con n?meros de invoice Caremed asignados' 
+                ? 'Historial de lotes con números de invoice Caremed asignados' 
                 : 'Listado completo de seguros solicitados y emitidos'}
           </p>
         </div>
         {tab !== 'caremed' && tab !== 'invoices' && (
           <div className="flex flex-col items-start lg:items-end gap-2.5">
-            {/* Fila Superior: Controles de Selecci?n, Limpieza y Edici?n Masiva */}
+            {/* Fila Superior: Controles de Selección, Limpieza y Edición Masiva */}
             {(isSuperAdminOrDirector || canManageClosedState) && (
               <div className="flex items-center gap-2 flex-wrap">
-                {/* Seleccionar / Deseleccionar P?gina */}
+                {/* Seleccionar / Deseleccionar Página */}
                 <button
                   onClick={handleSelectAllCurrentPage}
                   className="flex items-center gap-1.5 px-3 py-1.5 bg-white text-gray-700 hover:bg-gray-50 rounded-xl font-bold border border-gray-200 transition-all shadow-xs text-xs cursor-pointer"
-                  title="Seleccionar o deseleccionar todas las p?lizas de la p?gina actual"
+                  title="Seleccionar o deseleccionar todas las pólizas de la página actual"
                 >
                   <CheckCircle className="w-3.5 h-3.5 text-gray-500" />
                   {paginatedInsurances.length > 0 && paginatedInsurances.map(i => i.id).filter((id): id is string => !!id).every(id => selectedInsuranceIds.includes(id)) 
-                    ? 'Deseleccionar P?gina' 
-                    : 'Seleccionar P?gina'
+                    ? 'Deseleccionar Página' 
+                    : 'Seleccionar Página'
                   }
                 </button>
 
@@ -3015,7 +3021,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                   <button
                     onClick={handleSelectAllFiltered}
                     className="flex items-center gap-1.5 px-3 py-1.5 bg-blue-50 text-blue-700 hover:bg-blue-100 rounded-xl font-bold border border-blue-200 transition-all shadow-xs text-xs cursor-pointer"
-                    title="Seleccionar o deseleccionar todas las p?lizas encontradas"
+                    title="Seleccionar o deseleccionar todas las pólizas encontradas"
                   >
                     <CheckCircle className="w-3.5 h-3.5 text-blue-600" />
                     {filteredInsurances.map(i => i.id).filter((id): id is string => !!id).every(id => selectedInsuranceIds.includes(id))
@@ -3025,12 +3031,12 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                   </button>
                 )}
 
-                {/* Limpiar Selecci?n */}
+                {/* Limpiar Selección */}
                 {selectedInsuranceIds.length > 0 && (
                   <button
                     onClick={() => setSelectedInsuranceIds([])}
                     className="flex items-center gap-1 px-2.5 py-1.5 text-xs text-gray-500 hover:text-gray-800 font-bold hover:bg-gray-100 rounded-xl transition-all cursor-pointer"
-                    title="Limpiar selecci?n actual"
+                    title="Limpiar selección actual"
                   >
                     <X className="w-3.5 h-3.5" />
                     Limpiar ({selectedInsuranceIds.length})
@@ -3042,7 +3048,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                   <button
                     onClick={() => setShowDeleteSelectedConfirm(true)}
                     className="flex items-center gap-1.5 px-3 py-1.5 bg-rose-50 text-rose-600 rounded-xl font-bold border border-rose-200 hover:bg-rose-100 transition-all shadow-xs text-xs animate-in fade-in duration-200 cursor-pointer"
-                    title="Eliminar p?lizas seleccionadas"
+                    title="Eliminar pólizas seleccionadas"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
                     Borrar ({selectedInsuranceIds.length})
@@ -3054,7 +3060,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                   <button
                     onClick={() => setShowBulkEditModal(true)}
                     className="flex items-center gap-1.5 px-3 py-1.5 bg-amber-50 text-amber-800 border border-amber-300 rounded-xl font-bold hover:bg-amber-100 transition-all shadow-xs text-xs animate-in fade-in duration-200 cursor-pointer"
-                    title="Modificar masivamente p?lizas seleccionadas"
+                    title="Modificar masivamente pólizas seleccionadas"
                   >
                     <Edit2 className="w-3.5 h-3.5" />
                     Editar Masivo ({selectedInsuranceIds.length})
@@ -3063,17 +3069,17 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
               </div>
             )}
 
-            {/* Fila Inferior: Descargas, Filtros r?pidos, Acciones Masivas y Vistas */}
+            {/* Fila Inferior: Descargas, Filtros rápidos, Acciones Masivas y Vistas */}
             <div className="flex items-center gap-2 flex-wrap">
-              {/* Descargar P?lizas */}
+              {/* Descargar Pólizas */}
               <button
                 onClick={handleDownloadInsurances}
                 disabled={filteredInsurances.length === 0}
                 className="flex items-center gap-1.5 px-3.5 py-2 bg-emerald-50 text-emerald-700 rounded-xl font-bold border border-emerald-200 hover:bg-emerald-100 transition-all shadow-xs text-xs disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
-                title="Descargar la lista de p?lizas actual en formato CSV"
+                title="Descargar la lista de pólizas actual en formato CSV"
               >
                 <Download className="w-3.5 h-3.5" />
-                Descargar P?lizas
+                Descargar Pólizas
               </button>
 
               {/* No Exportadas */}
@@ -3085,7 +3091,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                       ? 'bg-blue-600 text-white border-blue-700 shadow-blue-200 ring-2 ring-blue-400/40'
                       : 'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100'
                   }`}
-                  title="Filtrar y listar p?lizas pendientes de exportaci?n a CareMed en vista de filas"
+                  title="Filtrar y listar pólizas pendientes de exportación a CareMed en vista de filas"
                 >
                   <FileSpreadsheet className="w-3.5 h-3.5" />
                   No Exportadas ({unexportedCount})
@@ -3097,36 +3103,36 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                 <button
                   onClick={() => setShowDuplicatesModal(true)}
                   className="flex items-center gap-1.5 px-3.5 py-2 bg-amber-50 text-amber-800 rounded-xl font-bold border border-amber-200 hover:bg-amber-100 transition-all shadow-xs text-xs cursor-pointer"
-                  title="Identificar y gestionar p?lizas duplicadas"
+                  title="Identificar y gestionar pólizas duplicadas"
                 >
                   <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
                   Duplicados ({duplicateCount})
                 </button>
               )}
 
-              {/* CareMed (Visible solo cuando la selecci?n contiene ?nicamente p?lizas NO exportadas) */}
+              {/* CareMed (Visible solo cuando la selección contiene únicamente pólizas NO exportadas) */}
               {canExportToCareMed && (
                 <button
                   onClick={handleDownloadCareMedCSV}
                   className="flex items-center gap-1.5 px-3.5 py-2 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl font-bold border border-indigo-700 transition-all shadow-md shadow-indigo-100 hover:shadow-indigo-200 text-xs animate-in fade-in duration-200 cursor-pointer active:scale-95"
-                  title="Registrar y exportar p?lizas seleccionadas para CareMed"
+                  title="Registrar y exportar pólizas seleccionadas para CareMed"
                 >
                   <Download className="w-3.5 h-3.5" />
                   CareMed ({selectedInsuranceIds.length})
                 </button>
               )}
 
-              {/* Aviso si la selecci?n contiene p?lizas ya exportadas */}
+              {/* Aviso si la selección contiene pólizas ya exportadas */}
               {selectedInsuranceIds.length > 0 && selectedExportedCount > 0 && (
                 <div
                   className="flex items-center gap-1.5 px-3 py-2 bg-amber-50 text-amber-900 border border-amber-300 rounded-xl text-xs font-semibold shadow-xs animate-in fade-in duration-200"
-                  title={`La selecci?n contiene ${selectedExportedCount} p?liza(s) ya exportada(s). Por esta raz?n no se muestra el bot?n de CareMed.`}
+                  title={`La selección contiene ${selectedExportedCount} póliza(s) ya exportada(s). Por esta razón no se muestra el botón de CareMed.`}
                 >
                   <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
                   <span>
                     {selectedExportedCount === selectedInsuranceIds.length
-                      ? 'P?lizas ya exportadas (CareMed oculto)'
-                      : `Hay ${selectedExportedCount} ${selectedExportedCount === 1 ? 'p?liza ya exportada' : 'p?lizas ya exportadas'} (CareMed oculto)`
+                      ? 'Pólizas ya exportadas (CareMed oculto)'
+                      : `Hay ${selectedExportedCount} ${selectedExportedCount === 1 ? 'póliza ya exportada' : 'pólizas ya exportadas'} (CareMed oculto)`
                     }
                   </span>
                 </div>
@@ -3144,7 +3150,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                 </button>
               )}
 
-              {/* Env?o Masivo */}
+              {/* Envío Masivo */}
               {selectedInsuranceIds.length > 0 && (
                 <button
                   onClick={handleBulkSendEmailsClick}
@@ -3157,7 +3163,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                   ) : (
                     <Send className="w-3.5 h-3.5" />
                   )}
-                  Env?o Masivo ({selectedInsuranceIds.length})
+                  Envío Masivo ({selectedInsuranceIds.length})
                 </button>
               )}
 
@@ -3202,7 +3208,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                 <p className="text-2xl font-black text-gray-900">
                   {caremedExports.reduce((sum, exp) => sum + exp.count, 0)}
                 </p>
-                <p className="text-xs font-bold text-gray-400 uppercase tracking-wider">P?lizas Exportadas</p>
+                <p className="text-xs font-bold text-gray-400 uppercase tracking-wider">Pólizas Exportadas</p>
               </div>
               <div className="p-3 bg-blue-50 text-blue-600 rounded-xl">
                 <ShieldCheck className="w-6 h-6" />
@@ -3217,7 +3223,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                     : 'N/A'
                   }
                 </p>
-                <p className="text-xs font-bold text-gray-400 uppercase tracking-wider mt-1">?ltima Exportaci?n</p>
+                <p className="text-xs font-bold text-gray-400 uppercase tracking-wider mt-1">Última Exportación</p>
               </div>
               <div className="p-3 bg-amber-50 text-amber-600 rounded-xl">
                 <Calendar className="w-6 h-6" />
@@ -3232,7 +3238,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
               </div>
               <p className="text-lg font-bold text-gray-700">No hay exportaciones registradas</p>
               <p className="text-sm text-gray-400 max-w-md">
-                Las p?lizas que exporte a Caremed utilizando el bot?n "CareMed" en el listado de p?lizas general aparecer?n registradas aqu? autom?ticamente.
+                Las pólizas que exporte a Caremed utilizando el botón "CareMed" en el listado de pólizas general aparecerán registradas aquí automáticamente.
               </p>
             </div>
           ) : (
@@ -3250,7 +3256,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                 >
                   <span className="flex items-center gap-2">
                     <FileSpreadsheet className="w-4 h-4" />
-                    Asignaci?n de Invoices (Pendientes)
+                    Asignación de Invoices (Pendientes)
                   </span>
                 </button>
                 <button
@@ -3272,13 +3278,13 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
               <div className="bg-white p-5 rounded-2xl border border-gray-100 shadow-sm flex flex-col md:flex-row gap-5 items-end">
                 <div className="flex-1 w-full space-y-1.5">
                   <label className="text-xs font-bold text-gray-500 uppercase tracking-wider block">
-                    Buscar Asegurado (Nombre, Pa?s o C?d. de P?liza)
+                    Buscar Asegurado (Nombre, País o Cód. de Póliza)
                   </label>
                   <div className="relative">
                     <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
                     <input
                       type="text"
-                      placeholder="Ej. Juan P?rez, Espa?a, POL-1234..."
+                      placeholder="Ej. Juan Pérez, España, POL-1234..."
                       value={caremedInsuredSearch}
                       onChange={(e) => setCaremedInsuredSearch(e.target.value)}
                       className="w-full pl-9 pr-8 py-2.5 bg-gray-50 hover:bg-gray-100/50 focus:bg-white border border-gray-200 rounded-xl focus:ring-2 focus:ring-indigo-500 outline-none text-xs transition-all text-gray-800 placeholder-gray-400"
@@ -3296,7 +3302,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
 
                 <div className="w-full md:w-64 space-y-1.5">
                   <label className="text-xs font-bold text-gray-500 uppercase tracking-wider block">
-                    Filtrar por Fecha de Exportaci?n
+                    Filtrar por Fecha de Exportación
                   </label>
                   <div className="relative">
                     <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
@@ -3342,7 +3348,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                     {filteredCaremedExports.length === 0 ? (
                       <div className="p-8 text-center text-gray-400 text-xs font-medium bg-gray-50/50 border border-dashed border-gray-200 rounded-xl flex flex-col items-center justify-center gap-2">
                         <AlertTriangle className="w-5 h-5 text-gray-400" />
-                        <span>No hay lotes que coincidan con la b?squeda.</span>
+                        <span>No hay lotes que coincidan con la búsqueda.</span>
                       </div>
                     ) : (
                       <div className="space-y-2 max-h-[600px] overflow-y-auto pr-1 flex-1">
@@ -3394,7 +3400,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                   <span className={`px-2 py-0.5 rounded-md font-bold text-[10px] w-fit ${
                                     isActive ? 'bg-indigo-100 text-indigo-700' : 'bg-gray-100 text-gray-700'
                                   }`}>
-                                    {batch.count} {batch.count === 1 ? 'p?liza' : 'p?lizas'}
+                                    {batch.count} {batch.count === 1 ? 'póliza' : 'pólizas'}
                                   </span>
                                 </div>
                                 <button
@@ -3403,7 +3409,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                     setSelectedBatchForDetail(batch);
                                   }}
                                   className="flex items-center gap-1 px-2.5 py-1 bg-indigo-50 hover:bg-indigo-100 border border-indigo-150 text-indigo-700 rounded-lg text-[10px] font-bold transition-all cursor-pointer shadow-sm"
-                                  title="Ver lista de p?lizas en vista de lectura"
+                                  title="Ver lista de pólizas en vista de lectura"
                                 >
                                   <Eye className="w-3.5 h-3.5" />
                                   Ver Detalle
@@ -3425,8 +3431,8 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                       return (
                         <div className="bg-white p-12 rounded-2xl border border-gray-100 text-center text-gray-400">
                           {filteredCaremedExports.length === 0 
-                            ? 'No se encontraron lotes que coincidan con la b?squeda.'
-                            : 'Selecciona un lote de exportaci?n de la lista para visualizar las p?lizas incluidas.'
+                            ? 'No se encontraron lotes que coincidan con la búsqueda.'
+                            : 'Selecciona un lote de exportación de la lista para visualizar las pólizas incluidas.'
                           }
                         </div>
                       );
@@ -3458,20 +3464,20 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                         <div className="p-4 bg-gray-50 border-b border-gray-100 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                           <div>
                             <div className="text-gray-800 font-bold text-sm flex items-center gap-2">
-                              <span>P?lizas Exportadas el {activeBatch.exportDate}</span>
+                              <span>Pólizas Exportadas el {activeBatch.exportDate}</span>
                               <button
                                 onClick={() => {
                                   setEditingExportDate(activeBatch.exportDate);
                                   setNewExportDateValue(activeBatch.exportDate.substring(0, 10));
                                 }}
                                 className="text-[10px] text-indigo-650 hover:text-indigo-800 underline font-bold bg-indigo-50 px-2 py-0.5 rounded cursor-pointer transition-all"
-                                title="Editar la fecha de exportaci?n de este lote"
+                                title="Editar la fecha de exportación de este lote"
                               >
                                 Editar fecha
                               </button>
                             </div>
                             <div className="text-xs text-gray-500 mt-1 font-medium">
-                              Total de p?lizas en este lote: <span className="font-bold text-gray-800">{activeBatch.count}</span>
+                              Total de pólizas en este lote: <span className="font-bold text-gray-800">{activeBatch.count}</span>
                               {filteredBatchPolicies.length !== activeBatch.count && (
                                 <span className="ml-1.5 text-indigo-600 font-semibold">(Coinciden {filteredBatchPolicies.length})</span>
                               )}
@@ -3480,7 +3486,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                           <button
                             onClick={() => handleDownloadSpecificCareMedCSV(activeBatch.exportDate, activeBatch.policies)}
                             className="flex items-center gap-2 px-3 py-1.5 bg-indigo-50 border border-indigo-200 text-indigo-700 hover:bg-indigo-100 rounded-lg text-xs font-bold transition-all shadow-sm cursor-pointer w-fit"
-                            title="Volver a descargar el archivo CSV original de esta exportaci?n"
+                            title="Volver a descargar el archivo CSV original de esta exportación"
                           >
                             <Download className="w-3.5 h-3.5" />
                             Descargar CSV
@@ -3493,7 +3499,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                             <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
                             <input
                               type="text"
-                              placeholder="Filtro r?pido dentro de este lote..."
+                              placeholder="Filtro rápido dentro de este lote..."
                               value={caremedSearchTerm}
                               onChange={(e) => setCaremedSearchTerm(e.target.value)}
                               className="w-full pl-9 pr-8 py-2 bg-gray-50 hover:bg-gray-100/50 focus:bg-white border border-gray-200 rounded-lg focus:ring-2 focus:ring-indigo-500 outline-none text-xs transition-all"
@@ -3526,17 +3532,17 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                               <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-indigo-50/50 border border-indigo-100/60 p-3.5 rounded-xl animate-in translate-y-0.5 duration-200">
                                 <div>
                                   <h4 className="text-xs font-bold text-indigo-905">
-                                    Asignaci?n Masiva de Invoices CareMed
+                                    Asignación Masiva de Invoices CareMed
                                   </h4>
                                   <p className="text-[10px] text-indigo-700 font-medium mt-0.5">
-                                    Has seleccionado <span className="font-bold">{caremedSelectedIds.length}</span> {caremedSelectedIds.length === 1 ? 'p?liza' : 'p?lizas'} de este lote.
+                                    Has seleccionado <span className="font-bold">{caremedSelectedIds.length}</span> {caremedSelectedIds.length === 1 ? 'póliza' : 'pólizas'} de este lote.
                                   </p>
                                 </div>
                                 
                                 <div className="flex items-center gap-2">
                                   <input
                                     type="text"
-                                    placeholder="N? de Invoice (ej: CM-2026-001)"
+                                    placeholder="N° de Invoice (ej: CM-2026-001)"
                                     value={invoiceInput}
                                     onChange={(e) => setInvoiceInput(e.target.value)}
                                     className="px-3 py-1.5 bg-white border border-gray-300 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 text-xs rounded-lg outline-none min-w-[200px] font-sans text-gray-800"
@@ -3557,7 +3563,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                         <div className="overflow-x-auto">
                           {filteredBatchPolicies.length === 0 ? (
                             <div className="p-8 text-center text-gray-400 text-xs font-bold">
-                              No hay p?lizas que coincidan con la b?squeda en este lote.
+                              No hay pólizas que coincidan con la búsqueda en este lote.
                             </div>
                           ) : (
                             <table className="w-full text-left text-xs border-collapse">
@@ -3579,10 +3585,10 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                     />
                                   </th>
                                   <th className="px-4 py-3">Asegurado</th>
-                                  <th className="px-4 py-3">Asociaci?n / Canal</th>
+                                  <th className="px-4 py-3">Asociación / Canal</th>
                                   <th className="px-4 py-3">Destino</th>
                                   <th className="px-4 py-3">Plan / Fechas</th>
-                                  <th className="px-4 py-3 text-right">Acci?n</th>
+                                  <th className="px-4 py-3 text-right">Acción</th>
                                 </tr>
                               </thead>
                               <tbody className="divide-y divide-gray-100">
@@ -3624,14 +3630,14 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                                 handleDuplicatePolicy(i);
                                               }}
                                               className="p-0.5 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded transition-all cursor-pointer inline-flex items-center"
-                                              title="Duplicar datos b?sicos a nueva p?liza (Agente/Corporativo/Individual, Nombre, Apellido, Fecha de nacimiento)"
+                                              title="Duplicar datos básicos a nueva póliza (Agente/Corporativo/Individual, Nombre, Apellido, Fecha de nacimiento)"
                                             >
                                               <Copy className="w-3 h-3" />
                                             </button>
                                           </div>
-                                          <span className="text-[10px] text-gray-400">Nacimiento: {formatDisplayDate(i.birthDate)} ({i.age} a?os)</span>
+                                          <span className="text-[10px] text-gray-400">Nacimiento: {formatDisplayDate(i.birthDate)} ({i.age} años)</span>
                                           {i.InvoiceCaremed && (
-                                            <span className="inline-flex items-center gap-1 mt-1 px-1.5 py-0.5 rounded text-[9px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-100 w-fit" title="N?mero de Invoice Caremed">
+                                            <span className="inline-flex items-center gap-1 mt-1 px-1.5 py-0.5 rounded text-[9px] font-bold text-emerald-700 bg-emerald-50 border border-emerald-100 w-fit" title="Número de Invoice Caremed">
                                               Invoice: {i.InvoiceCaremed}
                                             </span>
                                           )}
@@ -3670,7 +3676,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                         <button
                                           onClick={() => setSelectedInsuranceForDetail(i)}
                                           className="inline-flex items-center gap-1.5 p-1.5 text-blue-600 hover:text-white hover:bg-blue-600 rounded-lg border border-blue-100 hover:border-blue-600 transition-all cursor-pointer"
-                                          title="Ver detalles completos de la p?liza"
+                                          title="Ver detalles completos de la póliza"
                                         >
                                           <Eye className="w-3.5 h-3.5" />
                                         </button>
@@ -3694,21 +3700,21 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                       Historial General de Archivos Generados
                     </h3>
                     <p className="text-xs text-gray-550 mt-1 font-medium">
-                      Consulte todas las descargas/exportaciones CareMed hist?ricas realizadas. Puede descargar nuevamente el archivo CSV original de cada lote o inspeccionar el detalle completo de los asegurados exportados en esa fecha (vista de lectura).
+                      Consulte todas las descargas/exportaciones CareMed históricas realizadas. Puede descargar nuevamente el archivo CSV original de cada lote o inspeccionar el detalle completo de los asegurados exportados en esa fecha (vista de lectura).
                     </p>
                   </div>
 
                   {filteredAllCaremedExports.length === 0 ? (
                     <div className="p-16 text-center text-gray-400 text-xs font-bold flex flex-col items-center justify-center gap-2">
                       <AlertTriangle className="w-8 h-8 text-gray-300" />
-                      <span>No se encontraron archivos de exportaci?n con los criterios de b?squeda.</span>
+                      <span>No se encontraron archivos de exportación con los criterios de búsqueda.</span>
                     </div>
                   ) : (
                     <div className="overflow-x-auto font-medium">
                       <table className="w-full text-left text-xs border-collapse">
                         <thead className="bg-gray-50/50 text-[10px] uppercase font-bold text-gray-500 tracking-wider border-b border-gray-100">
                           <tr>
-                            <th className="px-5 py-4">Fecha/Hora Exportaci?n</th>
+                            <th className="px-5 py-4">Fecha/Hora Exportación</th>
                             <th className="px-5 py-4">Nombre de archivo</th>
                             <th className="px-5 py-4">Cantidad Asegurados</th>
                             <th className="px-5 py-4">Estado Factura</th>
@@ -3776,7 +3782,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                     <button
                                       onClick={() => handleDownloadSpecificCareMedCSV(batch.exportDate, batch.policies)}
                                       className="inline-flex items-center gap-1 px-3 py-1.5 bg-white hover:bg-gray-50 border border-gray-200 text-gray-700 rounded-xl text-[10.5px] font-bold transition-all shadow-sm cursor-pointer hover:border-gray-300"
-                                      title="Descargar el archivo CSV original de esta exportaci?n"
+                                      title="Descargar el archivo CSV original de esta exportación"
                                     >
                                       <Download className="w-3.5 h-3.5" />
                                       Descargar CSV
@@ -3817,7 +3823,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
             >
               <span className="flex items-center gap-2">
                 <Receipt className="w-4 h-4" />
-                Cotejo Autom?tico
+                Cotejo Automático
               </span>
             </button>
             <button
@@ -3845,14 +3851,14 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
             >
               <span className="flex items-center gap-2">
                 <List className="w-4 h-4" />
-                Detalle de P?lizas e Invoices
+                Detalle de Pólizas e Invoices
               </span>
             </button>
           </div>
 
           {invoiceSubTab === 'cotejo' ? (
             <>
-              {/* Summary stats & interactive filter cards row for Cotejo Autom?tico */}
+              {/* Summary stats & interactive filter cards row for Cotejo Automático */}
               <div className="grid grid-cols-2 lg:grid-cols-4 gap-3.5">
                 {/* 1. Todos los Invoices */}
                 <button
@@ -3975,7 +3981,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                       </button>
                     )}
                   </div>
-                  <p className="text-xs text-gray-450">Busca por n?mero de invoice, nombre del asegurado o estado.</p>
+                  <p className="text-xs text-gray-450">Busca por número de invoice, nombre del asegurado o estado.</p>
                 </div>
 
                 <div className="space-y-3">
@@ -3985,7 +3991,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                       <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
                       <input
                         type="text"
-                        placeholder="ej: CM-2026 o Juan P?rez"
+                        placeholder="ej: CM-2026 o Juan Pérez"
                         value={invoicedSearchTerm}
                         onChange={(e) => setInvoicedSearchTerm(e.target.value)}
                         className="w-full pl-9 pr-8 py-1.5 bg-gray-50 border border-gray-200 focus:ring-2 focus:ring-indigo-550 rounded-xl outline-none text-xs transition-with text-gray-800"
@@ -4003,7 +4009,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
 
                   {/* Quick Filter Pill Buttons */}
                   <div>
-                    <label className="text-[10px] font-bold text-gray-440 uppercase tracking-wider block mb-1.5">Filtro R?pido</label>
+                    <label className="text-[10px] font-bold text-gray-440 uppercase tracking-wider block mb-1.5">Filtro Rápido</label>
                     <div className="flex flex-wrap gap-1.5">
                       <button
                         type="button"
@@ -4072,7 +4078,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                   </div>
 
                   <div>
-                    <label className="text-[10px] font-bold text-gray-440 uppercase tracking-wider block mb-1">Filtrar por Fecha Exportaci?n</label>
+                    <label className="text-[10px] font-bold text-gray-440 uppercase tracking-wider block mb-1">Filtrar por Fecha Exportación</label>
                     <input
                       type="date"
                       value={invoicedDateFilter}
@@ -4140,7 +4146,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                             <span className="flex items-center gap-1.5 flex-wrap">
                               <ShieldCheck className="w-3.5 h-3.5 text-gray-450" />
                               <span className="font-bold text-indigo-700">
-                                {inv.count} {inv.count === 1 ? 'p?liza' : 'p?lizas'}
+                                {inv.count} {inv.count === 1 ? 'póliza' : 'pólizas'}
                               </span>
                             </span>
                             <span className="flex items-center gap-1.5 flex-wrap text-emerald-700 bg-emerald-50 border border-emerald-100/55 rounded px-1.5 py-0.5 font-bold w-fit mt-0.5">
@@ -4155,7 +4161,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                               ) : isJustified ? (
                                 <span
                                   className="mt-1 flex items-center gap-1 text-[9px] text-emerald-800 bg-emerald-50 rounded px-1.5 py-0.5 border border-emerald-200 font-bold w-fit"
-                                  title={`Aprobado por Super Admin. Justificaci?n: ${dbInv.justification || 'Sin justificaci?n'}`}
+                                  title={`Aprobado por Super Admin. Justificación: ${dbInv.justification || 'Sin justificación'}`}
                                 >
                                   ? OK Justificado (${dbInv.amount.toLocaleString('en-US', { minimumFractionDigits: 2 })})
                                 </span>
@@ -4222,10 +4228,10 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                         <div>
                           <div className="flex items-center gap-2">
                             <Receipt className="w-5 h-5 text-indigo-600" />
-                            <h3 className="font-bold text-sm text-gray-800">Factura Digital Adjunta - Cotejo Autom?tico</h3>
+                            <h3 className="font-bold text-sm text-gray-800">Factura Digital Adjunta - Cotejo Automático</h3>
                           </div>
                           <p className="text-[11px] text-gray-500 mt-1 leading-relaxed">
-                            Sube el PDF original o una imagen de la Factura de CareMed para el Invoice <strong className="font-bold whitespace-nowrap">{activeInvoice.invoiceNumber}</strong>. La IA de Gemini leer? el monto total facturado de forma autom?tica y lo cotejar? con el costo a pagar calculado en el sistema.
+                            Sube el PDF original o una imagen de la Factura de CareMed para el Invoice <strong className="font-bold whitespace-nowrap">{activeInvoice.invoiceNumber}</strong>. La IA de Gemini leerá el monto total facturado de forma automática y lo cotejará con el costo a pagar calculado en el sistema.
                           </p>
                         </div>
                         <div className="flex gap-2 shrink-0">
@@ -4261,7 +4267,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                             <button
                               onClick={() => handleDeleteEntireInvoice(activeInvoice.invoiceNumber)}
                               className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 rounded-xl text-xs font-bold transition-all shadow-2xs cursor-pointer flex items-center gap-1.5"
-                              title="Eliminar este invoice completo y desvincular sus p?lizas"
+                              title="Eliminar este invoice completo y desvincular sus pólizas"
                             >
                               <Trash2 className="w-3.5 h-3.5" />
                               <span className="hidden sm:inline">Eliminar Invoice</span>
@@ -4287,7 +4293,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                               />
                             </div>
                             <div>
-                              <label className="block text-[9px] uppercase font-bold text-gray-400 mb-1">N?mero de Invoice (Auto)</label>
+                              <label className="block text-[9px] uppercase font-bold text-gray-400 mb-1">Número de Invoice (Auto)</label>
                               <input
                                 type="text"
                                 disabled
@@ -4334,7 +4340,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
 
                         {batchInvoicesDb.length === 0 ? (
                           <div className="p-8 border border-dashed border-gray-150 rounded-2xl text-center text-xs text-amber-700 bg-amber-50/20 font-bold">
-                            ?? Falta Adjuntar Factura: No se ha detectado ninguna factura digital/f?sica adjunta para el Invoice <strong>{activeInvoice.invoiceNumber}</strong>. Sube el documento original (PDF/Imagen) o reg?stralo manualmente para que la IA realice el cotejo de costos autom?tico.
+                            ?? Falta Adjuntar Factura: No se ha detectado ninguna factura digital/física adjunta para el Invoice <strong>{activeInvoice.invoiceNumber}</strong>. Sube el documento original (PDF/Imagen) o regístralo manualmente para que la IA realice el cotejo de costos automático.
                           </div>
                         ) : (
                           <div className="grid grid-cols-1 gap-3">
@@ -4351,7 +4357,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                       <h5 className="text-[10px] uppercase font-bold text-indigo-600">Editar Factura Adjunta</h5>
                                       <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
                                         <div>
-                                          <label className="block text-[9px] uppercase font-bold text-gray-400 mb-1">N?mero Invoice</label>
+                                          <label className="block text-[9px] uppercase font-bold text-gray-400 mb-1">Número Invoice</label>
                                           <input
                                             type="text"
                                             value={editInvoiceValues.number}
@@ -4379,7 +4385,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                           />
                                         </div>
                                         <div>
-                                          <label className="block text-[9px] uppercase font-bold text-gray-400 mb-1">Notas / Descripci?n</label>
+                                          <label className="block text-[9px] uppercase font-bold text-gray-400 mb-1">Notas / Descripción</label>
                                           <input
                                             type="text"
                                             value={editInvoiceValues.notes}
@@ -4411,10 +4417,10 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                             Invoice: <span className="font-extrabold">{inv.invoiceNumber}</span>
                                           </span>
                                           <span className="text-[10px] text-gray-450 font-semibold">
-                                            {inv.fileName || 'Entrada Manual'} ? {inv.fileSize ? `${Math.round(inv.fileSize / 1024)} KB` : 'Sin archivo f?sico'}
+                                            {inv.fileName || 'Entrada Manual'} ? {inv.fileSize ? `${Math.round(inv.fileSize / 1024)} KB` : 'Sin archivo físico'}
                                           </span>
                                           {inv.simulated && (
-                                            <span className="px-1.5 py-0.2 bg-amber-50 text-amber-700 text-[8px] font-bold rounded border border-amber-200 animate-pulse">Test / Simulaci?n IA</span>
+                                            <span className="px-1.5 py-0.2 bg-amber-50 text-amber-700 text-[8px] font-bold rounded border border-amber-200 animate-pulse">Test / Simulación IA</span>
                                           )}
                                           {inv.invoiceDate && (
                                             <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-gray-100 text-gray-750 border border-gray-200 flex items-center gap-1">
@@ -4455,7 +4461,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                   <div className="p-3 bg-white border border-gray-100 rounded-2xl space-y-2">
                                     <div className="flex items-center justify-between text-[11px] font-medium text-gray-500">
                                       <span>Costo calculado en sistema para el invoice <strong className="text-gray-700 font-bold">{inv.invoiceNumber}</strong>:</span>
-                                      <span className="font-bold text-gray-900 bg-gray-50 px-2 py-0.5 rounded-lg border border-gray-100">${totalCalculatedCost.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD ({activeInvoice.count} p?lizas)</span>
+                                      <span className="font-bold text-gray-900 bg-gray-50 px-2 py-0.5 rounded-lg border border-gray-100">${totalCalculatedCost.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD ({activeInvoice.count} pólizas)</span>
                                     </div>
 
                                     <div className="flex items-center gap-2 pt-1">
@@ -4469,7 +4475,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                           <div className="flex items-center justify-between">
                                             <div className="flex items-center gap-1.5 font-extrabold text-emerald-800">
                                               <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                                              <span>? DIFERENCIA APROBADA (OK) POR ADMINISTRACI?N</span>
+                                              <span>? DIFERENCIA APROBADA (OK) POR ADMINISTRACIÓN</span>
                                             </div>
                                             {isSuperAdminOrDirector && (
                                               <div className="flex items-center gap-2">
@@ -4484,7 +4490,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                                   })}
                                                   className="text-[10px] text-emerald-700 underline font-bold hover:text-emerald-900 cursor-pointer"
                                                 >
-                                                  Editar Justificaci?n
+                                                  Editar Justificación
                                                 </button>
                                                 <button
                                                   onClick={() => handleRevokeJustification(inv.id, inv.invoiceNumber)}
@@ -4497,7 +4503,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                           </div>
                                           <div className="bg-white/80 p-2.5 rounded-lg border border-emerald-200 text-xs text-gray-700 font-normal space-y-1">
                                             <div className="flex items-center justify-between">
-                                              <span className="font-bold text-gray-900 text-[10px] uppercase text-emerald-800">Justificaci?n:</span>
+                                              <span className="font-bold text-gray-900 text-[10px] uppercase text-emerald-800">Justificación:</span>
                                               <span className="text-[10px] font-mono font-bold text-amber-850 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200">
                                                 Dif: {difference > 0 ? '+' : ''}${difference.toFixed(2)} USD
                                               </span>
@@ -4526,7 +4532,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                                   justification: inv.justification || ''
                                                 })}
                                                 className="px-2.5 py-1 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg text-xs font-black transition-all shadow-xs cursor-pointer inline-flex items-center gap-1.5 hover:scale-105"
-                                                title="Aprobar diferencia con justificaci?n"
+                                                title="Aprobar diferencia con justificación"
                                               >
                                                 <CheckCircle2 className="w-3.5 h-3.5" />
                                                 <span>Aprobar (OK)</span>
@@ -4583,7 +4589,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                             Asegurados Facturados en Invoice: {activeInvoice.invoiceNumber}
                           </div>
                           <div className="text-xs text-gray-550 mt-1 font-semibold">
-                            Total: <span className="font-bold text-indigo-700">{activeInvoice.count} p?lizas</span> ? Costo total a pagar calculado: <span className="font-bold text-emerald-700">${activeInvoice.totalCalculatedCost.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD</span>
+                            Total: <span className="font-bold text-indigo-700">{activeInvoice.count} pólizas</span> ? Costo total a pagar calculado: <span className="font-bold text-emerald-700">${activeInvoice.totalCalculatedCost.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD</span>
                           </div>
                         </div>
                         <button
@@ -4600,18 +4606,18 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                       <div className="overflow-x-auto">
                         {invoicedBatchPolicies.length === 0 ? (
                           <div className="p-8 text-center text-gray-400 text-xs font-bold">
-                            No hay p?lizas que coincidan con la b?squeda en este invoice.
+                            No hay pólizas que coincidan con la búsqueda en este invoice.
                           </div>
                         ) : (
                           <table className="w-full text-left text-xs border-collapse">
                             <thead>
                               <tr className="bg-gray-50/50 text-[10px] uppercase font-bold text-gray-400 tracking-wider border-b border-gray-100">
                                 <th className="px-4 py-3">Asegurado/Invoice</th>
-                                <th className="px-4 py-3">Plan/P?liza</th>
-                                <th className="px-4 py-3">D?as</th>
-                                <th className="px-4 py-3">Costo D?a</th>
+                                <th className="px-4 py-3">Plan/Póliza</th>
+                                <th className="px-4 py-3">Días</th>
+                                <th className="px-4 py-3">Costo Día</th>
                                 <th className="px-4 py-3">Costo Total</th>
-                                <th className="px-4 py-3 text-right">Acci?n</th>
+                                <th className="px-4 py-3 text-right">Acción</th>
                               </tr>
                             </thead>
                             <tbody className="divide-y divide-gray-100">
@@ -4633,7 +4639,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                               handleDuplicatePolicy(i);
                                             }}
                                             className="p-0.5 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded transition-all cursor-pointer inline-flex items-center"
-                                            title="Duplicar datos b?sicos a nueva p?liza (Agente/Corporativo/Individual, Nombre, Apellido, Fecha de nacimiento)"
+                                            title="Duplicar datos básicos a nueva póliza (Agente/Corporativo/Individual, Nombre, Apellido, Fecha de nacimiento)"
                                           >
                                             <Copy className="w-3 h-3" />
                                           </button>
@@ -4647,7 +4653,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                           {i.InvoiceCaremed && (
                                             <button
                                               onClick={() => {
-                                                if(confirm(`?Est?s seguro de eliminar el Invoice "${i.InvoiceCaremed}" de esta p?liza?`)) {
+                                                if(confirm(`¿Estás seguro de eliminar el Invoice "${i.InvoiceCaremed}" de esta póliza?`)) {
                                                   handleRemoveInvoiceCaremed(i.id!);
                                                 }
                                               }}
@@ -4663,13 +4669,13 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                     <td className="px-4 py-3.5">
                                       <div className="flex flex-col gap-0.5">
                                         <span className="font-bold text-indigo-600 uppercase tracking-tighter text-xs">{i.plan}{policyName ? ` - ${policyName}` : ''}</span>
-                                        <span className="text-[10px] text-gray-500 font-semibold">P?liza: {i.policyId || i.policyNumber || '-'}</span>
+                                        <span className="text-[10px] text-gray-500 font-semibold">Póliza: {i.policyId || i.policyNumber || '-'}</span>
                                       </div>
                                     </td>
                                     <td className="px-4 py-3.5">
                                       <div className="flex flex-col">
                                         <span className="font-bold text-gray-800 text-xs">{i.days}</span>
-                                        <span className="text-[10px] text-gray-400">d?as</span>
+                                        <span className="text-[10px] text-gray-400">días</span>
                                       </div>
                                     </td>
                                     <td className="px-4 py-3.5">
@@ -4682,7 +4688,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                       <button
                                         onClick={() => setSelectedInsuranceForDetail(i)}
                                         className="inline-flex items-center gap-1.5 p-1.5 text-blue-600 hover:text-white hover:bg-blue-600 rounded-lg border border-blue-100 hover:border-blue-600 transition-all cursor-pointer"
-                                        title="Ver detalles completos de la p?liza"
+                                        title="Ver detalles completos de la póliza"
                                       >
                                         <Eye className="w-3.5 h-3.5" />
                                       </button>
@@ -4705,7 +4711,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
             <div className="space-y-6 animate-in fade-in duration-300">
               {/* Indicadores de Negocio (Clickable Filter Cards) */}
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-7 gap-3">
-                {/* 1. N?mero de Invoices */}
+                {/* 1. Número de Invoices */}
                 <button
                   type="button"
                   onClick={() => setInvoiceListCorrectFilter('all')}
@@ -4722,10 +4728,10 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                   <p className="text-xl font-black text-gray-900">{invoiceListMetrics.numInvoices}</p>
                 </button>
 
-                {/* 2. N?mero de P?lizas */}
+                {/* 2. Número de Pólizas */}
                 <div className="bg-white rounded-2xl p-4 border border-gray-100 shadow-sm flex flex-col justify-between hover:border-blue-200 transition-all">
                   <div className="flex items-center justify-between text-blue-600 mb-1">
-                    <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400">N?mero de P?lizas</span>
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400">Número de Pólizas</span>
                     <ShieldCheck className="w-4 h-4" />
                   </div>
                   <p className="text-xl font-black text-gray-900">{invoiceListMetrics.numPolicies}</p>
@@ -4820,10 +4826,10 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                       </h3>
                       <p className="text-xs text-gray-500 mt-0.5">
                         {invoiceListCorrectFilter === 'all' && 'Mostrando todos los invoices registrados en el sistema.'}
-                        {invoiceListCorrectFilter === 'pending' && 'Mostrando ?nicamente facturas pendientes (sin factura digital o con diferencia no justificada).'}
-                        {invoiceListCorrectFilter === 'incorrect' && 'Mostrando ?nicamente facturas con diferencia de importe.'}
-                        {invoiceListCorrectFilter === 'no_invoice' && 'Mostrando ?nicamente p?lizas e invoices sin factura adjunta.'}
-                        {invoiceListCorrectFilter === 'correct' && 'Mostrando ?nicamente facturas 100% coincidentes con el sistema.'}
+                        {invoiceListCorrectFilter === 'pending' && 'Mostrando únicamente facturas pendientes (sin factura digital o con diferencia no justificada).'}
+                        {invoiceListCorrectFilter === 'incorrect' && 'Mostrando únicamente facturas con diferencia de importe.'}
+                        {invoiceListCorrectFilter === 'no_invoice' && 'Mostrando únicamente pólizas e invoices sin factura adjunta.'}
+                        {invoiceListCorrectFilter === 'correct' && 'Mostrando únicamente facturas 100% coincidentes con el sistema.'}
                         {invoiceListCorrectFilter === 'justified' && 'Mostrando facturas con diferencias justificadas y aprobadas.'}
                       </p>
                     </div>
@@ -4847,7 +4853,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
 
                   {/* Quick Pill Filter Buttons Bar */}
                   <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-gray-200/60">
-                    <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mr-1">Filtro R?pido:</span>
+                    <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mr-1">Filtro Rápido:</span>
                     <button
                       type="button"
                       onClick={() => setInvoiceListCorrectFilter('all')}
@@ -4963,7 +4969,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                         className="w-full px-2.5 py-1.5 bg-white border border-gray-200 focus:ring-2 focus:ring-indigo-500 rounded-xl outline-none text-xs text-gray-800 font-semibold"
                       >
                         <option value="all">Todas</option>
-                        <option value="paid">S? (Pagadas)</option>
+                        <option value="paid">Sí (Pagadas)</option>
                         <option value="not_paid">No (Sin Pagar)</option>
                         <option value="partial">Parcial</option>
                       </select>
@@ -4978,7 +4984,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                         className="w-full px-2.5 py-1.5 bg-white border border-gray-200 focus:ring-2 focus:ring-indigo-500 rounded-xl outline-none text-xs text-gray-800 font-semibold"
                       >
                         <option value="all">Todos los Invoices</option>
-                        <option value="pending">Solo Pendientes (Acci?n requerida)</option>
+                        <option value="pending">Solo Pendientes (Acción requerida)</option>
                         <option value="incorrect">Solo con Diferencia</option>
                         <option value="no_invoice">Solo Sin Factura Adjunta</option>
                         <option value="correct">Solo Facturas Correctas</option>
@@ -4995,10 +5001,10 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                           onChange={(e) => setInvoiceListSortField(e.target.value as any)}
                           className="w-full px-2 py-1.5 bg-white border border-gray-200 focus:ring-2 focus:ring-indigo-500 rounded-xl outline-none text-xs text-gray-800 font-semibold"
                         >
-                          <option value="exportDate">Fecha Exportaci?n</option>
+                          <option value="exportDate">Fecha Exportación</option>
                           <option value="invoiceDate">Fecha Invoice</option>
-                          <option value="invoiceNumber">N?mero Invoice</option>
-                          <option value="policyCount">No. P?lizas</option>
+                          <option value="invoiceNumber">Número Invoice</option>
+                          <option value="policyCount">No. Pólizas</option>
                           <option value="totalCalculatedCost">Monto Sistema</option>
                           <option value="difference">Diferencia</option>
                         </select>
@@ -5019,7 +5025,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                   <table className="w-full text-left text-xs border-collapse">
                     <thead>
                       <tr className="bg-gray-50 text-[10px] uppercase font-bold text-gray-500 tracking-wider border-b border-gray-150 select-none">
-                        {/* Header: Fecha de Exportaci?n */}
+                        {/* Header: Fecha de Exportación */}
                         <th
                           onClick={() => {
                             if (invoiceListSortField === 'exportDate') {
@@ -5032,7 +5038,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                           className="px-6 py-4 cursor-pointer hover:bg-gray-100/60 transition-colors"
                         >
                           <div className="flex items-center gap-1.5">
-                            <span>Fecha de Exportaci?n</span>
+                            <span>Fecha de Exportación</span>
                             {invoiceListSortField === 'exportDate' ? (
                               invoiceListSortOrder === 'asc' ? <ArrowUp className="w-3 h-3 text-indigo-600" /> : <ArrowDown className="w-3 h-3 text-indigo-600" />
                             ) : (
@@ -5063,7 +5069,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                           </div>
                         </th>
 
-                        {/* Header: N?mero de Invoice */}
+                        {/* Header: Número de Invoice */}
                         <th
                           onClick={() => {
                             if (invoiceListSortField === 'invoiceNumber') {
@@ -5076,7 +5082,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                           className="px-6 py-4 cursor-pointer hover:bg-gray-100/60 transition-colors"
                         >
                           <div className="flex items-center gap-1.5">
-                            <span>N?mero de Invoice</span>
+                            <span>Número de Invoice</span>
                             {invoiceListSortField === 'invoiceNumber' ? (
                               invoiceListSortOrder === 'asc' ? <ArrowUp className="w-3 h-3 text-indigo-600" /> : <ArrowDown className="w-3 h-3 text-indigo-600" />
                             ) : (
@@ -5085,7 +5091,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                           </div>
                         </th>
 
-                        {/* Header: N?mero de P?lizas */}
+                        {/* Header: Número de Pólizas */}
                         <th
                           onClick={() => {
                             if (invoiceListSortField === 'policyCount') {
@@ -5098,7 +5104,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                           className="px-6 py-4 text-center cursor-pointer hover:bg-gray-100/60 transition-colors"
                         >
                           <div className="flex items-center justify-center gap-1.5">
-                            <span>N?mero de P?lizas</span>
+                            <span>Número de Pólizas</span>
                             {invoiceListSortField === 'policyCount' ? (
                               invoiceListSortOrder === 'asc' ? <ArrowUp className="w-3 h-3 text-indigo-600" /> : <ArrowDown className="w-3 h-3 text-indigo-600" />
                             ) : (
@@ -5180,14 +5186,14 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                   >
                                     <Plus className="w-2.5 h-2.5" /> Sin Factura
                                   </button>
-                                ) : item.isCorrect === 'S?' ? (
+                                ) : item.isCorrect === 'Sí' ? (
                                   <span className="px-2.5 py-1 rounded-full text-[10px] font-black bg-emerald-50 text-emerald-700 border border-emerald-100">
-                                    S?
+                                    Sí
                                   </span>
                                 ) : item.isJustified ? (
                                   <span
                                     className="px-2.5 py-1 rounded-full text-[10px] font-black bg-emerald-50 text-emerald-700 border border-emerald-200 inline-flex items-center gap-1 cursor-help"
-                                    title={`Aprobado por Super Admin. Justificaci?n: ${item.justification || 'Sin justificaci?n'}`}
+                                    title={`Aprobado por Super Admin. Justificación: ${item.justification || 'Sin justificación'}`}
                                   >
                                     <CheckCircle2 className="w-3 h-3 text-emerald-600" /> OK Justificado
                                   </span>
@@ -5212,9 +5218,9 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                 )}
                               </td>
                               <td className="px-6 py-4 text-center">
-                                {item.isPaid === 'S?' ? (
+                                {item.isPaid === 'Sí' ? (
                                   <span className="px-2.5 py-1 rounded-full text-[10px] font-black bg-emerald-50 text-emerald-700 border border-emerald-100">
-                                    S?
+                                    Sí
                                   </span>
                                 ) : item.isPaid === 'Parcial' ? (
                                   <span className="px-2.5 py-1 rounded-full text-[10px] font-black bg-amber-50 text-amber-700 border border-amber-100">
@@ -5227,7 +5233,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                 )}
                               </td>
                               <td className="px-6 py-4 text-center">
-                                {item.isPaid === 'S?' || item.isPaid === 'Parcial' ? (
+                                {item.isPaid === 'Sí' || item.isPaid === 'Parcial' ? (
                                   <span className="font-semibold text-gray-800">{item.paymentDate}</span>
                                 ) : (
                                   <span className="text-gray-400 italic">-</span>
@@ -5242,7 +5248,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                         handleOpenJustifyModal(item);
                                       }}
                                       className="px-2.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-black transition-all shadow-xs cursor-pointer inline-flex items-center gap-1.5 hover:scale-105"
-                                      title="Aprobar diferencia con justificaci?n (Super Administrador) para retirar del listado de pendientes"
+                                      title="Aprobar diferencia con justificación (Super Administrador) para retirar del listado de pendientes"
                                     >
                                       <CheckCircle2 className="w-3.5 h-3.5" />
                                       <span>OK</span>
@@ -5256,7 +5262,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                         handleOpenJustifyModal(item);
                                       }}
                                       className="px-2.5 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 border border-emerald-200 rounded-xl text-xs font-bold transition-all shadow-xs cursor-pointer inline-flex items-center gap-1"
-                                      title={`Justificaci?n: "${item.justification}". Clic para ver o editar`}
+                                      title={`Justificación: "${item.justification}". Clic para ver o editar`}
                                     >
                                       <CheckCircle2 className="w-3 h-3 text-emerald-600" />
                                       <span>Ver OK</span>
@@ -5311,7 +5317,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                           handleDeleteEntireInvoice(item.invoiceNumber);
                                         }}
                                         className="p-1.5 px-2 text-rose-600 hover:text-rose-700 bg-rose-50 hover:bg-rose-100 border border-rose-200 rounded-xl text-xs font-bold transition-all shadow-2xs cursor-pointer inline-flex items-center gap-1"
-                                        title="Eliminar invoice completo y desvincular p?lizas"
+                                        title="Eliminar invoice completo y desvincular pólizas"
                                       >
                                         <Trash2 className="w-3.5 h-3.5" />
                                         <span className="hidden sm:inline">Borrar Invoice</span>
@@ -5333,7 +5339,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
             <div className="space-y-6 animate-in fade-in duration-300">
               {/* 1. Dynamic Business Indicators (Clickable Filter Cards) */}
               <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
-                {/* Total P?lizas */}
+                {/* Total Pólizas */}
                 <button
                   type="button"
                   onClick={() => setInvoiceDetailCorrectFilter('all')}
@@ -5344,16 +5350,16 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                   }`}
                 >
                   <div className="flex items-center justify-between text-blue-600 mb-1">
-                    <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400">Total P?lizas</span>
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400">Total Pólizas</span>
                     <ShieldCheck className="w-4 h-4" />
                   </div>
                   <p className="text-xl font-black text-gray-900">{detailedMetrics.totalPolicies}</p>
                 </button>
 
-                {/* Invoices ?nicos */}
+                {/* Invoices Únicos */}
                 <div className="bg-white rounded-2xl p-4 border border-gray-100 shadow-sm flex flex-col justify-between hover:border-indigo-200 transition-all">
                   <div className="flex items-center justify-between text-indigo-600 mb-1">
-                    <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400">Invoices ?nicos</span>
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-gray-400">Invoices Únicos</span>
                     <FileSpreadsheet className="w-4 h-4" />
                   </div>
                   <p className="text-xl font-black text-gray-900">{detailedMetrics.uniqueInvoices}</p>
@@ -5433,10 +5439,10 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                     <div>
                       <h3 className="font-black text-base text-gray-900 flex items-center gap-2">
                         <List className="w-5 h-5 text-indigo-600" />
-                        Detalle de P?lizas por Invoice CareMed
+                        Detalle de Pólizas por Invoice CareMed
                       </h3>
                       <p className="text-xs text-gray-500 mt-0.5">
-                        Reporte y listado concentrado de p?lizas e invoices con fechas, c?digos de p?liza, recuento e importes.
+                        Reporte y listado concentrado de pólizas e invoices con fechas, códigos de póliza, recuento e importes.
                       </p>
                     </div>
 
@@ -5493,12 +5499,12 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
 
                   {/* Filter Toolbar */}
                   <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3 pt-2">
-                    {/* B?squeda */}
+                    {/* Búsqueda */}
                     <div className="relative">
                       <Search className="w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2" />
                       <input
                         type="text"
-                        placeholder="Buscar Invoice, P?liza, Asegurado..."
+                        placeholder="Buscar Invoice, Póliza, Asegurado..."
                         value={invoiceDetailSearchTerm}
                         onChange={(e) => setInvoiceDetailSearchTerm(e.target.value)}
                         className="w-full pl-9 pr-8 py-2 bg-white border border-gray-200 rounded-xl text-xs focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none transition-all"
@@ -5554,7 +5560,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                         <option value="corporates">Solo Corporativos</option>
                         <option value="individuals">Solo Individuales</option>
                         {clients && clients.length > 0 && (
-                          <optgroup label="Agentes y Empresas Espec?ficos">
+                          <optgroup label="Agentes y Empresas Específicos">
                             {[...clients]
                               .sort((a, b) => (a.name || a.company || '').localeCompare(b.name || b.company || ''))
                               .map(cl => (
@@ -5592,13 +5598,13 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                         }}
                         className="w-full py-2 px-3 bg-white border border-gray-200 rounded-xl text-xs text-gray-700 focus:ring-2 focus:ring-indigo-500 focus:border-transparent outline-none transition-all cursor-pointer"
                       >
-                        <option value="invoiceDate_desc">Fecha Invoice (M?s reciente)</option>
-                        <option value="invoiceDate_asc">Fecha Invoice (M?s antigua)</option>
-                        <option value="invoiceNumber_asc">N? Invoice (A - Z)</option>
-                        <option value="invoiceNumber_desc">N? Invoice (Z - A)</option>
+                        <option value="invoiceDate_desc">Fecha Invoice (Más reciente)</option>
+                        <option value="invoiceDate_asc">Fecha Invoice (Más antigua)</option>
+                        <option value="invoiceNumber_asc">N° Invoice (A - Z)</option>
+                        <option value="invoiceNumber_desc">N° Invoice (Z - A)</option>
                         <option value="amount_desc">Cantidad (Mayor a menor)</option>
                         <option value="amount_asc">Cantidad (Menor a mayor)</option>
-                        <option value="policyNumber_asc">C?digo P?liza (A - Z)</option>
+                        <option value="policyNumber_asc">Código Póliza (A - Z)</option>
                       </select>
 
                       {(invoiceDetailSearchTerm || invoiceDetailDateRange.start || invoiceDetailDateRange.end || invoiceDetailAgentFilter !== 'all' || invoiceDetailCorrectFilter !== 'all') && (
@@ -5704,7 +5710,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                               <div className="flex flex-col items-center justify-center gap-1.5">
                                 <FileSpreadsheet className="w-6 h-6 text-gray-300" />
                                 <p className="font-bold text-gray-600 text-xs">No se encontraron registros con los filtros seleccionados.</p>
-                                <p className="text-[10px] text-gray-400">Intenta ajustar o limpiar los filtros de b?squeda y fechas.</p>
+                                <p className="text-[10px] text-gray-400">Intenta ajustar o limpiar los filtros de búsqueda y fechas.</p>
                               </div>
                             </td>
                           </tr>
@@ -5724,7 +5730,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                           setInvoiceSubTab('cotejo');
                                         }}
                                         className="font-mono font-black text-[10px] text-indigo-700 hover:text-indigo-900 hover:underline inline-flex items-center gap-1 group"
-                                        title="Ir a Cotejo Autom?tico de este Invoice"
+                                        title="Ir a Cotejo Automático de este Invoice"
                                       >
                                         <Receipt className="w-3 h-3 text-indigo-500 group-hover:scale-110 transition-transform" />
                                         <span>{group.invoiceNumber}</span>
@@ -5764,7 +5770,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                       )}
                                     </div>
                                     {Math.abs(group.invoiceSystemTotal - group.amount) > 0.01 && (
-                                      <div className="text-[8.5px] font-normal text-gray-400 mt-0.5" title={`Total del Invoice completo (todos los c?digos): $${group.invoiceSystemTotal.toFixed(2)} USD`}>
+                                      <div className="text-[8.5px] font-normal text-gray-400 mt-0.5" title={`Total del Invoice completo (todos los códigos): $${group.invoiceSystemTotal.toFixed(2)} USD`}>
                                         Total Invoice: <span className="font-semibold text-gray-600">${group.invoiceSystemTotal.toFixed(2)} USD</span>
                                       </div>
                                     )}
@@ -5789,7 +5795,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                   <td className="px-3 py-1.5 text-center whitespace-nowrap">
                                     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold bg-indigo-50 text-indigo-700 border border-indigo-200">
                                       <Users className="w-2.5 h-2.5" />
-                                      <span>{group.policyCount} {group.policyCount === 1 ? 'p?liza' : 'p?lizas'}</span>
+                                      <span>{group.policyCount} {group.policyCount === 1 ? 'póliza' : 'pólizas'}</span>
                                     </span>
                                   </td>
 
@@ -5814,7 +5820,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                       }`}
                                       title={isExpanded ? 'Ocultar desglose' : 'Ver desglose de asegurados'}
                                     >
-                                      <span>{isExpanded ? 'Ocultar' : 'Ver P?lizas'}</span>
+                                      <span>{isExpanded ? 'Ocultar' : 'Ver Pólizas'}</span>
                                       {isExpanded ? <ChevronUp className="w-2.5 h-2.5" /> : <ChevronDown className="w-2.5 h-2.5" />}
                                     </button>
                                   </td>
@@ -5827,7 +5833,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                       <div className="bg-white rounded-lg border border-indigo-100 shadow-2xs p-2.5 space-y-1.5">
                                         <div className="flex items-center justify-between pb-1.5 border-b border-gray-100">
                                           <span className="text-[9px] font-black text-gray-700 uppercase tracking-wide">
-                                            P?lizas individuales en Invoice {group.invoiceNumber} - C?digo {group.policyCode} ({group.policies.length})
+                                            Pólizas individuales en Invoice {group.invoiceNumber} - Código {group.policyCode} ({group.policies.length})
                                           </span>
                                         </div>
                                         <div className="divide-y divide-gray-100 text-[10px]">
@@ -5854,7 +5860,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                                   <button
                                                     onClick={() => setSelectedInsuranceForDetail(pIns)}
                                                     className="p-0.5 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded"
-                                                    title="Ver p?liza"
+                                                    title="Ver póliza"
                                                   >
                                                     <Eye className="w-3 h-3" />
                                                   </button>
@@ -5955,8 +5961,8 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                             <td colSpan={6} className="px-6 py-12 text-center text-gray-400">
                               <div className="flex flex-col items-center justify-center gap-2">
                                 <FileSpreadsheet className="w-8 h-8 text-gray-300" />
-                                <p className="font-bold text-gray-600 text-sm">No se encontraron p?lizas con los filtros seleccionados.</p>
-                                <p className="text-xs text-gray-400">Intenta ajustar o limpiar los filtros de b?squeda y fechas.</p>
+                                <p className="font-bold text-gray-600 text-sm">No se encontraron pólizas con los filtros seleccionados.</p>
+                                <p className="text-xs text-gray-400">Intenta ajustar o limpiar los filtros de búsqueda y fechas.</p>
                               </div>
                             </td>
                           </tr>
@@ -5976,7 +5982,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                         setInvoiceSubTab('cotejo');
                                       }}
                                       className="font-mono font-black text-indigo-700 hover:text-indigo-900 hover:underline inline-flex items-center gap-1.5 group"
-                                      title="Ir a Cotejo Autom?tico de este Invoice"
+                                      title="Ir a Cotejo Automático de este Invoice"
                                     >
                                       <Receipt className="w-3.5 h-3.5 text-indigo-500 group-hover:scale-110 transition-transform" />
                                       <span>{item.invoiceNumber}</span>
@@ -6062,7 +6068,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                         setInvoiceSubTab('cotejo');
                                       }}
                                       className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[10px] font-bold bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 transition-colors"
-                                      title="Click para adjuntar factura en Cotejo Autom?tico"
+                                      title="Click para adjuntar factura en Cotejo Automático"
                                     >
                                       <Clock className="w-3 h-3 text-amber-600" />
                                       <span>Sin Factura Adjunta</span>
@@ -6075,7 +6081,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                   <button
                                     onClick={() => setSelectedInsuranceForDetail(ins)}
                                     className="p-1.5 text-gray-500 hover:text-indigo-600 hover:bg-indigo-50 border border-gray-200 rounded-lg transition-all"
-                                    title="Ver detalle completo de la p?liza"
+                                    title="Ver detalle completo de la póliza"
                                   >
                                     <Eye className="w-3.5 h-3.5" />
                                   </button>
@@ -6094,11 +6100,11 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                   <div className="flex items-center gap-2">
                     {invoiceDetailViewMode === 'concentrated' ? (
                       <span className="font-bold text-gray-700">
-                        Mostrando {concentratedPoliciesData.length} registros concentrados ({detailedMetrics.totalPolicies} p?lizas en {detailedMetrics.uniqueInvoices} invoices)
+                        Mostrando {concentratedPoliciesData.length} registros concentrados ({detailedMetrics.totalPolicies} pólizas en {detailedMetrics.uniqueInvoices} invoices)
                       </span>
                     ) : (
                       <span className="font-bold text-gray-700">
-                        Mostrando {detailedInvoicedPolicies.length} de {insurances.filter(i => !!i.InvoiceCaremed).length} p?lizas facturadas ({detailedMetrics.uniqueInvoices} invoices distintos)
+                        Mostrando {detailedInvoicedPolicies.length} de {insurances.filter(i => !!i.InvoiceCaremed).length} pólizas facturadas ({detailedMetrics.uniqueInvoices} invoices distintos)
                       </span>
                     )}
                   </div>
@@ -6206,7 +6212,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
               onChange={(e) => setActionTypeFilter(e.target.value)}
               className="bg-gray-50 border border-gray-200 rounded-lg px-4 py-2 outline-none focus:ring-2 focus:ring-blue-500 text-sm font-bold text-gray-700"
             >
-              <option value="all">Tipos de Acci?n (Todos)</option>
+              <option value="all">Tipos de Acción (Todos)</option>
               {actionTypes.map(at => (
                 <option key={at.action} value={at.action}>{at.action} - {at.name}</option>
               ))}
@@ -6275,7 +6281,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
             </div>
 
             <div className="flex items-center gap-3 bg-gray-50 px-3 py-1.5 rounded-lg border border-gray-200">
-              <span className="text-xs text-gray-500 font-bold uppercase tracking-wider">Vigencia P?liza</span>
+              <span className="text-xs text-gray-500 font-bold uppercase tracking-wider">Vigencia Póliza</span>
               <div className="flex items-center gap-1.5">
                 <Calendar className="w-3.5 h-3.5 text-gray-400" />
                 <input 
@@ -6328,7 +6334,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 animate-in fade-in duration-300">
           <div className="bg-white rounded-2xl p-5 border border-gray-100 shadow-sm hover:shadow-md transition-all flex items-center justify-between">
             <div className="space-y-1">
-              <h4 className="text-[10px] font-black uppercase text-gray-400 tracking-wider">P?lizas Filtradas</h4>
+              <h4 className="text-[10px] font-black uppercase text-gray-400 tracking-wider">Pólizas Filtradas</h4>
               <p className="text-2xl font-black text-gray-900">{summaryStats.count}</p>
               <p className="text-[9px] font-semibold text-gray-450">Bajo los criterios seleccionados</p>
             </div>
@@ -6368,7 +6374,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
           {profile?.role !== 'client' && (
             <div className="bg-white rounded-2xl p-5 border border-gray-100 shadow-sm hover:shadow-md transition-all flex items-center justify-between">
               <div className="space-y-1 text-left">
-                <h4 className="text-[10px] font-black uppercase text-gray-400 tracking-wider">Comisi?n</h4>
+                <h4 className="text-[10px] font-black uppercase text-gray-400 tracking-wider">Comisión</h4>
                 <p className="text-2xl font-black text-indigo-600">
                   ${summaryStats.comisiones.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} <span className="text-[10px] font-bold text-gray-400">USD</span>
                 </p>
@@ -6392,14 +6398,14 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
             <div>
               <div className="flex items-center gap-2">
                 <h4 className="text-sm font-bold text-blue-950">
-                  P?lizas Pendientes de Exportaci?n CareMed
+                  Pólizas Pendientes de Exportación CareMed
                 </h4>
                 <span className="px-2 py-0.5 bg-blue-200 text-blue-800 text-[10px] font-black rounded-full uppercase">
                   {filteredInsurances.length} pendientes
                 </span>
               </div>
               <p className="text-xs text-blue-700 font-medium mt-0.5">
-                Seleccione en las filas las p?lizas que desea exportar y haga clic en <strong>Exportar CareMed</strong> para generar el archivo y registrarlas.
+                Seleccione en las filas las pólizas que desea exportar y haga clic en <strong>Exportar CareMed</strong> para generar el archivo y registrarlas.
               </p>
             </div>
           </div>
@@ -6426,8 +6432,8 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                 <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
                 <span>
                   {selectedExportedCount === selectedInsuranceIds.length
-                    ? 'P?lizas ya exportadas (bot?n CareMed oculto)'
-                    : `${selectedExportedCount} ${selectedExportedCount === 1 ? 'p?liza ya exportada' : 'p?lizas ya exportadas'} seleccionada(s) (CareMed oculto)`
+                    ? 'Pólizas ya exportadas (botón CareMed oculto)'
+                    : `${selectedExportedCount} ${selectedExportedCount === 1 ? 'póliza ya exportada' : 'pólizas ya exportadas'} seleccionada(s) (CareMed oculto)`
                   }
                 </span>
               </div>
@@ -6435,7 +6441,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
             <button
               onClick={() => setCaremedExportedFilter('all')}
               className="px-3 py-1.5 text-xs text-blue-600 hover:text-blue-900 font-bold hover:bg-blue-100 rounded-xl transition-all cursor-pointer"
-              title="Restablecer filtro a todas las p?lizas"
+              title="Restablecer filtro a todas las pólizas"
             >
               Ver Todas
             </button>
@@ -6446,11 +6452,11 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
       <div className="space-y-4">
         {loading ? (
           <div className="bg-white p-12 rounded-2xl border border-gray-100 text-center text-gray-400">
-            Cargando p?lizas...
+            Cargando pólizas...
           </div>
         ) : filteredInsurances.length === 0 ? (
           <div className="bg-white p-12 rounded-2xl border border-gray-100 text-center text-gray-400">
-            No se encontraron p?lizas.
+            No se encontraron pólizas.
           </div>
         ) : (
           <>
@@ -6495,7 +6501,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                               handleDuplicatePolicy(i);
                             }}
                             className="p-1 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-md transition-all cursor-pointer inline-flex items-center"
-                            title="Duplicar datos b?sicos a nueva p?liza (Agente/Corporativo/Individual, Nombre, Apellido, Fecha de nacimiento)"
+                            title="Duplicar datos básicos a nueva póliza (Agente/Corporativo/Individual, Nombre, Apellido, Fecha de nacimiento)"
                           >
                             <Copy className="w-3.5 h-3.5" />
                           </button>
@@ -6511,10 +6517,10 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                         </div>
                         <div className="flex items-center gap-1 text-[10px] text-gray-400 mt-0.5">
                           <Baby className="w-3 h-3" />
-                          <span>Nacimiento: {formatDisplayDate(i.birthDate)} ({i.age} a?os) ? {i.gender || '-'}</span>
+                          <span>Nacimiento: {formatDisplayDate(i.birthDate)} ({i.age} años) ? {i.gender || '-'}</span>
                         </div>
                         {i.Caremed && (
-                          <div className="mt-1" title="Fecha y Hora de la exportaci?n a CareMed">
+                          <div className="mt-1" title="Fecha y Hora de la exportación a CareMed">
                             <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-black bg-emerald-50 text-emerald-700 border border-emerald-100 font-mono">
                               CareMed: {i.Caremed}
                             </span>
@@ -6611,7 +6617,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                             {formatDisplayDate(i.startDate)} al {formatDisplayDate(i.endDate)}
                           </span>
                           <span className="opacity-70 ml-4">
-                            {i.days} d?as 
+                            {i.days} días 
                             {i.days > 39 && ` (${Math.ceil(i.days / 30.4)} meses)`}
                           </span>
                         </div>
@@ -6620,7 +6626,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
 
                     <div className="space-y-3">
                       <div>
-                        <p className="text-[9px] text-gray-400 font-bold uppercase tracking-tighter mb-1">Informaci?n Comercial</p>
+                        <p className="text-[9px] text-gray-400 font-bold uppercase tracking-tighter mb-1">Información Comercial</p>
                         <div className="flex flex-col gap-2">
                           <div>
                             <p className="text-[8px] text-gray-400 font-bold uppercase mb-0.5">Plan</p>
@@ -6629,7 +6635,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                             </span>
                           </div>
                           <div>
-                            <p className="text-[8px] text-gray-400 font-bold uppercase mb-0.5">Tipo de P?liza</p>
+                            <p className="text-[8px] text-gray-400 font-bold uppercase mb-0.5">Tipo de Póliza</p>
                             <span className={`inline-flex px-2 py-1 text-[10px] font-bold rounded uppercase border w-fit ${
                               policyName.includes('Oro') ? 'bg-amber-50 text-amber-700 border-amber-100' :
                               policyName.includes('Plata') ? 'bg-slate-100 text-slate-700 border-slate-200' :
@@ -6657,7 +6663,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                           </div>
                         )}
                         <div>
-                          <p className="text-[8px] text-gray-400 font-bold uppercase text-indigo-400">Comisi?n</p>
+                          <p className="text-[8px] text-gray-400 font-bold uppercase text-indigo-400">Comisión</p>
                           <p className="text-xs font-black text-indigo-600">{formatPriceWithSign(i.agentCommission || 0, i.actionType?.toUpperCase() === 'CAN')}</p>
                         </div>
                         <div>
@@ -6737,7 +6743,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                               setModalInitialAction('extension');
                             }}
                             className="flex items-center gap-2 px-3 py-1.5 bg-blue-50 text-blue-600 text-[10px] font-bold rounded-lg hover:bg-blue-100 transition-all cursor-pointer"
-                            title="Extensi?n del Seguro"
+                            title="Extensión del Seguro"
                           >
                             <Plus className="w-3.5 h-3.5" />
                             Extension
@@ -6760,14 +6766,14 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                           onClick={() => handleConfirmCommission(i.id!)}
                           className="px-3 py-1.5 bg-indigo-600 text-white text-[10px] font-bold rounded-lg hover:bg-indigo-700 transition-all shadow-sm shadow-indigo-100"
                         >
-                          Confirmar Comisi?n
+                          Confirmar Comisión
                         </button>
                       )}
                       {isSuperAdminOrDirector && (
                         <button 
                           onClick={() => setInsuranceToDelete(i)}
                           className="p-1.5 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all"
-                          title="Borrar P?liza"
+                          title="Borrar Póliza"
                         >
                           <Trash2 className="w-4 h-4" />
                         </button>
@@ -6791,7 +6797,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                           checked={paginatedInsurances.length > 0 && paginatedInsurances.map(i => i.id).filter((id): id is string => !!id).every(id => selectedInsuranceIds.includes(id))}
                           onChange={handleSelectAllCurrentPage}
                           className="w-4 h-4 text-indigo-600 border-gray-300 rounded focus:ring-indigo-500 cursor-pointer accent-indigo-650"
-                          title="Seleccionar todo en esta p?gina"
+                          title="Seleccionar todo en esta página"
                         />
                       </th>
                     )}
@@ -6825,13 +6831,13 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                     </th>
                     <th className="px-6 py-4 font-bold">Nacimiento / Edad</th>
                     <th className="px-6 py-4 font-bold">Ruta</th>
-                    <th className="px-6 py-4 font-bold">Fechas / Duraci?n</th>
-                    <th className="px-6 py-4 font-bold">Acci?n</th>
+                    <th className="px-6 py-4 font-bold">Fechas / Duración</th>
+                    <th className="px-6 py-4 font-bold">Acción</th>
                     <th className="px-6 py-4 font-bold">Estado Vigencia</th>
-                    <th className="px-6 py-4 font-bold">Informaci?n Comercial</th>
+                    <th className="px-6 py-4 font-bold">Información Comercial</th>
                     <th className="px-6 py-4 font-bold text-right">Precio</th>
                     {profile?.role !== 'agent' && <th className="px-6 py-4 font-bold text-right">Costo</th>}
-                    <th className="px-6 py-4 font-bold text-right">Comisi?n</th>
+                    <th className="px-6 py-4 font-bold text-right">Comisión</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-gray-100">
@@ -6875,7 +6881,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                   handleDuplicatePolicy(i);
                                 }}
                                 className="p-1 text-gray-400 hover:text-indigo-600 hover:bg-indigo-50 rounded-md transition-all cursor-pointer inline-flex items-center"
-                                title="Duplicar datos b?sicos a nueva p?liza (Agente/Corporativo/Individual, Nombre, Apellido, Fecha de nacimiento)"
+                                title="Duplicar datos básicos a nueva póliza (Agente/Corporativo/Individual, Nombre, Apellido, Fecha de nacimiento)"
                               >
                                 <Copy className="w-3.5 h-3.5" />
                               </button>
@@ -6892,7 +6898,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                               </span>
                             )}
                             {i.Caremed && (
-                              <span className="inline-block w-max px-1 rounded text-[9px] font-black bg-emerald-50 text-emerald-700 border border-emerald-100 font-mono mt-0.5" title="Fecha y Hora de la exportaci?n a CareMed">
+                              <span className="inline-block w-max px-1 rounded text-[9px] font-black bg-emerald-50 text-emerald-700 border border-emerald-100 font-mono mt-0.5" title="Fecha y Hora de la exportación a CareMed">
                                 CareMed: {i.Caremed}
                               </span>
                             )}
@@ -6977,7 +6983,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                 <button 
                                   onClick={() => handleConfirmCommission(i.id!)}
                                   className="p-1 text-indigo-600 hover:bg-indigo-50 rounded-md transition-all"
-                                  title="Confirmar Comisi?n"
+                                  title="Confirmar Comisión"
                                 >
                                   <DollarSign className="w-3.5 h-3.5" />
                                 </button>
@@ -7010,7 +7016,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                       setModalInitialAction('extension');
                                     }}
                                     className="p-1 text-blue-600 hover:bg-blue-50 rounded-md transition-all cursor-pointer"
-                                    title="Extensi?n del Seguro"
+                                    title="Extensión del Seguro"
                                   >
                                     <Plus className="w-3.5 h-3.5" />
                                   </button>
@@ -7032,7 +7038,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                           <div className="flex flex-col">
                             <span className="text-xs text-gray-600">{formatDisplayDate(i.birthDate)}</span>
                             <div className="flex items-center gap-1">
-                              <span className="text-[10px] font-bold text-blue-600">{i.age} a?os</span>
+                              <span className="text-[10px] font-bold text-blue-600">{i.age} años</span>
                               <span className="text-[10px] text-gray-400">?</span>
                               <span className="text-[10px] font-medium text-gray-500">{i.gender || '-'}</span>
                             </div>
@@ -7049,7 +7055,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                           <div className="flex flex-col text-[10px] text-gray-600">
                             <span>{formatDisplayDate(i.startDate)} al {formatDisplayDate(i.endDate)}</span>
                             <span className="font-bold text-blue-600">
-                              {i.days} d?as 
+                              {i.days} días 
                               {i.days > 39 && ` (${Math.ceil(i.days / 30.4)} meses)`}
                             </span>
                           </div>
@@ -7122,10 +7128,10 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
            <div className="flex flex-col sm:flex-row items-center justify-between gap-4 bg-white px-6 py-4 rounded-xl border border-gray-100 shadow-sm mt-4">
              <div className="flex flex-wrap items-center gap-x-6 gap-y-2">
                <p className="text-sm text-gray-500">
-                 Mostrando <span className="font-bold text-gray-900">{filteredInsurances.length === 0 ? 0 : ((currentPage - 1) * pageSize) + 1}</span> a <span className="font-bold text-gray-900">{Math.min(currentPage * pageSize, filteredInsurances.length)}</span> de <span className="font-bold text-gray-900">{filteredInsurances.length}</span> p?lizas
+                 Mostrando <span className="font-bold text-gray-900">{filteredInsurances.length === 0 ? 0 : ((currentPage - 1) * pageSize) + 1}</span> a <span className="font-bold text-gray-900">{Math.min(currentPage * pageSize, filteredInsurances.length)}</span> de <span className="font-bold text-gray-900">{filteredInsurances.length}</span> pólizas
                </p>
                <div className="flex items-center gap-2 border-l border-gray-200 pl-4">
-                 <span className="text-xs text-gray-500">Filas por p?gina:</span>
+                 <span className="text-xs text-gray-500">Filas por página:</span>
                  <select
                    value={pageSize}
                    onChange={(e) => {
@@ -7188,7 +7194,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
         isOpen={!!selectedInsuranceForTransactions}
         onClose={() => setSelectedInsuranceForTransactions(null)}
         insuranceId={selectedInsuranceForTransactions || undefined}
-        title="Transacciones de la P?liza"
+        title="Transacciones de la Póliza"
       />
 
       <InsuranceDetailModal 
@@ -7218,7 +7224,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
             <div className="bg-indigo-600 p-5 text-white flex justify-between items-center">
               <div className="flex items-center gap-3">
                 <Calendar className="w-5 h-5 text-white" />
-                <h3 className="text-base font-bold">Editar Fecha de Exportaci?n</h3>
+                <h3 className="text-base font-bold">Editar Fecha de Exportación</h3>
               </div>
               <button onClick={() => setEditingExportDate(null)} className="p-2 hover:bg-white/10 rounded-xl transition-all cursor-pointer">
                 <X className="w-5 h-5" />
@@ -7236,7 +7242,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                 />
               </div>
               <p className="text-[11px] text-gray-450 leading-relaxed font-medium">
-                Se actualizar?n todas las p?lizas vinculadas a este lote y las facturas adjuntas asociadas de manera autom?tica en la base de datos.
+                Se actualizarán todas las pólizas vinculadas a este lote y las facturas adjuntas asociadas de manera automática en la base de datos.
               </p>
               <div className="flex gap-3 pt-2 justify-end">
                 <button
@@ -7275,6 +7281,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
         insurance={selectedInsuranceForWhatsApp}
         policies={policies}
         policyLetters={policyLetters}
+        clients={clients}
         companySettings={settings}
       />
 
@@ -7337,13 +7344,13 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                     />
                     <div className="flex-1">
                       <p className="text-sm font-bold text-gray-900">
-                        {letter.language === 'es' ? 'Espa?ol' : 
-                         letter.language === 'en' ? 'Ingl?s' : 
-                         letter.language === 'de' ? 'Alem?n' : 
+                        {letter.language === 'es' ? 'Español' : 
+                         letter.language === 'en' ? 'Inglés' : 
+                         letter.language === 'de' ? 'Alemán' : 
                          letter.language === 'it' ? 'Italiano' : 
-                         letter.language === 'fr' ? 'Franc?s' : 
-                         letter.language === 'es_spain' ? 'Espa?a' : 
-                         letter.language === 'embajada_spain' ? 'Embajada Espa?a' : 
+                         letter.language === 'fr' ? 'Francés' : 
+                         letter.language === 'es_spain' ? 'España' : 
+                         letter.language === 'embajada_spain' ? 'Embajada España' : 
                          letter.language === 'covid' ? 'Coronavirus' : 
                          letter.language === 'policy' ? 'Policy' : 
                          letter.language.toUpperCase()}
@@ -7385,7 +7392,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
             <div className="space-y-2">
               <h3 className="text-xl font-bold text-gray-900 tracking-tight">Enviando Correos Masivos</h3>
               <p className="text-sm text-gray-505 leading-relaxed text-gray-500">
-                Por favor, mant?n esta ventana abierta mientras se preparan y env?an los certificados de seguro.
+                Por favor, mantén esta ventana abierta mientras se preparan y envían los certificados de seguro.
               </p>
             </div>
             
@@ -7419,8 +7426,8 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
               <div className="flex items-center gap-3 text-left">
                 <Edit2 className="w-6 h-6 text-white" />
                 <div>
-                  <h3 className="text-lg font-black tracking-tight">Modificaci?n Masiva de P?lizas</h3>
-                  <p className="text-xs text-amber-100 font-semibold mt-0.5">Modificando {selectedInsuranceIds.length} p?lizas seleccionadas</p>
+                  <h3 className="text-lg font-black tracking-tight">Modificación Masiva de Pólizas</h3>
+                  <p className="text-xs text-amber-100 font-semibold mt-0.5">Modificando {selectedInsuranceIds.length} pólizas seleccionadas</p>
                 </div>
               </div>
               <button 
@@ -7434,7 +7441,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
 
             <form onSubmit={handleBulkEditSubmit} className="flex-1 overflow-y-auto p-6 space-y-6">
               <p className="text-xs text-gray-500 font-semibold leading-relaxed text-left">
-                Selecciona las casillas de los campos que deseas actualizar masivamente en las p?lizas seleccionadas. Los campos que no est?n seleccionados permanecer?n sin cambios.
+                Selecciona las casillas de los campos que deseas actualizar masivamente en las pólizas seleccionadas. Los campos que no están seleccionados permanecerán sin cambios.
               </p>
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-6 text-left">
@@ -7491,12 +7498,12 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                       onChange={(e) => setBulkEditFields(prev => ({ ...prev, updateCommission: e.target.checked }))}
                       className="w-4 h-4 rounded border-gray-300 text-amber-600 focus:ring-amber-500 accent-amber-600"
                     />
-                    <span className="text-xs font-black text-gray-700 uppercase tracking-wider">Modificar Comisi?n Agente (USD)</span>
+                    <span className="text-xs font-black text-gray-700 uppercase tracking-wider">Modificar Comisión Agente (USD)</span>
                   </label>
                   <input 
                     type="number"
                     step="0.01"
-                    placeholder="Nueva comisi?n"
+                    placeholder="Nueva comisión"
                     value={bulkEditFields.commission}
                     onChange={(e) => setBulkEditFields(prev => ({ ...prev, commission: e.target.value }))}
                     disabled={!bulkEditFields.updateCommission}
@@ -7633,9 +7640,9 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                   </div>
                 </div>
 
-                {/* PA?S ORIGEN Y DESTINO */}
+                {/* PAÍS ORIGEN Y DESTINO */}
                 <div className="p-4 rounded-2xl border border-gray-100 bg-gray-50/50 space-y-4 col-span-1 md:col-span-2">
-                  <span className="text-xs font-black text-gray-700 uppercase tracking-wider block">Pa?s de Origen y Destino</span>
+                  <span className="text-xs font-black text-gray-700 uppercase tracking-wider block">País de Origen y Destino</span>
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div className="space-y-2">
                       <label className="flex items-center gap-2 cursor-pointer">
@@ -7645,7 +7652,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                           onChange={(e) => setBulkEditFields(prev => ({ ...prev, updateOriginCountry: e.target.checked }))}
                           className="w-3.5 h-3.5 rounded border-gray-300 text-amber-600 focus:ring-amber-500 accent-amber-600"
                         />
-                        <span className="text-[10px] font-black text-gray-500 uppercase tracking-wider">Modificar Pa?s de Origen</span>
+                        <span className="text-[10px] font-black text-gray-500 uppercase tracking-wider">Modificar País de Origen</span>
                       </label>
                       <select 
                         value={bulkEditFields.originCountry}
@@ -7669,7 +7676,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                           onChange={(e) => setBulkEditFields(prev => ({ ...prev, updateDestinationCountry: e.target.checked }))}
                           className="w-3.5 h-3.5 rounded border-gray-300 text-amber-600 focus:ring-amber-500 accent-amber-600"
                         />
-                        <span className="text-[10px] font-black text-gray-500 uppercase tracking-wider">Modificar Pa?s de Destino</span>
+                        <span className="text-[10px] font-black text-gray-500 uppercase tracking-wider">Modificar País de Destino</span>
                       </label>
                       <select 
                         value={bulkEditFields.destinationCountry}
@@ -7700,7 +7707,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                   </label>
                   <input 
                     type="text"
-                    placeholder="N?mero de Invoice (dejar vac?o para remover Invoice)"
+                    placeholder="Número de Invoice (dejar vacío para remover Invoice)"
                     value={bulkEditFields.invoiceCaremed}
                     onChange={(e) => setBulkEditFields(prev => ({ ...prev, invoiceCaremed: e.target.value }))}
                     disabled={!bulkEditFields.updateInvoice}
@@ -7746,11 +7753,11 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
               <div className="p-3 bg-red-50 rounded-2xl">
                 <AlertTriangle className="w-8 h-8" />
               </div>
-              <h3 className="text-lg font-black tracking-tight">Confirmar Eliminaci?n Masiva</h3>
+              <h3 className="text-lg font-black tracking-tight">Confirmar Eliminación Masiva</h3>
             </div>
             <p className="text-gray-600 mb-8 leading-relaxed">
-              ?Est?s seguro de que deseas eliminar las <span className="font-bold text-red-600">{selectedInsuranceIds.length} p?lizas seleccionadas</span> del sistema? 
-              Esta acci?n es irreversible y borrar? permanentemente todos los registros de seguros seleccionados.
+              ¿Estás seguro de que deseas eliminar las <span className="font-bold text-red-600">{selectedInsuranceIds.length} pólizas seleccionadas</span> del sistema? 
+              Esta acción es irreversible y borrará permanentemente todos los registros de seguros seleccionados.
             </p>
             <div className="flex gap-3">
               <button 
@@ -7771,7 +7778,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                     Borrando...
                   </>
                 ) : (
-                  'S?, Borrar Seleccionadas'
+                  'Sí, Borrar Seleccionadas'
                 )}
               </button>
             </div>
@@ -7785,11 +7792,11 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
           <div className="bg-white rounded-xl shadow-xl max-w-md w-full p-6">
             <div className="flex items-center gap-3 text-red-600 mb-4">
               <AlertTriangle className="w-6 h-6" />
-              <h3 className="text-lg font-bold">Confirmar Eliminaci?n</h3>
+              <h3 className="text-lg font-bold">Confirmar Eliminación</h3>
             </div>
             <p className="text-gray-600 mb-6">
-              ?Est?s seguro de que deseas eliminar la p?liza de <span className="font-bold">{insuranceToDelete.firstName} {insuranceToDelete.lastName}</span>? 
-              Esta acci?n no se puede deshacer y eliminar? permanentemente el registro.
+              ¿Estás seguro de que deseas eliminar la póliza de <span className="font-bold">{insuranceToDelete.firstName} {insuranceToDelete.lastName}</span>? 
+              Esta acción no se puede deshacer y eliminará permanentemente el registro.
             </p>
             <div className="flex justify-end gap-3">
               <button 
@@ -7802,7 +7809,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                 onClick={() => handleDeleteInsurance(insuranceToDelete.id!)}
                 className="px-4 py-2 bg-red-600 text-white font-bold rounded-lg hover:bg-red-700 transition-colors"
               >
-                Eliminar P?liza
+                Eliminar Póliza
               </button>
             </div>
           </div>
@@ -7864,18 +7871,18 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
 
               <div>
                 <label className="block text-xs font-bold text-gray-700 mb-1.5">
-                  Escribe la Justificaci?n de la Diferencia <span className="text-rose-500">*</span>
+                  Escribe la Justificación de la Diferencia <span className="text-rose-500">*</span>
                 </label>
                 <textarea
                   value={justifyingInvoice.justificationText}
                   onChange={(e) => setJustifyingInvoice(prev => prev ? { ...prev, justificationText: e.target.value } : null)}
-                  placeholder="Ej. Recargo autorizado por extensi?n / Descuento acordado / Ajuste por tipo de cambio / Comisi?n de emisi?n..."
+                  placeholder="Ej. Recargo autorizado por extensión / Descuento acordado / Ajuste por tipo de cambio / Comisión de emisión..."
                   rows={4}
                   className="w-full text-xs p-3 border border-gray-200 rounded-2xl focus:ring-2 focus:ring-emerald-500 focus:border-transparent outline-hidden resize-none transition-all placeholder:text-gray-400 bg-white"
                   autoFocus
                 />
                 <p className="text-[10.5px] text-gray-400 mt-1.5 leading-relaxed">
-                  Al confirmar, esta factura quedar? marcada como <strong>Aprobada con Justificaci?n</strong> y dejar? de aparecer en el <strong>Listado de Invoices</strong> de forma inmediata.
+                  Al confirmar, esta factura quedará marcada como <strong>Aprobada con Justificación</strong> y dejará de aparecer en el <strong>Listado de Invoices</strong> de forma inmediata.
                 </p>
               </div>
             </div>

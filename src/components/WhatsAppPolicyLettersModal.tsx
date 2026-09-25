@@ -47,7 +47,7 @@ export interface PolicyWhatsAppContactsResult {
  */
 export function getPolicyWhatsAppContacts(
   insurance: InsuranceRequest,
-  clients: any[],
+  clients: any[] = [],
   users?: any[]
 ): PolicyWhatsAppContactsResult {
   if (!insurance) {
@@ -178,7 +178,7 @@ interface WhatsAppPolicyLettersModalProps {
   insurance: InsuranceRequest | null;
   policies: Policy[];
   policyLetters: PolicyLetter[];
-  clients: any[];
+  clients?: any[];
   users?: any[];
   companySettings?: any;
 }
@@ -189,7 +189,7 @@ export default function WhatsAppPolicyLettersModal({
   insurance,
   policies,
   policyLetters,
-  clients,
+  clients = [],
   users = [],
   companySettings
 }: WhatsAppPolicyLettersModalProps) {

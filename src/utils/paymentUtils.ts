@@ -7,9 +7,9 @@ export const isCardPaymentMethod = (pm?: string | null): boolean => {
     lower.includes('amex') ||
     lower.includes('visa') ||
     lower.includes('mastercard') ||
-    lower.includes('cr?dito') ||
+    lower.includes('crédito') ||
     lower.includes('credito') ||
-    lower.includes('d?bito') ||
+    lower.includes('débito') ||
     lower.includes('debito') ||
     lower.includes('stripe')
   );
@@ -54,7 +54,7 @@ export const isInsuranceDeudor = (ins: {
 };
 
 /**
- * Payment badge for Gesti?n de P?lizas and Detalles del Seguro.
+ * Payment badge for Gestión de Pólizas and Detalles del Seguro.
  * Balance is the source of truth so a stale `status: paid` cannot show PAGADO
  * while the list still shows PENDIENTE (or the reverse).
  */
@@ -96,12 +96,12 @@ export const getInsuranceFinalPrice = getInsuranceExpectedAmount;
 export const getInsuranceDisplayStatus = getInsurancePaymentDisplayStatus;
 
 export const DEFAULT_PAYMENT_METHODS = [
-  { id: 'pm_card_credito', name: 'Tarjeta de Cr?dito', status: 'active' },
-  { id: 'pm_card_debito', name: 'Tarjeta de D?bito', status: 'active' },
+  { id: 'pm_card_credito', name: 'Tarjeta de Crédito', status: 'active' },
+  { id: 'pm_card_debito', name: 'Tarjeta de Débito', status: 'active' },
   { id: 'pm_card_visa_mc', name: 'Tarjeta VISA/MC', status: 'active' },
   { id: 'pm_card_amex', name: 'Tarjeta AMEX', status: 'active' },
   { id: 'pm_transferencia', name: 'Transferencia Bancaria', status: 'active' },
-  { id: 'pm_deposito', name: 'Dep?sito Bancario', status: 'active' },
+  { id: 'pm_deposito', name: 'Depósito Bancario', status: 'active' },
   { id: 'pm_efectivo', name: 'Efectivo', status: 'active' },
-  { id: 'pm_stripe', name: 'Stripe (Pago en l?nea)', status: 'active' }
+  { id: 'pm_stripe', name: 'Stripe (Pago en línea)', status: 'active' }
 ];

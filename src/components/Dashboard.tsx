@@ -22,6 +22,8 @@ import TransactionModal from './TransactionModal';
 import { format, startOfMonth, endOfMonth } from 'date-fns';
 import { useFirestoreData } from '../context/FirestoreDataContext';
 import { getNormalizedYYYYMMDD } from '../lib/policyUtils';
+import PoliciesStatusSummarySection from './PoliciesStatusSummarySection';
+import AgentPayablesConcentrate from './AgentPayablesConcentrate';
 
 interface DashboardProps {
   profile: UserProfile | null;
@@ -32,8 +34,12 @@ export default function Dashboard({ profile }: DashboardProps) {
     insurances: contextInsurances, 
     policies, 
     payments: contextPayments, 
+    clients,
+    users,
     latestExchangeRate: exchangeRate,
-    loading: contextLoading
+    loading: contextLoading,
+    limitToCurrentMonth,
+    setLimitToCurrentMonth
   } = useFirestoreData();
 
   const [selectedInsuranceForTransactions, setSelectedInsuranceForTransactions] = useState<string | null>(null);
@@ -375,6 +381,17 @@ export default function Dashboard({ profile }: DashboardProps) {
         ))}
       </div>
 
+      {/* Policy Status Overview Section (Active vs Pending) - ADMIN ONLY */}
+      {isAdmin && (
+        <PoliciesStatusSummarySection
+          insurances={insurances}
+          policies={policies}
+          loading={loading}
+          limitToCurrentMonth={limitToCurrentMonth}
+          onToggleMonthLimit={setLimitToCurrentMonth}
+        />
+      )}
+
       {/* Financial Overview (Incomes vs Expenses) - ADMIN ONLY */}
       {isAdmin && (
         <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 space-y-6">
@@ -467,82 +484,13 @@ export default function Dashboard({ profile }: DashboardProps) {
         </div>
       </div>
 
-      {/* Recent Transactions */}
-      <div className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden">
-        <div className="p-6 border-b border-gray-100 flex justify-between items-center">
-          <h3 className="text-lg font-semibold">Transacciones Recientes</h3>
-          <p className="text-xs text-gray-400">Mostrando {filteredInsurances.length} registros filtrados</p>
-        </div>
-        <div className="overflow-x-auto">
-          <table className="w-full text-left">
-            <thead className="bg-gray-50 text-gray-500 text-xs uppercase tracking-wider">
-              <tr>
-                <th className="px-6 py-4 font-medium">Cliente</th>
-                <th className="px-6 py-4 font-medium">Plan / Póliza</th>
-                <th className="px-6 py-4 font-medium">Canal</th>
-                <th className="px-6 py-4 font-medium">Venta</th>
-                <th className="px-6 py-4 font-medium">Costo</th>
-                <th className="px-6 py-4 font-medium">Comisión</th>
-                <th className="px-6 py-4 font-medium">Estado</th>
-                <th className="px-6 py-4 font-medium text-right">Acciones</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {filteredInsurances.slice(0, 10).map((i) => (
-                <tr key={i.id} className="hover:bg-gray-50 transition-colors">
-                  <td className="px-6 py-4">
-                    <p className="text-sm font-medium text-gray-900">{i.firstName} {i.lastName}</p>
-                    <p className="text-xs text-gray-500">{i.email}</p>
-                  </td>
-                  <td className="px-6 py-4">
-                    <div className="flex flex-col">
-                      <span className="text-[10px] font-bold text-indigo-600 uppercase">
-                        {getPlanLabel(i.plan || i.policyId.split('-')[0])}
-                      </span>
-                      <span className="text-xs text-gray-600 font-medium">
-                        {getInsuranceTypeLabel(i)}
-                      </span>
-                    </div>
-                    <p className="text-[10px] text-gray-400 font-mono mt-1">{i.id}</p>
-                  </td>
-                  <td className="px-6 py-4">
-                    <span className="px-2 py-1 text-xs font-medium rounded-full bg-gray-100 text-gray-600">
-                      {i.clientType}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4 text-sm font-semibold text-gray-900">
-                    ${(i.totalFinal || i.totalPrice).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                  </td>
-                  <td className="px-6 py-4 text-sm text-red-500">
-                    ${(i.totalCost || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                  </td>
-                  <td className="px-6 py-4 text-sm text-indigo-600 font-medium">
-                    ${(i.agentCommission || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                  </td>
-                  <td className="px-6 py-4">
-                    <span className={`px-2 py-1 text-xs font-medium rounded-full ${
-                      i.status === 'paid' ? 'bg-green-100 text-green-700' : 
-                      i.status === 'pending' ? 'bg-yellow-100 text-yellow-700' : 
-                      'bg-red-100 text-red-700'
-                    }`}>
-                      {i.status}
-                    </span>
-                  </td>
-                  <td className="px-6 py-4 text-right">
-                    <button 
-                      onClick={() => setSelectedInsuranceForTransactions(i.id || null)}
-                      className="p-1.5 text-gray-400 hover:text-green-600 hover:bg-green-50 rounded transition-colors"
-                      title="Ver Transacciones"
-                    >
-                      <Receipt className="w-4 h-4" />
-                    </button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      </div>
+      {/* Concentrado de Agentes con Cuentas por Pagar */}
+      <AgentPayablesConcentrate
+        insurances={insurances}
+        clients={clients}
+        users={users}
+        onViewTransactions={(id) => setSelectedInsuranceForTransactions(id)}
+      />
 
       <TransactionModal 
         isOpen={!!selectedInsuranceForTransactions}

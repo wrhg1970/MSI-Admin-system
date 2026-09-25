@@ -25,7 +25,7 @@ import { collection, query, getDocs, where, orderBy, updateDoc, doc, getDocsFrom
 import { db, handleFirestoreError, OperationType } from '../firebase';
 import { InsuranceRequest, Client, ClientType, UserProfile, CustomRole, Policy, Payment, Category, Subcategory, ExchangeRate } from '../types';
 import { usePermissions } from '../hooks/usePermissions';
-import { format, parseISO } from 'date-fns';
+import { format, parseISO, subDays } from 'date-fns';
 import { getNormalizedYYYYMMDD, getPolicyEffectiveCost } from '../lib/policyUtils';
 import { useFirestoreData } from '../context/FirestoreDataContext';
 import jsPDF from 'jspdf';
@@ -37,9 +37,9 @@ import MonthlyReportModal from './MonthlyReportModal';
 import { getInsuranceExpectedAmount, getInsurancePaymentBalance, isInsuranceDeudor } from '../utils/paymentUtils';
 
 const formatMonthsDays = (days: number): string => {
-  if (!days || days <= 0) return '0 d?as';
+  if (!days || days <= 0) return '0 días';
   if (days < 40) {
-    return `${days} D?as`;
+    return `${days} Días`;
   }
   const calculatedMonths = Math.floor(days / 30.4);
   const additionalDays = Math.max(0, days - Math.round(calculatedMonths * 30.4));
@@ -59,14 +59,14 @@ const formatMonthsDays = (days: number): string => {
   }
 };
 
-/** Same Ventas Totales rule as Gesti?n de P?lizas (summaryStats). */
+/** Same Ventas Totales rule as Gestión de Pólizas (summaryStats). */
 const getPolicySalesAmount = (ins: InsuranceRequest): number => {
   const isCan = ins.actionType?.toUpperCase() === 'CAN';
   const p = ins.totalFinal || ins.totalPrice || 0;
   return isCan ? -Math.abs(p) : (p < 0 ? p : Math.abs(p));
 };
 
-/** Same Comisi?n rule as Gesti?n de P?lizas (summaryStats). */
+/** Same Comisión rule as Gestión de Pólizas (summaryStats). */
 const getPolicyCommissionAmount = (ins: InsuranceRequest): number => {
   const isCan = ins.actionType?.toUpperCase() === 'CAN';
   const com = ins.agentCommission || 0;
@@ -481,7 +481,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
   const totalPages = Math.ceil(filteredInsurances.length / pageSize);
 
   const exportToCSV = () => {
-    const headers = ['ID', 'Cliente', 'Tipo Cliente', 'Plan', 'P?liza', 'Fecha', 'Total', 'Costo', 'Margen', 'Comisi?n', 'Estado Pago'];
+    const headers = ['ID', 'Cliente', 'Tipo Cliente', 'Plan', 'Póliza', 'Fecha', 'Total', 'Costo', 'Margen', 'Comisión', 'Estado Pago'];
     const rows = filteredInsurances.map(ins => [
       ins.id,
       `${ins.firstName} ${ins.lastName}`,
@@ -519,18 +519,18 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
 
     const headers = [
       'Fecha de solicitud',
-      'Tipo Acci?n',
+      'Tipo Acción',
       'Nombre',
       'Apellido',
       'Fecha Nac.',
-      'C?d Origen',
+      'Cód Origen',
       'Fecha Salida',
-      'C?d Dest.',
+      'Cód Dest.',
       'Fecha Regreso',
-      'Meses/D?as',
+      'Meses/Días',
       'Precio USD',
       'Descuento USD',
-      'Comisi?n USD',
+      'Comisión USD',
       'Precio Total USD'
     ];
 
@@ -564,28 +564,31 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
   };
 
   const generateCSVForToCollect = () => {
-    const reportSource = contextInsurances.length > 0 ? contextInsurances : insurances;
-    const rawFiltered = reportSource.filter(ins => {
-      const matchesClient = reportClientId === 'All' || ins.clientId === reportClientId;
-      return matchesClient;
-    });
-    const sorted = sortInsurances(rawFiltered, reportSortBy);
-    const toCollect = sorted.filter(isPolicyDeudor);
+    const reportData = getFilteredReportData() as {
+      filtered: InsuranceRequest[];
+      totalSales: number;
+      totalPaid: number;
+      totalPending: number;
+      totalDiscounts?: number;
+      totalCommissions?: number;
+      count: number;
+    };
+    const toCollect = reportData.filtered;
 
     const headers = [
-      'Tipo Acci?n',
+      'Tipo Acción',
       'Nombre',
       'Apellido',
       'Fecha Nac.',
-      'C?d Origen',
+      'Cód Origen',
       'Fecha Salida',
-      'C?d Dest.',
+      'Cód Dest.',
       'Fecha Regreso',
-      'Meses/D?as',
+      'Meses/Días',
       'Precio USD',
       'Descuento USD',
       'Precio Total USD',
-      'Comisi?n USD'
+      'Comisión USD'
     ];
 
     const rows = toCollect.map(ins => [
@@ -609,7 +612,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
     const link = document.createElement("a");
     const url = URL.createObjectURL(blob);
     link.setAttribute("href", url);
-    link.setAttribute("download", `reporte_seguros_por_cobrar_${reportDates.start}_a_${reportDates.end}.csv`);
+    link.setAttribute("download", `reporte_seguros_por_cobrar_${reportDates.start || 'inicio'}_a_${reportDates.end || 'hoy'}.csv`);
     link.style.visibility = 'hidden';
     document.body.appendChild(link);
     link.click();
@@ -635,20 +638,21 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
       ? liveCaremedInvoices
       : (liveReportCaremed.length > 0 ? liveReportCaremed : caremedInvoices);
     const rawFiltered = reportSource.filter(ins => {
-      const getSafeDateStr = (val: any) => {
-        if (!val) return '';
-        if (typeof val.toDate === 'function') {
-          return val.toDate().toISOString().split('T')[0];
+      const insDate = getRequestDateString(ins) || getNormalizedYYYYMMDD(ins.requestDate) || getNormalizedYYYYMMDD(ins.createdAt) || getNormalizedYYYYMMDD(ins.startDate);
+      const matchesDate = (() => {
+        if (!reportDates.start && !reportDates.end) return true;
+        if (!insDate) return false;
+        if (reportDates.start && reportDates.end) {
+          return insDate >= reportDates.start && insDate <= reportDates.end;
         }
-        try {
-          const d = new Date(val);
-          return isNaN(d.getTime()) ? '' : d.toISOString().split('T')[0];
-        } catch (_) {
-          return '';
+        if (reportDates.start) {
+          return insDate >= reportDates.start;
         }
-      };
-      const insDate = getNormalizedYYYYMMDD(ins.requestDate) || getNormalizedYYYYMMDD(ins.createdAt);
-      const matchesDate = reportType === 'to_collect' ? true : (insDate >= reportDates.start && insDate <= reportDates.end);
+        if (reportDates.end) {
+          return insDate <= reportDates.end;
+        }
+        return true;
+      })();
       const matchesClient = reportClientId === 'All' || ins.clientId === reportClientId;
       return matchesDate && matchesClient;
     });
@@ -697,7 +701,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
         groupedData.title = 'Por Tipo de Seguro';
         const groups: Record<string, InsuranceRequest[]> = {};
         filtered.forEach(ins => {
-          const key = ins.policyName || ins.policyId || 'Sin P?liza';
+          const key = ins.policyName || ins.policyId || 'Sin Póliza';
           if (!groups[key]) groups[key] = [];
           groups[key].push(ins);
         });
@@ -791,7 +795,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
         groupedData.title = 'Por Tipo de Seguro';
         const groups: Record<string, InsuranceRequest[]> = {};
         toCollect.forEach(ins => {
-          const key = ins.policyName || ins.policyId || 'Sin P?liza';
+          const key = ins.policyName || ins.policyId || 'Sin Póliza';
           if (!groups[key]) groups[key] = [];
           groups[key].push(ins);
         });
@@ -1062,8 +1066,21 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
     };
 
     const rawFiltered = liveIns.filter(ins => {
-      const insDate = getNormalizedYYYYMMDD(ins.requestDate) || getNormalizedYYYYMMDD(ins.createdAt);
-      const matchesDate = insDate >= reportDates.start && insDate <= reportDates.end;
+      const insDate = getRequestDateString(ins) || getNormalizedYYYYMMDD(ins.requestDate) || getNormalizedYYYYMMDD(ins.createdAt) || getNormalizedYYYYMMDD(ins.startDate);
+      const matchesDate = (() => {
+        if (!reportDates.start && !reportDates.end) return true;
+        if (!insDate) return false;
+        if (reportDates.start && reportDates.end) {
+          return insDate >= reportDates.start && insDate <= reportDates.end;
+        }
+        if (reportDates.start) {
+          return insDate >= reportDates.start;
+        }
+        if (reportDates.end) {
+          return insDate <= reportDates.end;
+        }
+        return true;
+      })();
       const matchesClient = reportClientId === 'All' || ins.clientId === reportClientId;
       return matchesDate && matchesClient;
     });
@@ -1094,7 +1111,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
 
       if (reportFormat === 'consolidated') {
         title = `Reporte Consolidado de Altas de Seguros (${groupedData.title})`;
-        headers = ['Grupo / Cliente', 'Cantidad de P?lizas', 'Venta Total'];
+        headers = ['Grupo / Cliente', 'Cantidad de Pólizas', 'Venta Total'];
         const bodyData = groupedData.items.map(item => [
           item.groupName,
           item.count.toString(),
@@ -1147,22 +1164,22 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
           doc.setFontSize(11);
           doc.setFont("helvetica", "bold");
           doc.setTextColor(17, 24, 39);
-          doc.text(`${group.groupName} (${group.count} p?lizas, Total: $${group.total.toFixed(2)})`, 14, currentY + 6);
+          doc.text(`${group.groupName} (${group.count} pólizas, Total: $${group.total.toFixed(2)})`, 14, currentY + 6);
           
           const groupHeaders = [
             'Fecha Sol.',
-            'Tipo Acci?n',
+            'Tipo Acción',
             'Nombre',
             'Apellido',
             'Fecha Nac.',
-            'C?d Origen',
+            'Cód Origen',
             'Fecha Salida',
-            'C?d Dest.',
+            'Cód Dest.',
             'Fecha Regreso',
-            'Meses/D?as',
+            'Meses/Días',
             'Precio USD',
             'Descuento USD',
-            'Comisi?n USD',
+            'Comisión USD',
             'Precio Total USD'
           ];
           const groupBody = group.insurances.map(ins => [
@@ -1203,7 +1220,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
         doc.setFontSize(12);
         doc.setFont("helvetica", "bold");
         doc.setTextColor(17, 24, 39);
-        doc.text(`VENTA TOTAL GENERAL: $${totalSales.toFixed(2)} (${count} P?lizas)`, 14, currentY + 8);
+        doc.text(`VENTA TOTAL GENERAL: $${totalSales.toFixed(2)} (${count} Pólizas)`, 14, currentY + 8);
       }
     } else if (reportType === 'to_collect') {
       const reportData = getFilteredReportData(liveIns, livePays, liveInv) as {
@@ -1317,7 +1334,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
 
       if (reportFormat === 'consolidated') {
         title = `Reporte Consolidado de Seguros por Cobrar (${groupedData.title})`;
-        headers = ['Grupo / Cliente', 'Cantidad de P?lizas', 'Saldo Deudor Total'];
+        headers = ['Grupo / Cliente', 'Cantidad de Pólizas', 'Saldo Deudor Total'];
         const bodyData = groupedData.items.map(item => [
           item.groupName,
           item.count.toString(),
@@ -1384,22 +1401,22 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
           doc.setFontSize(11);
           doc.setFont("helvetica", "bold");
           doc.setTextColor(17, 24, 39);
-          doc.text(`${group.groupName} (${group.count} p?lizas, Saldo Deudor: $${group.totalPending.toFixed(2)})`, 14, currentY + 6);
+          doc.text(`${group.groupName} (${group.count} pólizas, Saldo Deudor: $${group.totalPending.toFixed(2)})`, 14, currentY + 6);
           
           const groupHeaders = [
-            'Tipo Acci?n',
+            'Tipo Acción',
             'Nombre',
             'Apellido',
             'Fecha Nac.',
-            'C?d Origen',
+            'Cód Origen',
             'Fecha Salida',
-            'C?d Dest.',
+            'Cód Dest.',
             'Fecha Regreso',
-            'Meses/D?as',
+            'Meses/Días',
             'Precio USD',
             'Descuento USD',
             'Precio Total USD',
-            'Comisi?n USD'
+            'Comisión USD'
           ];
           const groupBody = group.insurances.map(ins => [
             ins.actionType || '',
@@ -1438,7 +1455,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
         doc.setFontSize(10);
         doc.setFont("helvetica", "bold");
         doc.setTextColor(17, 24, 39);
-        doc.text(`SALDO DEUDOR GENERAL: $${totalPending.toFixed(2)} / VENTA TOTAL GENERAL: $${totalSales.toFixed(2)} (${count} P?lizas)`, 14, currentY + 6);
+        doc.text(`SALDO DEUDOR GENERAL: $${totalPending.toFixed(2)} / VENTA TOTAL GENERAL: $${totalSales.toFixed(2)} (${count} Pólizas)`, 14, currentY + 6);
         
         drawSummaryBlock(doc, currentY + 11);
       }
@@ -1476,14 +1493,14 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
 
         autoTable(doc, {
           startY: 45,
-          head: [['Invoice', 'N?mero de Seguros', 'Monto por Pagar']],
+          head: [['Invoice', 'Número de Seguros', 'Monto por Pagar']],
           body: bodyData,
           theme: 'striped',
           headStyles: { fillColor: [5, 150, 105] }, // emerald-600
           margin: { top: 45 },
         });
       } else {
-        headers = ['Invoice', 'Asegurado', 'P?liza', 'Fecha Invoice', 'Monto por Pagar'];
+        headers = ['Invoice', 'Asegurado', 'Póliza', 'Fecha Invoice', 'Monto por Pagar'];
         data = invoiceGroups.flatMap(g =>
           g.insurances.map((ins, idx) => [
             g.invoice,
@@ -1535,7 +1552,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
 
       const policyCounts: { [key: string]: number } = {};
       pending.forEach(ins => {
-        const pName = ins.policyName || ins.policyId || 'Sin P?liza';
+        const pName = ins.policyName || ins.policyId || 'Sin Póliza';
         policyCounts[pName] = (policyCounts[pName] || 0) + 1;
       });
 
@@ -1570,7 +1587,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
       // Section 2: breakdown by policy type (number of insurances)
       autoTable(landscapeDoc, {
         startY: (landscapeDoc as any).lastAutoTable.finalY + 12,
-        head: [['Tipo de P?liza', 'N?mero de Seguros']],
+        head: [['Tipo de Póliza', 'Número de Seguros']],
         body: Object.entries(policyCounts).map(([p, c]) => [p, c.toString()]),
         theme: 'grid',
         headStyles: { fillColor: [100, 100, 100] },
@@ -1586,7 +1603,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
       drawTopRightLogo(landscapeDoc, true);
       landscapeDoc.setFontSize(9);
       landscapeDoc.setTextColor(100);
-      landscapeDoc.text(`P?gina 2 - Listado de Registros`, 14, 26);
+      landscapeDoc.text(`Página 2 - Listado de Registros`, 14, 26);
 
       const detailedHeaders = [
         'Fecha Sol.',
@@ -1594,9 +1611,9 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
         'Nombre',
         'Apellido',
         'F. Nac.',
-        'C?d Origen',
+        'Cód Origen',
         'F. Salida',
-        'C?d Dest.',
+        'Cód Dest.',
         'F. Regreso',
         'Meses/Dias',
         'Prec. USD',
@@ -1937,7 +1954,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
       )}
       <header className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Reportes y Estad?sticas</h1>
+          <h1 className="text-2xl font-bold text-gray-900">Reportes y Estadísticas</h1>
           <p className="text-gray-500">Visualiza el rendimiento y genera informes detallados</p>
         </div>
         <div className="flex flex-wrap items-center gap-2.5">
@@ -1957,7 +1974,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
               setShowMonthlyClosingModal(true);
             }}
             className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-indigo-600 to-indigo-700 hover:from-indigo-700 hover:to-indigo-800 text-white font-bold text-sm rounded-xl transition-all shadow-md shadow-indigo-200 cursor-pointer"
-            title="Generar auditor?a y PDF de Cierre de Mes"
+            title="Generar auditoría y PDF de Cierre de Mes"
           >
             <CalendarCheck className="w-4 h-4" />
             Cierre de Mes
@@ -1969,7 +1986,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
               setShowMonthlyReportModal(true);
             }}
             className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-blue-600 to-slate-800 hover:from-blue-700 hover:to-slate-900 text-white font-bold text-sm rounded-xl transition-all shadow-md shadow-blue-200 cursor-pointer"
-            title="Generar reporte mensual consolidado (n?meros finales)"
+            title="Generar reporte mensual consolidado (números finales)"
           >
             <BarChart3 className="w-4 h-4" />
             Reporte Mensual
@@ -2038,13 +2055,13 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
           </div>
 
           <div>
-            <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1 ml-1">Tipo de P?liza</label>
+            <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1 ml-1">Tipo de Póliza</label>
             <select 
               value={policyNameFilter}
               onChange={(e) => setPolicyNameFilter(e.target.value)}
               className="w-full px-4 py-2.5 bg-gray-50 border border-gray-100 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none text-sm appearance-none"
             >
-              <option value="All">Todas las p?lizas</option>
+              <option value="All">Todas las pólizas</option>
               {uniquePolicies.map(p => <option key={p} value={p}>{p}</option>)}
             </select>
           </div>
@@ -2098,7 +2115,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
           </div>
 
           <div>
-            <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1 ml-1">Estado Comisi?n</label>
+            <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1 ml-1">Estado Comisión</label>
             <select 
               value={commissionStatusFilter}
               onChange={(e) => setCommissionStatusFilter(e.target.value)}
@@ -2163,7 +2180,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
             <div className="p-2 bg-indigo-50 rounded-xl">
               <CheckCircle2 className="w-5 h-5 text-indigo-600" />
             </div>
-            <h3 className="font-bold text-gray-900">Ventas del D?a</h3>
+            <h3 className="font-bold text-gray-900">Ventas del Día</h3>
           </div>
           <p className="text-xl font-black text-gray-900">${stats.todaySales.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD</p>
           <p className="text-[10px] text-gray-400 font-bold uppercase tracking-tighter mt-1">
@@ -2245,7 +2262,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                     />
                   </th>
                   <th className="px-6 py-4">Cliente</th>
-                  <th className="px-6 py-4">Plan / P?liza</th>
+                  <th className="px-6 py-4">Plan / Póliza</th>
                   <th className="px-6 py-4">Fecha</th>
                   <th className="px-6 py-4 text-right">Costo</th>
                   <th className="px-6 py-4 text-right">Total</th>
@@ -2297,7 +2314,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                   Mostrando <span className="font-bold text-gray-900">{filteredInsurances.length === 0 ? 0 : ((currentPage - 1) * pageSize) + 1}</span> a <span className="font-bold text-gray-900">{Math.min(currentPage * pageSize, filteredInsurances.length)}</span> de <span className="font-bold text-gray-900">{filteredInsurances.length}</span> registros
                 </p>
                 <div className="flex items-center gap-2 border-l border-gray-200 pl-4">
-                  <span className="text-xs text-gray-500">Filas por p?gina:</span>
+                  <span className="text-xs text-gray-500">Filas por página:</span>
                   <select
                     value={pageSize}
                     onChange={(e) => {
@@ -2357,7 +2374,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
             <div className="p-2 bg-indigo-50 rounded-xl">
               <BarChart3 className="w-5 h-5 text-indigo-600" />
             </div>
-            <h3 className="font-bold text-gray-900">Reportes R?pidos</h3>
+            <h3 className="font-bold text-gray-900">Reportes Rápidos</h3>
           </div>
           <div className="space-y-3">
             <button 
@@ -2487,7 +2504,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
           <div className="mt-8 p-4 bg-blue-600 rounded-2xl text-white">
             <h4 className="font-bold mb-1">Tip de Reportes</h4>
             <p className="text-[10px] opacity-80 leading-relaxed">
-              Utiliza los filtros superiores para refinar los resultados. Puedes exportar cualquier vista filtrada a formato CSV para an?lisis externo.
+              Utiliza los filtros superiores para refinar los resultados. Puedes exportar cualquier vista filtrada a formato CSV para análisis externo.
             </p>
           </div>
         </div>
@@ -2546,7 +2563,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                     <option value="Tarjeta">Tarjeta</option>
                     <option value="Efectivo">Efectivo</option>
                     <option value="Cheque">Cheque</option>
-                    <option value="Descuento comision">Descuento comisi?n</option>
+                    <option value="Descuento comision">Descuento comisión</option>
                   </select>
                 </div>
 
@@ -2554,7 +2571,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                   <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1.5 ml-1">Comprobante / Referencia</label>
                   <input 
                     type="text"
-                    placeholder="N?mero de rastreo o referencia"
+                    placeholder="Número de rastreo o referencia"
                     value={paymentForm.receipt}
                     onChange={(e) => setPaymentForm(prev => ({ ...prev, receipt: e.target.value }))}
                     className="w-full px-4 py-3.5 bg-gray-50 border border-gray-100 rounded-2xl focus:ring-2 focus:ring-emerald-500 outline-none text-sm font-medium"
@@ -2616,7 +2633,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                        reportType === 'to_pay' ? 'Reporte Seguros por Pagar' : 
                        reportType === 'income_statement' ? 'Estado de Resultados' : 'Reporte Comisiones Pendientes'}
                     </h2>
-                    <p className="text-sm text-gray-500 font-medium">Visualiza los datos del reporte en tiempo real y exp?rtalos</p>
+                    <p className="text-sm text-gray-500 font-medium">Visualiza los datos del reporte en tiempo real y expórtalos</p>
                   </div>
                 </div>
                 <button 
@@ -2630,7 +2647,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
               <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
                 {/* Left Column: Controls */}
                 <div className="space-y-5 lg:border-r lg:border-gray-100 lg:pr-8">
-                  <h3 className="text-xs font-black text-gray-400 tracking-widest uppercase mb-1">Configuraci?n</h3>
+                  <h3 className="text-xs font-black text-gray-400 tracking-widest uppercase mb-1">Configuración</h3>
                   
                   <div>
                     <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1.5 ml-1">Fecha Inicio</label>
@@ -2656,6 +2673,38 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                         className="w-full pl-11 pr-4 py-3 bg-gray-50 border border-gray-100 rounded-2xl focus:ring-2 focus:ring-blue-500 outline-none text-sm font-medium"
                       />
                     </div>
+                  </div>
+
+                  {/* Quick Date Presets */}
+                  <div className="flex flex-wrap gap-1.5 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => setReportDates({ start: format(new Date(), 'yyyy-MM-01'), end: format(new Date(), 'yyyy-MM-dd') })}
+                      className="px-2.5 py-1 text-[11px] font-bold rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700 transition-colors cursor-pointer"
+                    >
+                      Este Mes
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setReportDates({ start: format(subDays(new Date(), 90), 'yyyy-MM-dd'), end: format(new Date(), 'yyyy-MM-dd') })}
+                      className="px-2.5 py-1 text-[11px] font-bold rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700 transition-colors cursor-pointer"
+                    >
+                      Últimos 90 Días
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setReportDates({ start: format(new Date(), 'yyyy-01-01'), end: format(new Date(), 'yyyy-MM-dd') })}
+                      className="px-2.5 py-1 text-[11px] font-bold rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700 transition-colors cursor-pointer"
+                    >
+                      Año Actual
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setReportDates({ start: '', end: '' })}
+                      className="px-2.5 py-1 text-[11px] font-bold rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-700 transition-colors cursor-pointer"
+                    >
+                      Todo
+                    </button>
                   </div>
 
                   {(reportType === 'to_collect' || reportType === 'commissions') && (
@@ -2691,7 +2740,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                       >
                         <option value="all">Tipo de Cliente (Agente, Corporativo o Individual)</option>
                         <option value="Agent">Por Agente</option>
-                        <option value="policy">Por Tipo de Seguro (P?liza)</option>
+                        <option value="policy">Por Tipo de Seguro (Póliza)</option>
                         <option value="Corporate">Por Corporativos</option>
                         <option value="Individual">Por Individuales</option>
                       </select>
@@ -2706,7 +2755,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                         onChange={(e) => setReportFormat(e.target.value as 'detailed' | 'consolidated')}
                         className="w-full px-4 py-3.5 bg-gray-50 border border-gray-100 rounded-2xl focus:ring-2 focus:ring-blue-500 outline-none text-sm font-medium appearance-none"
                       >
-                        <option value="detailed">Detallado (Est?ndar)</option>
+                        <option value="detailed">Detallado (Estándar)</option>
                         <option value="consolidated">Consolidado (Resumen)</option>
                       </select>
                     </div>
@@ -2763,7 +2812,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                       onClick={() => setShowReportModal(false)}
                       className="w-full px-6 py-3 bg-white text-gray-500 font-bold rounded-xl hover:bg-gray-100 transition-all border border-gray-200 text-sm"
                     >
-                      Cerrar di?logo
+                      Cerrar diálogo
                     </button>
                   </div>
                 </div>
@@ -2817,7 +2866,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                                     <thead>
                                       <tr className="border-b border-gray-100 text-[10px] font-black text-gray-400 uppercase tracking-wider pb-2">
                                         <th className="pb-2">Grupo / Cliente</th>
-                                        <th className="pb-2 text-center">P?lizas</th>
+                                        <th className="pb-2 text-center">Pólizas</th>
                                         <th className="pb-2 text-right">Venta Total</th>
                                       </tr>
                                     </thead>
@@ -2851,25 +2900,25 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                                       <div key={item.groupKey || idx} className="space-y-2">
                                         <div className="flex justify-between items-center bg-purple-50/50 px-4 py-2 rounded-xl border border-purple-100/50">
                                           <span className="text-xs font-bold text-purple-900">{item.groupName}</span>
-                                          <span className="text-[10px] font-black text-purple-700 bg-white px-2 py-0.5 rounded-md border border-purple-100">{item.count} p?lizas ? ${item.total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                                          <span className="text-[10px] font-black text-purple-700 bg-white px-2 py-0.5 rounded-md border border-purple-100">{item.count} pólizas • ${item.total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                                         </div>
                                         <div className="overflow-x-auto bg-white rounded-2xl border border-gray-100 p-3 shadow-sm">
                                           <table className="w-full text-left border-collapse">
                                             <thead>
                                               <tr className="border-b border-gray-100 text-[9px] font-black text-gray-400 uppercase tracking-wider pb-1">
                                                 <th className="pb-1.5 whitespace-nowrap">Fecha Sol.</th>
-                                                <th className="pb-1.5 whitespace-nowrap">Tipo Acci?n</th>
+                                                <th className="pb-1.5 whitespace-nowrap">Tipo Acción</th>
                                                 <th className="pb-1.5 whitespace-nowrap">Nombre</th>
                                                 <th className="pb-1.5 whitespace-nowrap">Apellido</th>
                                                 <th className="pb-1.5 whitespace-nowrap">Fecha Nac.</th>
-                                                <th className="pb-1.5 whitespace-nowrap">C?d Origen</th>
+                                                <th className="pb-1.5 whitespace-nowrap">Cód Origen</th>
                                                 <th className="pb-1.5 whitespace-nowrap">Fecha Salida</th>
-                                                <th className="pb-1.5 whitespace-nowrap">C?d Dest.</th>
+                                                <th className="pb-1.5 whitespace-nowrap">Cód Dest.</th>
                                                 <th className="pb-1.5 whitespace-nowrap">Fecha Regreso</th>
-                                                <th className="pb-1.5 whitespace-nowrap">Meses/D?as</th>
+                                                <th className="pb-1.5 whitespace-nowrap">Meses/Días</th>
                                                 <th className="pb-1.5 whitespace-nowrap text-right">Precio USD</th>
                                                 <th className="pb-1.5 whitespace-nowrap text-right">Descuento USD</th>
-                                                <th className="pb-1.5 whitespace-nowrap text-right">Comisi?n USD</th>
+                                                <th className="pb-1.5 whitespace-nowrap text-right">Comisión USD</th>
                                                 <th className="pb-1.5 whitespace-nowrap text-right">Precio Total USD</th>
                                               </tr>
                                             </thead>
@@ -2978,7 +3027,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                                     <thead>
                                       <tr className="border-b border-gray-100 text-[10px] font-black text-gray-400 uppercase tracking-wider pb-2">
                                         <th className="pb-2">Grupo / Cliente</th>
-                                        <th className="pb-2 text-center">P?lizas</th>
+                                        <th className="pb-2 text-center">Pólizas</th>
                                         <th className="pb-2 text-right">Venta Total</th>
                                         <th className="pb-2 text-right">Cobrado</th>
                                         <th className="pb-2 text-right">Saldo Deudor</th>
@@ -3017,26 +3066,26 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                                         <div className="flex justify-between items-center bg-rose-50/50 px-4 py-2 rounded-xl border border-rose-100/50">
                                           <span className="text-xs font-bold text-rose-900">{item.groupName}</span>
                                           <span className="text-[10px] font-black text-rose-700 bg-white px-2 py-0.5 rounded-md border border-rose-100">
-                                            {item.count} p?lizas ? Saldo: ${item.totalPending.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                            {item.count} pólizas • Saldo: ${item.totalPending.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                                           </span>
                                         </div>
                                         <div className="overflow-x-auto bg-white rounded-2xl border border-gray-100 p-3 shadow-sm">
                                           <table className="w-full text-left border-collapse">
                                             <thead>
                                               <tr className="border-b border-gray-100 text-[9px] font-black text-gray-400 uppercase tracking-wider pb-1">
-                                                <th className="pb-1.5 whitespace-nowrap">Tipo Acci?n</th>
+                                                <th className="pb-1.5 whitespace-nowrap">Tipo Acción</th>
                                                 <th className="pb-1.5 whitespace-nowrap">Nombre</th>
                                                 <th className="pb-1.5 whitespace-nowrap">Apellido</th>
                                                 <th className="pb-1.5 whitespace-nowrap">Fecha Nac.</th>
-                                                <th className="pb-1.5 whitespace-nowrap">C?d Origen</th>
+                                                <th className="pb-1.5 whitespace-nowrap">Cód Origen</th>
                                                 <th className="pb-1.5 whitespace-nowrap">Fecha Salida</th>
-                                                <th className="pb-1.5 whitespace-nowrap">C?d Dest.</th>
+                                                <th className="pb-1.5 whitespace-nowrap">Cód Dest.</th>
                                                 <th className="pb-1.5 whitespace-nowrap">Fecha Regreso</th>
-                                                <th className="pb-1.5 whitespace-nowrap">Meses/D?as</th>
+                                                <th className="pb-1.5 whitespace-nowrap">Meses/Días</th>
                                                 <th className="pb-1.5 whitespace-nowrap text-right">Precio USD</th>
                                                 <th className="pb-1.5 whitespace-nowrap text-right">Descuento USD</th>
                                                 <th className="pb-1.5 whitespace-nowrap text-right">Precio Total USD</th>
-                                                <th className="pb-1.5 whitespace-nowrap text-right">Comisi?n USD</th>
+                                                <th className="pb-1.5 whitespace-nowrap text-right">Comisión USD</th>
                                               </tr>
                                             </thead>
                                             <tbody className="divide-y divide-gray-50 text-[11px]">
@@ -3102,7 +3151,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                                   <thead>
                                     <tr className="border-b border-gray-200 text-[10px] font-black text-gray-400 uppercase tracking-widest">
                                       <th className="pb-2">Invoice</th>
-                                      <th className="pb-2 text-center">N?mero de Seguros</th>
+                                      <th className="pb-2 text-center">Número de Seguros</th>
                                       <th className="pb-2 text-right">Monto por Pagar</th>
                                     </tr>
                                   </thead>
@@ -3146,7 +3195,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                                   <tr className="border-b border-gray-200 text-[10px] font-black text-gray-400 uppercase tracking-widest">
                                     <th className="pb-2">Invoice</th>
                                     <th className="pb-2">Asegurado</th>
-                                    <th className="pb-2">P?liza</th>
+                                    <th className="pb-2">Póliza</th>
                                     <th className="pb-2">Fecha Invoice</th>
                                     <th className="pb-2 text-right">Monto por Pagar</th>
                                   </tr>
@@ -3188,7 +3237,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                         // Calculate number of insurances per policy type
                         const policyCounts: { [key: string]: number } = {};
                         filtered.forEach(ins => {
-                          const pName = ins.policyName || ins.policyId || 'Sin P?liza';
+                          const pName = ins.policyName || ins.policyId || 'Sin Póliza';
                           policyCounts[pName] = (policyCounts[pName] || 0) + 1;
                         });
 
@@ -3219,7 +3268,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
 
                             {/* Insurances by Policy Type */}
                             <div className="space-y-3">
-                              <h4 className="text-xs font-black text-gray-500 uppercase tracking-widest">Seguros por Tipo de P?liza</h4>
+                              <h4 className="text-xs font-black text-gray-500 uppercase tracking-widest">Seguros por Tipo de Póliza</h4>
                               <div className="bg-white p-4 rounded-2xl border border-gray-100 shadow-sm overflow-hidden">
                                 <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
                                   {Object.entries(policyCounts).map(([policyName, countVal], idx) => (
@@ -3229,7 +3278,7 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                                     </div>
                                   ))}
                                   {Object.keys(policyCounts).length === 0 && (
-                                    <p className="col-span-full text-center text-xs text-gray-400 italic py-2">No hay datos por p?liza.</p>
+                                    <p className="col-span-full text-center text-xs text-gray-400 italic py-2">No hay datos por póliza.</p>
                                   )}
                                 </div>
                               </div>
@@ -3247,19 +3296,19 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                                       <th className="p-3 whitespace-nowrap">Nombre</th>
                                       <th className="p-3 whitespace-nowrap">Apellido</th>
                                       <th className="p-3 whitespace-nowrap">Fecha Nac.</th>
-                                      <th className="p-3 whitespace-nowrap">C?d Origen</th>
+                                      <th className="p-3 whitespace-nowrap">Cód Origen</th>
                                       <th className="p-3 whitespace-nowrap">Fecha Salida</th>
-                                      <th className="p-3 whitespace-nowrap">C?d Destino</th>
+                                      <th className="p-3 whitespace-nowrap">Cód Destino</th>
                                       <th className="p-3 whitespace-nowrap">Fecha Regreso</th>
                                       <th className="p-3 whitespace-nowrap">Meses/Dias</th>
                                       <th className="p-3 whitespace-nowrap text-right">Precio USD</th>
                                       <th className="p-3 whitespace-nowrap text-right">Descuento USD</th>
-                                      <th className="p-3 whitespace-nowrap text-right">Comisi?n USD</th>
+                                      <th className="p-3 whitespace-nowrap text-right">Comisión USD</th>
                                       <th className="p-3 whitespace-nowrap text-right">Precio Total USD</th>
                                       <th className="p-3 whitespace-nowrap text-right">T.C.</th>
                                       <th className="p-3 whitespace-nowrap text-right">Precio MXP</th>
                                       <th className="p-3 whitespace-nowrap text-right">Descuento MXP</th>
-                                      <th className="p-3 whitespace-nowrap text-right">Comisi?n MXP</th>
+                                      <th className="p-3 whitespace-nowrap text-right">Comisión MXP</th>
                                       <th className="p-3 whitespace-nowrap text-right">Precio Total MXP</th>
                                     </tr>
                                   </thead>
