@@ -379,11 +379,15 @@ export async function handleWooCommerceWebhook(order: any) {
     if (!insuranceSnap.empty) {
       // Record already exists - perform update scenario (avoid creating duplicate profiles)
       const existingDoc = insuranceSnap.docs[0];
-      const newStatus = order.status === 'completed' ? 'paid' : 'pending';
+      const isOrderPaid = order.status === 'completed' || order.status === 'processing';
+      const newStatus = isOrderPaid ? 'paid' : (existingDoc.data().status || 'pending');
+      const resolvedPrice = itemTotal || existingDoc.data().totalFinal || existingDoc.data().totalPrice;
       
       await updateDoc(doc(db, 'insurances', existingDoc.id), {
         status: newStatus,
-        totalPrice: itemTotal || existingDoc.data().totalPrice,
+        totalPrice: resolvedPrice,
+        totalFinal: resolvedPrice,
+        totalPaid: isOrderPaid ? resolvedPrice : (existingDoc.data().totalPaid || 0),
         days: calculatedDays,
         startDate: startDateVal,
         endDate: endDateVal,
@@ -447,8 +451,10 @@ export async function handleWooCommerceWebhook(order: any) {
         endDate: endDateVal,
         days: calculatedDays,
         totalPrice: itemTotal || (resolvedPolicy.pricePerDay * calculatedDays),
+        totalFinal: itemTotal || (resolvedPolicy.pricePerDay * calculatedDays),
         totalCost: calculatedTotalCost,
-        status: order.status === 'completed' ? 'paid' : 'pending',
+        totalPaid: (order.status === 'completed' || order.status === 'processing') ? (itemTotal || (resolvedPolicy.pricePerDay * calculatedDays)) : 0,
+        status: (order.status === 'completed' || order.status === 'processing') ? 'paid' : 'pending',
         imported: true,
         externalId: externalIdMark,
         createdAt: serverTimestamp()

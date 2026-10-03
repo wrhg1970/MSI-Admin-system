@@ -34,7 +34,7 @@ import { drawVectorLogo } from '../lib/pdfGenerator';
 import { useCompany } from '../App';
 import MonthlyClosingModal from './MonthlyClosingModal';
 import MonthlyReportModal from './MonthlyReportModal';
-import { getInsuranceExpectedAmount, getInsurancePaymentBalance, isInsuranceDeudor } from '../utils/paymentUtils';
+import { getInsuranceExpectedAmount, getInsurancePaymentBalance, isInsuranceDeudor, safeNum } from '../utils/paymentUtils';
 
 const formatMonthsDays = (days: number): string => {
   if (!days || days <= 0) return '0 días';
@@ -745,10 +745,41 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
         groupedData
       };
     } else if (reportType === 'to_collect') {
-      const toCollect = filtered.filter(isPolicyDeudor);
+      // Build client payments map from paymentsSource to account for all registered payments
+      const clientPaidMap = new Map<string, number>();
+      paymentsSource.forEach(p => {
+        if (p.type === 'client_payment' && p.insuranceId && (p.status === 'completed' || !p.status)) {
+          clientPaidMap.set(p.insuranceId, (clientPaidMap.get(p.insuranceId) || 0) + safeNum(p.amount));
+        }
+      });
+
+      const getEffectivePaid = (ins: InsuranceRequest) => {
+        const fromDoc = safeNum(ins.totalPaid);
+        const fromPayments = clientPaidMap.get(ins.id || '') || 0;
+        return Math.max(fromDoc, fromPayments);
+      };
+
+      const getEffectiveReceivableBalance = (ins: InsuranceRequest) => {
+        const expected = getPolicyExpectedAmount(ins);
+        const paid = getEffectivePaid(ins);
+        return Number((expected - paid).toFixed(2));
+      };
+
+      const isPolicyEffectivelyDeudor = (ins: InsuranceRequest): boolean => {
+        if (!ins) return false;
+        const action = String(ins.actionType || '').toUpperCase();
+        const raw = String(ins.status || '').toLowerCase().trim();
+        if (action === 'CAN' || raw === 'cancelled' || raw === 'cancelado') return false;
+        if (ins.closed) return false;
+        if (raw === 'paid' || raw === 'pagado') return false;
+        const bal = getEffectiveReceivableBalance(ins);
+        return bal > 5.00;
+      };
+
+      const toCollect = filtered.filter(isPolicyEffectivelyDeudor);
       const totalSales = toCollect.reduce((acc, curr) => acc + getPolicyExpectedAmount(curr), 0);
-      const totalPaid = toCollect.reduce((acc, curr) => acc + (curr.totalPaid || 0), 0);
-      const totalPending = toCollect.reduce((acc, curr) => acc + getPolicyReceivableBalance(curr), 0);
+      const totalPaid = toCollect.reduce((acc, curr) => acc + getEffectivePaid(curr), 0);
+      const totalPending = toCollect.reduce((acc, curr) => acc + getEffectiveReceivableBalance(curr), 0);
 
       const getClientName = (clientId?: string) => {
         if (!clientId) return 'Individual/Otros';
@@ -780,14 +811,14 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
         groupedData.items = types.map(t => {
           const list = toCollect.filter(ins => ins.clientType === t);
           const tTotal = list.reduce((sum, i) => sum + getPolicyExpectedAmount(i), 0);
-          const tPaid = list.reduce((sum, i) => sum + (i.totalPaid || 0), 0);
+          const tPaid = list.reduce((sum, i) => sum + getEffectivePaid(i), 0);
           return {
             groupKey: t,
             groupName: labelMap[t] || t,
             count: list.length,
             total: tTotal,
             totalPaid: tPaid,
-            totalPending: list.reduce((sum, i) => sum + getPolicyReceivableBalance(i), 0),
+            totalPending: list.reduce((sum, i) => sum + getEffectiveReceivableBalance(i), 0),
             insurances: list
           };
         });
@@ -802,14 +833,14 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
 
         groupedData.items = Object.entries(groups).map(([policyName, list]) => {
           const tTotal = list.reduce((sum, i) => sum + getPolicyExpectedAmount(i), 0);
-          const tPaid = list.reduce((sum, i) => sum + (i.totalPaid || 0), 0);
+          const tPaid = list.reduce((sum, i) => sum + getEffectivePaid(i), 0);
           return {
             groupKey: policyName,
             groupName: policyName,
             count: list.length,
             total: tTotal,
             totalPaid: tPaid,
-            totalPending: list.reduce((sum, i) => sum + getPolicyReceivableBalance(i), 0),
+            totalPending: list.reduce((sum, i) => sum + getEffectiveReceivableBalance(i), 0),
             insurances: list
           };
         }).sort((a, b) => b.totalPending - a.totalPending);
@@ -827,20 +858,20 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
         groupedData.items = Object.entries(groups).map(([clientId, list]) => {
           const name = clientId === 'Individual/Otros' ? 'Individual/Otros' : getClientName(clientId);
           const tTotal = list.reduce((sum, i) => sum + getPolicyExpectedAmount(i), 0);
-          const tPaid = list.reduce((sum, i) => sum + (i.totalPaid || 0), 0);
+          const tPaid = list.reduce((sum, i) => sum + getEffectivePaid(i), 0);
           return {
             groupKey: clientId,
             groupName: name,
             count: list.length,
             total: tTotal,
             totalPaid: tPaid,
-            totalPending: list.reduce((sum, i) => sum + getPolicyReceivableBalance(i), 0),
+            totalPending: list.reduce((sum, i) => sum + getEffectiveReceivableBalance(i), 0),
             insurances: list
           };
         }).sort((a, b) => b.totalPending - a.totalPending);
       }
 
-      groupedData.items = groupedData.items.filter(item => item.count > 0 && item.totalPending > 0.01);
+      groupedData.items = groupedData.items.filter(item => item.count > 0 && item.totalPending > 5.00);
 
       const totalDiscounts = toCollect.reduce((acc, curr) => acc + (curr.discount || 0), 0);
       const totalCommissions = toCollect.reduce((acc, curr) => acc + (curr.agentCommission || 0), 0);
@@ -1616,12 +1647,12 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
         'Cód Dest.',
         'F. Regreso',
         'Meses/Dias',
-        'Prec. USD',
+        'Prec. Seguro USD',
         'Desc. USD',
         'Com. USD',
         'Tot. USD',
         'T.C.',
-        'Prec. MXP',
+        'Prec. Seguro MXP',
         'Desc. MXP',
         'Com. MXP',
         'Tot. MXP'
@@ -3301,12 +3332,12 @@ export default function ReportsManager({ profile, rolePermissions }: { profile: 
                                       <th className="p-3 whitespace-nowrap">Cód Destino</th>
                                       <th className="p-3 whitespace-nowrap">Fecha Regreso</th>
                                       <th className="p-3 whitespace-nowrap">Meses/Dias</th>
-                                      <th className="p-3 whitespace-nowrap text-right">Precio USD</th>
+                                      <th className="p-3 whitespace-nowrap text-right">Precio Seguro USD</th>
                                       <th className="p-3 whitespace-nowrap text-right">Descuento USD</th>
                                       <th className="p-3 whitespace-nowrap text-right">Comisión USD</th>
                                       <th className="p-3 whitespace-nowrap text-right">Precio Total USD</th>
                                       <th className="p-3 whitespace-nowrap text-right">T.C.</th>
-                                      <th className="p-3 whitespace-nowrap text-right">Precio MXP</th>
+                                      <th className="p-3 whitespace-nowrap text-right">Precio Seguro MXP</th>
                                       <th className="p-3 whitespace-nowrap text-right">Descuento MXP</th>
                                       <th className="p-3 whitespace-nowrap text-right">Comisión MXP</th>
                                       <th className="p-3 whitespace-nowrap text-right">Precio Total MXP</th>

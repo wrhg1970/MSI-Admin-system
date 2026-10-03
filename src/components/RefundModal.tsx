@@ -143,7 +143,7 @@ export default function RefundModal({
         : (insurance.totalPrice || 0);
 
       let newStatus = insurance.status;
-      if (Math.abs(targetPrice - newTotalPaid) < 2) {
+      if (Math.abs(targetPrice - newTotalPaid) <= 5) {
         newStatus = 'paid';
       } else if (newTotalPaid > 0) {
         newStatus = 'partially_paid';

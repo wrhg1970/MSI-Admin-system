@@ -774,7 +774,7 @@ export default function InsuranceForm({ profile }: InsuranceFormProps) {
         policyName: selectedPolicy?.name || '',
         policyNumber: getPolicyNumber(selectedPolicy, age),
         commissionStatus: currentCommission > 0 ? 'confirmed' : 'pending',
-        status: currentTotal < 2 ? 'paid' : 'pending',
+        status: currentTotal <= 5 ? 'paid' : 'pending',
         requestDate: formData.requestDate || format(new Date(), 'yyyy-MM-dd'),
         exchangeRate: exchangeRate,
         solicitudFactura: formData.solicitudFactura || false,

@@ -10,6 +10,7 @@ import { es } from 'date-fns/locale';
 import TransactionModal from './TransactionModal';
 import EmailModal from './EmailModal';
 import RefundModal from './RefundModal';
+import StripePaymentModal from './StripePaymentModal';
 import { generatePDF, generateReceiptPDF } from '../lib/pdfGenerator';
 import { createZipFromPdfs, downloadBlob } from '../lib/zipUtils';
 import { useCompany } from '../App';
@@ -985,6 +986,7 @@ export default function InsuranceDetailModal({ isOpen, onClose, insurance, initi
   const [newComment, setNewComment] = useState('');
   const [isSubmittingComment, setIsSubmittingComment] = useState(false);
   const [showTransactionModal, setShowTransactionModal] = useState(false);
+  const [showStripeModal, setShowStripeModal] = useState(false);
   const [showRefundModal, setShowRefundModal] = useState(false);
   const [showDiscountCommissionModal, setShowDiscountCommissionModal] = useState(false);
   const [discountCommissionAmount, setDiscountCommissionAmount] = useState<string>('');
@@ -1790,7 +1792,7 @@ export default function InsuranceDetailModal({ isOpen, onClose, insurance, initi
         const finalPrice = getInsuranceFinalPrice(activeIns);
         const totalPaid = activeIns.totalPaid || 0;
         const balance = finalPrice - totalPaid;
-        const targetStatus = balance < 2 ? 'paid' : (totalPaid > 0 ? 'partially_paid' : 'pending');
+        const targetStatus = balance <= 5 ? 'paid' : (totalPaid > 0 ? 'partially_paid' : 'pending');
         if (activeIns.status !== targetStatus || (activeIns.totalFinal !== undefined && activeIns.totalFinal !== finalPrice)) {
           updateDoc(doc(db, 'insurances', insurance.id), {
             status: targetStatus,
@@ -1955,7 +1957,7 @@ export default function InsuranceDetailModal({ isOpen, onClose, insurance, initi
 
         const totalPrice = insurance.totalFinal || insurance.totalPrice;
         let newStatus = insurance.status;
-        if ((totalPrice - newTotalPaid) < 2) {
+        if ((totalPrice - newTotalPaid) <= 5) {
           newStatus = 'paid';
         } else if (newTotalPaid > 0) {
           newStatus = 'partially_paid';
@@ -2459,7 +2461,7 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
         const totalPrice = insData.totalFinal || insData.totalPrice || 0;
         
         let newStatus = insData.status;
-        if ((totalPrice - newTotalPaid) < 2) {
+        if ((totalPrice - newTotalPaid) <= 5) {
           newStatus = 'paid';
         } else if (newTotalPaid > 0) {
           newStatus = 'partially_paid';
@@ -2553,21 +2555,34 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
             <h3 className="text-xl font-bold text-gray-900">Detalles del Seguro</h3>
             <p className="text-sm text-gray-500 font-mono">ID: {insurance.id}</p>
           </div>
-          <button 
-            onClick={async () => {
-              if (isCorrecting) {
-                if (window.confirm("¿Desea descartar la corrección en curso? El registro temporal creado se eliminará.")) {
-                  await handleCancelCorrection();
+          <div className="flex items-center gap-2.5">
+            {displayPendingBalance > 0 && !isInsuranceClosed(localInsurance || insurance) && (
+              <button 
+                type="button"
+                onClick={() => setShowStripeModal(true)}
+                className="px-3.5 py-1.5 bg-gradient-to-r from-indigo-600 to-indigo-700 hover:from-indigo-700 hover:to-indigo-800 text-white text-xs font-bold rounded-xl shadow-sm flex items-center gap-1.5 transition-all cursor-pointer hover:scale-105 active:scale-95"
+                title="Generar y enviar liga de pago Stripe por WhatsApp o Correo"
+              >
+                <CreditCard className="w-3.5 h-3.5" />
+                <span>Liga Stripe</span>
+              </button>
+            )}
+            <button 
+              onClick={async () => {
+                if (isCorrecting) {
+                  if (window.confirm("¿Desea descartar la corrección en curso? El registro temporal creado se eliminará.")) {
+                    await handleCancelCorrection();
+                    onClose();
+                  }
+                } else {
                   onClose();
                 }
-              } else {
-                onClose();
-              }
-            }}
-            className="p-2 hover:bg-gray-200 rounded-full transition-colors"
-          >
-            <X className="w-6 h-6 text-gray-500" />
-          </button>
+              }}
+              className="p-2 hover:bg-gray-200 rounded-full transition-colors cursor-pointer"
+            >
+              <X className="w-6 h-6 text-gray-500" />
+            </button>
+          </div>
         </div>
         {/* Content */}
         <div className="flex-1 overflow-y-auto">
@@ -4233,6 +4248,46 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
                   </div>
                 )}
 
+                {/* Active Stripe payment link banner if exists */}
+                {activeInsurance.stripePaymentLink && (
+                  <div className="p-3.5 bg-gradient-to-r from-indigo-50/80 via-blue-50/50 to-indigo-50 border border-indigo-200/90 rounded-2xl flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs shadow-2xs">
+                    <div className="flex items-center gap-3 overflow-hidden">
+                      <div className="p-2.5 bg-indigo-600 text-white rounded-xl shadow-xs shrink-0">
+                        <CreditCard className="w-4.5 h-4.5" />
+                      </div>
+                      <div className="overflow-hidden">
+                        <div className="flex items-center gap-2">
+                          <span className="text-[10px] font-black text-indigo-900 uppercase tracking-widest">Liga de Pago Stripe Activa</span>
+                          <span className="px-1.5 py-0.5 bg-emerald-100 text-emerald-800 text-[9px] font-bold rounded-md">Vigente</span>
+                        </div>
+                        <span className="font-mono text-indigo-700 text-xs truncate block max-w-md select-all mt-0.5">{activeInsurance.stripePaymentLink}</span>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard.writeText(activeInsurance.stripePaymentLink!);
+                          alert("¡Liga de pago copiada al portapapeles!");
+                        }}
+                        className="px-3 py-1.5 bg-white hover:bg-indigo-50 text-indigo-700 border border-indigo-200 text-xs font-bold rounded-xl transition-all shadow-xs cursor-pointer flex items-center gap-1.5"
+                        title="Copiar liga"
+                      >
+                        <Copy className="w-3.5 h-3.5" />
+                        Copiar
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setShowStripeModal(true)}
+                        className="px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl transition-all shadow-md shadow-indigo-100 cursor-pointer flex items-center gap-1.5 hover:scale-[1.02]"
+                      >
+                        <CreditCard className="w-3.5 h-3.5" />
+                        Gestionar / Enviar
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 {/* Acciones de Cobro Re-diseñadas para evitar encimamiento o desbordamiento */}
                 {((insurance.totalPaid || 0) < insuranceTotalPrice) && !isInsuranceClosed(localInsurance || insurance) && (
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 bg-slate-50 rounded-2xl border border-slate-100 shadow-inner">
@@ -4256,6 +4311,16 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
                           Descuento Comisión
                         </button>
                       )}
+
+                      <button 
+                        type="button"
+                        onClick={() => setShowStripeModal(true)}
+                        className="px-4 py-2.5 bg-gradient-to-r from-indigo-600 to-indigo-700 hover:from-indigo-700 hover:to-indigo-800 text-white text-xs font-bold rounded-xl transition-all shadow-md shadow-indigo-100 flex items-center gap-1.5 cursor-pointer hover:scale-[1.02] active:scale-95"
+                        title="Enviar Liga de Pago Stripe por WhatsApp o Correo"
+                      >
+                        <CreditCard className="w-3.5 h-3.5" />
+                        Enviar Liga Stripe
+                      </button>
 
                       <button 
                         onClick={() => setShowTransactionModal(true)}
@@ -4481,6 +4546,11 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
                             </div>
                             <div>
                               <p className="text-sm font-bold text-gray-900">${p.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} {p.currency}</p>
+                              {p.amountMXP && p.exchangeRate && (
+                                <p className="text-xs text-amber-700 font-bold mt-0.5">
+                                  ${p.amountMXP.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MXP <span className="text-[10px] text-gray-400 font-medium">(T.C. {p.exchangeRate.toFixed(2)})</span>
+                                </p>
+                              )}
                               <p className="text-[10px] text-gray-400 font-medium">
                                 Confirmada el {formatDisplayDate(p.date)}
                               </p>
@@ -4609,6 +4679,15 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
           onClose={() => setShowTransactionModal(false)}
           insuranceId={insurance.id}
           title="Registrar Transacción"
+        />
+
+        <StripePaymentModal
+          isOpen={showStripeModal}
+          onClose={() => setShowStripeModal(false)}
+          insurance={localInsurance || insurance}
+          initialAmount={displayPendingBalance > 0 ? displayPendingBalance : undefined}
+          initialCurrency={(localInsurance || insurance)?.currency === 'MXP' ? 'MXP' : 'USD'}
+          defaultExchangeRate={(localInsurance || insurance)?.exchangeRate || 20.00}
         />
 
         <RefundModal

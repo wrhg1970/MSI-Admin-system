@@ -4,12 +4,13 @@ import { collection, onSnapshot, query, orderBy, deleteDoc, doc, updateDoc, getD
 import { db, handleFirestoreError, OperationType, auth } from '../firebase';
 import { InsuranceRequest, UserProfile, Payment, Policy, CustomRole, PolicyLetter } from '../types';
 import { COUNTRIES } from '../constants';
-import { ShieldCheck, Eye, Trash2, Edit2, CheckCircle, CheckCircle2, XCircle, DollarSign, FileText, FileSpreadsheet, Search, Filter, Receipt, Calendar, Clock, AlertTriangle, ArrowRight, User, Users, Mail, LayoutGrid, List, Baby, Upload, Download, Globe, Building2, ArrowUp, ArrowDown, ChevronLeft, ChevronRight, TrendingUp, Send, Loader2, History, Plus, X, FolderArchive, ArrowUpDown, Scale, Copy, ChevronDown, ChevronUp, Layers, FileQuestion, MessageCircle } from 'lucide-react';
+import { ShieldCheck, Eye, Trash2, Edit2, CheckCircle, CheckCircle2, XCircle, DollarSign, FileText, FileSpreadsheet, Search, Filter, Receipt, Calendar, Clock, AlertTriangle, ArrowRight, User, Users, Mail, LayoutGrid, List, Baby, Upload, Download, Globe, Building2, ArrowUp, ArrowDown, ChevronLeft, ChevronRight, TrendingUp, Send, Loader2, History, Plus, X, FolderArchive, ArrowUpDown, Scale, Copy, ChevronDown, ChevronUp, Layers, FileQuestion, MessageCircle, CreditCard } from 'lucide-react';
 import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import TransactionModal from './TransactionModal';
 import InsuranceDetailModal from './InsuranceDetailModal';
 import EmailModal from './EmailModal';
+import StripePaymentModal from './StripePaymentModal';
 import WhatsAppLettersModal from './WhatsAppLettersModal';
 import BulkEmailConfigModal from './BulkEmailConfigModal';
 import BulkZipDownloadModal from './BulkZipDownloadModal';
@@ -121,6 +122,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
   const [modalInitialAction, setModalInitialAction] = useState<'cancel' | 'correct' | 'extension' | null>(null);
   const [selectedInsuranceForEmail, setSelectedInsuranceForEmail] = useState<InsuranceRequest | null>(null);
   const [selectedInsuranceForWhatsApp, setSelectedInsuranceForWhatsApp] = useState<InsuranceRequest | null>(null);
+  const [selectedInsuranceForStripe, setSelectedInsuranceForStripe] = useState<InsuranceRequest | null>(null);
   const [insuranceToDelete, setInsuranceToDelete] = useState<InsuranceRequest | null>(null);
   const [confirmingAction, setConfirmingAction] = useState<{id: string, type: 'payment' | 'commission'} | null>(null);
   const [showDuplicatesModal, setShowDuplicatesModal] = useState(false);
@@ -2119,7 +2121,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
         const newTotalPaid = allSnap.docs.reduce((acc, d) => acc + (d.data().amount || 0), 0);
         
         let newStatus = insData.status;
-        if ((totalPrice - newTotalPaid) < 2) {
+        if ((totalPrice - newTotalPaid) <= 5) {
           newStatus = 'paid';
         } else if (newTotalPaid > 0) {
           newStatus = 'partially_paid';
@@ -6472,7 +6474,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
               const displayStatus = getInsurancePaymentDisplayStatus(i);
               const isPaidStatus = displayStatus === 'paid';
 
-              const hasPendingPayments = !isPaidStatus && balanceToPay >= 2;
+              const hasPendingPayments = !isPaidStatus && balanceToPay > 5;
               const isCommissionPending = (i.commissionStatus === 'pending' || !i.commissionStatus) && (i.agentCommission || 0) > 0;
 
               return (
@@ -6713,6 +6715,15 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                         <Receipt className="w-3.5 h-3.5" />
                         Pagos
                       </button>
+                      <button 
+                        type="button"
+                        onClick={() => setSelectedInsuranceForStripe(i)}
+                        className="flex items-center gap-2 px-3 py-1.5 bg-indigo-50 text-indigo-700 text-[10px] font-bold rounded-lg hover:bg-indigo-100 transition-all cursor-pointer"
+                        title="Enviar Liga de Pago Stripe por WhatsApp o Email"
+                      >
+                        <CreditCard className="w-3.5 h-3.5" />
+                        Stripe
+                      </button>
                       {canManageClosedState && i.actionType !== 'CAN' && !i.isCorrected && (i as any).Caremed && (
                         <>
                           <button 
@@ -6851,7 +6862,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                     const isPaidStatus = displayStatus === 'paid';
 
                     const isCommissionPending = (i.commissionStatus === 'pending' || !i.commissionStatus) && (i.agentCommission || 0) > 0;
-                    const hasPendingPayments = !isPaidStatus && balanceToPay >= 2;
+                    const hasPendingPayments = !isPaidStatus && balanceToPay > 5;
 
                     return (
                       <tr key={i.id} className={`hover:bg-gray-50 transition-colors ${selectedInsuranceIds.includes(i.id || '') ? 'bg-indigo-50/20 hover:bg-indigo-50/30' : ''}`}>
@@ -6969,6 +6980,14 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                                 title="Pagos"
                               >
                                 <Receipt className="w-3.5 h-3.5" />
+                              </button>
+                              <button 
+                                type="button"
+                                onClick={() => setSelectedInsuranceForStripe(i)}
+                                className="p-1 text-indigo-600 hover:bg-indigo-50 rounded-md transition-all cursor-pointer"
+                                title="Enviar Liga de Pago Stripe (WhatsApp / Email)"
+                              >
+                                <CreditCard className="w-3.5 h-3.5" />
                               </button>
                               {hasPendingPayments && (
                                 <button 
@@ -7195,6 +7214,14 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
         onClose={() => setSelectedInsuranceForTransactions(null)}
         insuranceId={selectedInsuranceForTransactions || undefined}
         title="Transacciones de la Póliza"
+      />
+
+      <StripePaymentModal
+        isOpen={!!selectedInsuranceForStripe}
+        onClose={() => setSelectedInsuranceForStripe(null)}
+        insurance={selectedInsuranceForStripe}
+        initialCurrency={selectedInsuranceForStripe?.currency === 'MXP' ? 'MXP' : 'USD'}
+        defaultExchangeRate={selectedInsuranceForStripe?.exchangeRate || 20.00}
       />
 
       <InsuranceDetailModal 

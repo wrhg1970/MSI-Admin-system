@@ -185,6 +185,8 @@ export interface InsuranceRequest {
   stripePaymentLink?: string;
   phone?: string;
   policyNumber?: string;
+  currency?: 'USD' | 'MXP';
+  paymentCurrency?: string;
   exchangeRate?: number;
   solicitudFactura?: boolean;
   facturaData?: FacturaData;

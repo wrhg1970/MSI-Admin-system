@@ -36,7 +36,7 @@ export const getInsurancePaymentBalance = (ins: { totalFinal?: any; totalPrice?:
   return getInsuranceExpectedAmount(ins) - safeNum(ins?.totalPaid);
 };
 
-/** Outstanding receivable: positive debtor balance, not cancelled, not closed. */
+/** Outstanding receivable: positive debtor balance greater than $5 USD, not cancelled, not closed, not paid. */
 export const isInsuranceDeudor = (ins: {
   status?: string;
   actionType?: string;
@@ -50,13 +50,18 @@ export const isInsuranceDeudor = (ins: {
   const raw = String(ins.status || '').toLowerCase().trim();
   if (action === 'CAN' || raw === 'cancelled' || raw === 'cancelado') return false;
   if (ins.closed) return false;
-  return getInsurancePaymentBalance(ins) > 0.01;
+  if (raw === 'paid' || raw === 'pagado') return false;
+
+  // En el reporte y filtros de Seguros por Cobrar, solo aparecen los que tienen un saldo deudor mayor a $5 USD
+  const balance = Number(getInsurancePaymentBalance(ins).toFixed(2));
+  return balance > 5.00;
 };
 
 /**
  * Payment badge for Gestión de Pólizas and Detalles del Seguro.
  * Balance is the source of truth so a stale `status: paid` cannot show PAGADO
  * while the list still shows PENDIENTE (or the reverse).
+ * Un saldo deudor menor o igual a $5 USD (o status paid) se considera liquidado (PAGADO).
  */
 export const getInsurancePaymentDisplayStatus = (ins: {
   status?: string;
@@ -69,10 +74,12 @@ export const getInsurancePaymentDisplayStatus = (ins: {
   const action = String(ins.actionType || '').toUpperCase();
   const raw = String(ins.status || '').toLowerCase().trim();
   if (action === 'CAN' || raw === 'cancelled' || raw === 'cancelado') return 'cancelled';
+  if (raw === 'paid' || raw === 'pagado') return 'paid';
 
   const paid = safeNum(ins.totalPaid);
-  const balance = getInsurancePaymentBalance(ins);
-  if (balance < 2) return 'paid';
+  const balance = Number(getInsurancePaymentBalance(ins).toFixed(2));
+  // Si el saldo pendiente es menor o igual a $5 USD y tiene algún pago o el precio total es <= $5, está liquidado
+  if (balance <= 5.00 && (paid > 0 || safeNum(getInsuranceExpectedAmount(ins)) <= 5.00)) return 'paid';
   if (paid > 0.01) return 'partially_paid';
   return 'pending';
 };

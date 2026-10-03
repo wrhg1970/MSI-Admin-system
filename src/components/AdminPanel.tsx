@@ -831,7 +831,7 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
             ? item.expected 
             : (item.totalFinal !== undefined && item.totalFinal !== null ? item.totalFinal : (item.totalPrice || 0));
           const newBalance = expectedTotal - newTotalPaid;
-          const isSettled = Math.abs(newBalance) < 0.01;
+          const isSettled = newBalance <= 5.00;
 
           const updateData: any = {
             totalPaid: newTotalPaid,
@@ -1237,7 +1237,7 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
 
           const receiptNumber = `REC-${Math.floor(1000 + Math.random() * 9000)}`;
           const newTotalPaid = (selectedInsurance.totalPaid || 0) + paymentAmount;
-          const status = newTotalPaid >= finalTotalFinal ? 'paid' : 'partially_paid';
+          const status = (finalTotalFinal - newTotalPaid) <= 5 ? 'paid' : 'partially_paid';
 
           await handleUpdateStatus(selectedInsurance.id!, status, {
             paymentMethod,
@@ -1394,7 +1394,7 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
         const totalPrice = insData.totalFinal || insData.totalPrice || 0;
         
         let newStatus = insData.status;
-        if ((totalPrice - newTotalPaid) < 2) {
+        if ((totalPrice - newTotalPaid) <= 5) {
           newStatus = 'paid';
         } else if (newTotalPaid > 0) {
           newStatus = 'partially_paid';
@@ -1650,7 +1650,7 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
                 if (newTotalPaid !== (insurance.totalPaid || 0)) {
                   const totalPrice = insurance.totalFinal || insurance.totalPrice;
                   let newStatus = insurance.status;
-                  if ((totalPrice - newTotalPaid) < 2) {
+                  if ((totalPrice - newTotalPaid) <= 5) {
                     newStatus = 'paid';
                   } else if (newTotalPaid > 0) {
                     newStatus = 'partially_paid';
@@ -1827,7 +1827,7 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
                 const newTotalPaid = (insurance.totalPaid || 0) + diff;
                 const totalPrice = insurance.totalFinal || insurance.totalPrice;
                 let newStatus = insurance.status;
-                if ((totalPrice - newTotalPaid) < 2) {
+                if ((totalPrice - newTotalPaid) <= 5) {
                   newStatus = 'paid';
                 } else if (newTotalPaid > 0) {
                   newStatus = 'partially_paid';

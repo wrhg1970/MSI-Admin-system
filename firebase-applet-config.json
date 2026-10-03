@@ -6,5 +6,7 @@
   "firestoreDatabaseId": "ai-studio-msiadminplatform-aafdf6c5-a449-4ecd-ad08-755db11e4987",
   "storageBucket": "velvety-implement-qkm1r.firebasestorage.app",
   "messagingSenderId": "132631300012",
-  "measurementId": ""
+  "measurementId": "",
+  "oAuthClientId": "132631300012-3ejvtl6metbdlrbbkmm8pb0nvjrpmem0.apps.googleusercontent.com",
+  "recaptchaSiteKey": ""
 }

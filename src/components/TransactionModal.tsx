@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { collection, query, where, onSnapshot, orderBy, addDoc, serverTimestamp, doc, updateDoc, getDoc, deleteDoc, getDocs, limit } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType, auth } from '../firebase';
 import { Payment, InsuranceRequest } from '../types';
-import { X, DollarSign, Calendar, CreditCard, ArrowRight, Receipt, User, Shield, Plus, AlertCircle, Briefcase, Eye, Printer, FileText, Trash2, Edit2, Copy, RotateCcw } from 'lucide-react';
+import { X, DollarSign, Calendar, CreditCard, ArrowRight, Receipt, User, Shield, Plus, AlertCircle, Briefcase, Eye, Printer, FileText, Trash2, Edit2, Copy, RotateCcw, MessageSquare, Send, Mail, CheckCircle, ExternalLink, RefreshCw } from 'lucide-react';
 import { format, isValid } from 'date-fns';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
@@ -64,6 +64,7 @@ export default function TransactionModal({ isOpen, onClose, insuranceId, clientE
   const [stripeCopied, setStripeCopied] = useState(false);
   const [stripeEmailSending, setStripeEmailSending] = useState(false);
   const [stripeEmailSent, setStripeEmailSent] = useState(false);
+  const [stripeWhatsAppShared, setStripeWhatsAppShared] = useState(false);
 
   // Form State
   const [formData, setFormData] = useState({
@@ -265,17 +266,10 @@ export default function TransactionModal({ isOpen, onClose, insuranceId, clientE
     setStripeLoading(true);
     setStripePaymentUrl(null);
     setStripeEmailSent(false);
+    setStripeWhatsAppShared(false);
 
     try {
       const amountVal = parseFloat(formData.amount) || 0;
-      const rateVal = parseFloat(formData.exchangeRate) || exchangeRate || 17.55;
-      
-      // If currency is MXP, the amount parameter sent to Stripe should be in pesos.
-      // If currency is USD, the amount parameter sent to Stripe should be in USD.
-      const sendAmount = formData.currency === 'USD' ? amountVal : amountVal;
-      // Wait! If currency is MXP, the amountVal is already in MXP!
-      // If currency is USD, the amountVal is in USD. So we just pass amountVal!
-      // Let's verify: formData.amount is what they typed. If currency is MXP, they type the MXP amount. So we just use amountVal!
       const actualAmount = amountVal;
 
       const response = await fetch('/api/stripe/create-payment-link', {
@@ -284,8 +278,8 @@ export default function TransactionModal({ isOpen, onClose, insuranceId, clientE
         body: JSON.stringify({
           amount: actualAmount,
           currency: formData.currency,
-          description: `Abono Póliza #${insuranceObj.policyNumber || insuranceObj.id?.substring(0,6)} - ${insuranceObj.firstName} ${insuranceObj.lastName}`,
-          clientEmail: insuranceObj.email || '',
+          description: `Abono Póliza #${insuranceObj.policyNumber || insuranceObj.IDseg || insuranceObj.id?.substring(0,6)} - ${insuranceObj.firstName} ${insuranceObj.lastName}`,
+          clientEmail: insuranceObj.email || clientEmail || '',
           insuranceId: insuranceObj.id,
           origin: window.location.origin
         })
@@ -294,6 +288,22 @@ export default function TransactionModal({ isOpen, onClose, insuranceId, clientE
       const data = await response.json();
       if (response.ok && data.url) {
         setStripePaymentUrl(data.url);
+        if (insuranceObj.id) {
+          await updateDoc(doc(db, 'insurances', insuranceObj.id), {
+            stripePaymentLink: data.url
+          });
+          try {
+            await logInsuranceActivity({
+              insuranceId: insuranceObj.id,
+              type: 'automatic',
+              description: `Se generó liga de pago de Stripe por $${actualAmount.toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${formData.currency}. Enlace: ${data.url}`,
+              date: new Date(),
+              createdBy: auth.currentUser?.email || 'Sistema'
+            });
+          } catch (lErr) {
+            console.error('Error logging stripe activity:', lErr);
+          }
+        }
       } else {
         alert(data.error || 'Error al generar la liga de pago.');
       }
@@ -302,6 +312,59 @@ export default function TransactionModal({ isOpen, onClose, insuranceId, clientE
       alert('Error de conexión al generar la liga de pago: ' + error.message);
     } finally {
       setStripeLoading(false);
+    }
+  };
+
+  const handleShareStripeWhatsApp = () => {
+    const insuranceObj = currentInsurance || (insurances && insurances[0]);
+    if (!insuranceObj || !stripePaymentUrl || !formData.amount) return;
+
+    const rawDigits = (insuranceObj.phone || '').replace(/[^0-9]/g, '');
+    const cleanPhone = rawDigits.length === 10 ? `52${rawDigits}` : rawDigits;
+    const numAmount = parseFloat(formData.amount) || 0;
+    const formattedAmount = `$${numAmount.toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${formData.currency}`;
+    const policyIdStr = insuranceObj.policyNumber || insuranceObj.IDseg || insuranceObj.id?.substring(0, 6) || 'de seguro';
+
+    const messageText = 
+`Hola ${insuranceObj.firstName || 'estimado asegurado'},
+
+Te compartimos la liga de pago seguro con tarjeta para cubrir tu póliza #${policyIdStr}:
+
+*Monto a pagar:* ${formattedAmount}
+*Liga de Pago Stripe:* 
+${stripePaymentUrl}
+
+Tu pago se acreditará y conciliará de forma 100% automática e inmediata.
+¡Quedamos a tus órdenes!`;
+
+    const encodedText = encodeURIComponent(messageText);
+    const waUrl = cleanPhone 
+      ? `https://wa.me/${cleanPhone}?text=${encodedText}` 
+      : `https://api.whatsapp.com/send?text=${encodedText}`;
+
+    const linkEl = document.createElement('a');
+    linkEl.href = waUrl;
+    linkEl.target = '_blank';
+    linkEl.rel = 'noopener noreferrer';
+    document.body.appendChild(linkEl);
+    linkEl.click();
+    document.body.removeChild(linkEl);
+
+    setStripeWhatsAppShared(true);
+    setTimeout(() => setStripeWhatsAppShared(false), 4000);
+
+    if (insuranceObj.id) {
+      try {
+        logInsuranceActivity({
+          insuranceId: insuranceObj.id,
+          type: 'automatic',
+          description: `Se compartió liga de pago de Stripe por WhatsApp al teléfono "${insuranceObj.phone || 'contacto'}" por un valor de ${formattedAmount}.`,
+          date: new Date(),
+          createdBy: auth.currentUser?.email || 'Sistema'
+        });
+      } catch (lErr) {
+        console.error('Error logging WhatsApp activity:', lErr);
+      }
     }
   };
 
@@ -320,18 +383,33 @@ export default function TransactionModal({ isOpen, onClose, insuranceId, clientE
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          to: insuranceObj.email || '',
+          to: insuranceObj.email || clientEmail || '',
           clientName: `${insuranceObj.firstName} ${insuranceObj.lastName}`,
           paymentUrl: stripePaymentUrl,
           amount: actualAmount,
           currency: formData.currency,
-          description: `Abono de Póliza #${insuranceObj.policyNumber || insuranceObj.id?.substring(0,6)}`
+          description: `Abono de Póliza #${insuranceObj.policyNumber || insuranceObj.IDseg || insuranceObj.id?.substring(0,6)}`
         })
       });
 
       const data = await response.json();
       if (response.ok) {
         setStripeEmailSent(true);
+        setTimeout(() => setStripeEmailSent(false), 4000);
+
+        if (insuranceObj.id) {
+          try {
+            await logInsuranceActivity({
+              insuranceId: insuranceObj.id,
+              type: 'automatic',
+              description: `Se envió liga de pago de Stripe por correo a "${insuranceObj.email || clientEmail}" por un monto de $${actualAmount.toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${formData.currency}.`,
+              date: new Date(),
+              createdBy: auth.currentUser?.email || 'Sistema'
+            });
+          } catch (lErr) {
+            console.error('Error logging email activity:', lErr);
+          }
+        }
       } else {
         alert(data.error || 'Error al enviar la liga por correo.');
       }
@@ -426,7 +504,7 @@ export default function TransactionModal({ isOpen, onClose, insuranceId, clientE
             const finalPaid = formData.status === 'completed' ? ((insData.totalPaid || 0) + amountUSD) : (insData.totalPaid || 0);
             
             let newStatus = insData.status;
-            if ((insTotalFinal - finalPaid) < 2) {
+            if ((insTotalFinal - finalPaid) <= 5) {
               newStatus = 'paid';
             } else if (finalPaid > 0) {
               newStatus = 'partially_paid';
@@ -439,7 +517,7 @@ export default function TransactionModal({ isOpen, onClose, insuranceId, clientE
               const newTotalPaid = (insData.totalPaid || 0) + amountUSD;
               const totalPrice = insData.totalFinal || insData.totalPrice;
               let newStatus = insData.status;
-              if ((totalPrice - newTotalPaid) < 2) {
+              if ((totalPrice - newTotalPaid) <= 5) {
                 newStatus = 'paid';
               } else if (newTotalPaid > 0) {
                 newStatus = 'partially_paid';
@@ -606,7 +684,7 @@ export default function TransactionModal({ isOpen, onClose, insuranceId, clientE
             const totalPrice = insData.totalFinal || insData.totalPrice;
             
             let newStatus = insData.status;
-            if ((totalPrice - newTotalPaid) < 2) {
+            if ((totalPrice - newTotalPaid) <= 5) {
               newStatus = 'paid';
             } else if (newTotalPaid > 0) {
               newStatus = 'partially_paid';
@@ -982,6 +1060,121 @@ export default function TransactionModal({ isOpen, onClose, insuranceId, clientE
                     placeholder="Ej. Referencia bancaria, número de recibo..."
                   />
                 </div>
+
+                {/* Stripe Payment Link Section */}
+                {(formData.paymentMethod?.toLowerCase().includes('stripe') || stripePaymentUrl) && (
+                  <div className="p-4 bg-gradient-to-br from-indigo-50/90 via-blue-50/60 to-indigo-50 border border-indigo-200 rounded-2xl space-y-3.5 animate-in fade-in duration-200">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <CreditCard className="w-4 h-4 text-indigo-600" />
+                        <span className="text-xs font-bold text-indigo-900 uppercase tracking-wider">Liga de Cobro Stripe</span>
+                      </div>
+                      {stripePaymentUrl && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setStripePaymentUrl(null);
+                            setStripeEmailSent(false);
+                            setStripeWhatsAppShared(false);
+                          }}
+                          className="text-[10px] font-bold text-indigo-600 hover:text-indigo-800 underline cursor-pointer"
+                        >
+                          Generar otra
+                        </button>
+                      )}
+                    </div>
+
+                    {!stripePaymentUrl ? (
+                      <button
+                        type="button"
+                        onClick={handleCreateStripePaymentLink}
+                        disabled={stripeLoading || !formData.amount || parseFloat(formData.amount) <= 0}
+                        className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-black rounded-xl transition-all shadow-md shadow-indigo-100 flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                      >
+                        {stripeLoading ? (
+                          <>
+                            <RefreshCw className="w-4 h-4 animate-spin" />
+                            Generando Enlace Stripe...
+                          </>
+                        ) : (
+                          <>
+                            <CreditCard className="w-4 h-4" />
+                            Generar Liga de Cobro Segura ({formData.currency})
+                          </>
+                        )}
+                      </button>
+                    ) : (
+                      <div className="space-y-3">
+                        {/* URL Box */}
+                        <div className="flex items-center gap-2 bg-white px-3.5 py-2.5 rounded-xl border border-indigo-200 font-mono text-xs text-indigo-800 select-all overflow-hidden shadow-2xs">
+                          <span className="truncate flex-1 font-semibold">{stripePaymentUrl}</span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              navigator.clipboard.writeText(stripePaymentUrl);
+                              setStripeCopied(true);
+                              setTimeout(() => setStripeCopied(false), 2500);
+                            }}
+                            className="p-1.5 hover:bg-indigo-50 rounded-lg text-gray-500 hover:text-indigo-600 transition-colors shrink-0 cursor-pointer"
+                            title="Copiar liga"
+                          >
+                            {stripeCopied ? <CheckCircle className="w-4 h-4 text-emerald-600" /> : <Copy className="w-4 h-4" />}
+                          </button>
+                          <a
+                            href={stripePaymentUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="p-1.5 hover:bg-indigo-50 rounded-lg text-gray-500 hover:text-blue-600 transition-colors shrink-0"
+                            title="Abrir checkout"
+                          >
+                            <ExternalLink className="w-4 h-4" />
+                          </a>
+                        </div>
+                        {stripeCopied && (
+                          <p className="text-[11px] font-bold text-emerald-600 text-center animate-in fade-in">
+                            ✓ ¡Liga copiada al portapapeles!
+                          </p>
+                        )}
+
+                        {/* WhatsApp and Email Action Buttons */}
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                          <button
+                            type="button"
+                            onClick={handleShareStripeWhatsApp}
+                            className="flex items-center justify-center gap-2 py-2.5 px-3 bg-[#25D366] hover:bg-[#20ba56] text-white text-xs font-bold rounded-xl transition-all shadow-sm cursor-pointer hover:scale-[1.02]"
+                          >
+                            <MessageSquare className="w-4 h-4" />
+                            {stripeWhatsAppShared ? '✓ ¡WhatsApp Abierto!' : 'Enviar por WhatsApp'}
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={handleSendStripeEmail}
+                            disabled={stripeEmailSending}
+                            className="flex items-center justify-center gap-2 py-2.5 px-3 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl transition-all shadow-sm shadow-indigo-100 cursor-pointer hover:scale-[1.02] disabled:opacity-50"
+                          >
+                            {stripeEmailSending ? (
+                              <>
+                                <RefreshCw className="w-4 h-4 animate-spin" />
+                                Enviando...
+                              </>
+                            ) : stripeEmailSent ? (
+                              <>
+                                <CheckCircle className="w-4 h-4 text-emerald-300" />
+                                ¡Correo Enviado!
+                              </>
+                            ) : (
+                              <>
+                                <Mail className="w-4 h-4" />
+                                Enviar por Correo
+                              </>
+                            )}
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
 
 
 

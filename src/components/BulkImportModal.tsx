@@ -1040,7 +1040,7 @@ export default function BulkImportModal({
             const totalFinal = insurance.totalFinal || insurance.totalPrice || 0;
             
             let newStatus = accUpdate.status;
-            if ((totalFinal - newPaid) < 2) newStatus = 'paid';
+            if ((totalFinal - newPaid) <= 5) newStatus = 'paid';
             else if (newPaid > 0) newStatus = 'partially_paid';
 
             accUpdate.totalPaid = newPaid;
@@ -1419,7 +1419,7 @@ export default function BulkImportModal({
               const currentPaid = matchedIns.totalPaid || 0;
               const totalFinal = matchedIns.totalFinal || matchedIns.totalPrice || 0;
               
-              if (matchedIns.status === 'paid' || (totalFinal - currentPaid) < 2) {
+              if (matchedIns.status === 'paid' || (totalFinal - currentPaid) <= 5) {
                 isDiscrepancy = true;
                 discrepancyMessage = `El seguro con IDSeg "${idSegMatched}" ya está completamente pagado ($${currentPaid} de $${totalFinal} USD). Este pago de $${payment.amount} USD se registrará de todos modos.`;
               } else if (currentPaid + payment.amount > totalFinal + 0.01 && payment.type === 'client_payment') {

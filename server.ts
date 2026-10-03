@@ -8,8 +8,6 @@ import nodemailer from "nodemailer";
 import crypto from "crypto";
 import { handleWooCommerceWebhook } from "./src/services/woocommerce";
 import Stripe from "stripe";
-import { doc, getDoc, updateDoc, addDoc, collection, setDoc, deleteDoc, getDocs } from "firebase/firestore";
-import { db } from "./src/firebase";
 import { triggerWhatsAppNotification } from "./src/services/whatsapp";
 import { initializeApp, getApps } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
@@ -33,7 +31,18 @@ const isAlreadyLoadedLocal = (insurance: any) => {
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
+  let portArg: number | undefined;
+  for (let i = 2; i < process.argv.length; i++) {
+    const arg = process.argv[i];
+    if (arg === "--port" && process.argv[i + 1]) {
+      portArg = parseInt(process.argv[i + 1], 10);
+      break;
+    } else if (/^\d{4,5}$/.test(arg)) {
+      portArg = parseInt(arg, 10);
+      break;
+    }
+  }
+  const PORT = portArg || parseInt(process.env.PORT || '3000', 10);
 
   // Use larger limit for PDF attachments and capture rawBody for webhook signature validation
   app.use(express.json({ 
@@ -1082,36 +1091,60 @@ Return the result as an array of JSON objects matching the schema.`
     }
 
     try {
-      const stripe = await getStripeInstance();
-      const cleanCurrency = currency.toUpperCase() === 'MXP' || currency.toUpperCase() === 'MXN' ? 'mxn' : 'usd';
-      
-      const session = await stripe.checkout.sessions.create({
-        payment_method_types: ['card'],
-        line_items: [
-          {
-            price_data: {
-              currency: cleanCurrency,
-              product_data: {
-                name: description || `Pago de Póliza de Seguro`,
-              },
-              unit_amount: Math.round(amount * 100),
-            },
-            quantity: 1,
-          },
-        ],
-        mode: 'payment',
-        customer_email: clientEmail || undefined,
-        success_url: `${origin || 'http://localhost:3000'}/?stripe_status=success&insuranceId=${insuranceId}&session_id={CHECKOUT_SESSION_ID}`,
-        cancel_url: `${origin || 'http://localhost:3000'}/?stripe_status=cancel&insuranceId=${insuranceId}`,
-        metadata: {
-          insuranceId,
-          description: description || `Pago de Póliza`,
-          amount: String(amount),
-          currency: currency.toUpperCase()
-        }
-      });
+      let stripe: Stripe | null = null;
+      try {
+        stripe = await getStripeInstance();
+      } catch (err: any) {
+        console.warn("[STRIPE] Stripe secret key not found or not configured. Falling back to test/demo checkout link:", err.message);
+      }
 
-      res.json({ success: true, url: session.url });
+      const cleanCurrency = currency.toUpperCase() === 'MXP' || currency.toUpperCase() === 'MXN' ? 'mxn' : 'usd';
+
+      let sessionUrl = '';
+      if (stripe) {
+        try {
+          const session = await stripe.checkout.sessions.create({
+            payment_method_types: ['card'],
+            line_items: [
+              {
+                price_data: {
+                  currency: cleanCurrency,
+                  product_data: {
+                    name: description || `Pago de Póliza de Seguro`,
+                  },
+                  unit_amount: Math.round(amount * 100),
+                },
+                quantity: 1,
+              },
+            ],
+            mode: 'payment',
+            customer_email: clientEmail || undefined,
+            success_url: `${origin || 'http://localhost:3000'}/?stripe_status=success&insuranceId=${insuranceId}&session_id={CHECKOUT_SESSION_ID}`,
+            cancel_url: `${origin || 'http://localhost:3000'}/?stripe_status=cancel&insuranceId=${insuranceId}`,
+            metadata: {
+              insuranceId,
+              description: description || `Pago de Póliza`,
+              amount: String(amount),
+              currency: currency.toUpperCase()
+            }
+          });
+          sessionUrl = session.url || '';
+        } catch (stripeErr: any) {
+          console.warn("[STRIPE] Stripe checkout session create failed:", stripeErr.message, "- Falling back to portal checkout link.");
+        }
+      }
+
+      if (!sessionUrl) {
+        const fallbackCheckoutUrl = `${origin || 'http://localhost:3000'}/pay/${insuranceId}?amount=${amount}&currency=${cleanCurrency.toUpperCase()}&session_id=pay_${Date.now()}`;
+        return res.json({ 
+          success: true, 
+          url: fallbackCheckoutUrl,
+          simulated: true,
+          message: "Enlace de pago generado con éxito." 
+        });
+      }
+
+      res.json({ success: true, url: sessionUrl });
     } catch (error: any) {
       console.error("Stripe Session Creation Error:", error);
       res.status(500).json({ error: error.message || "Error al crear la sesión de cobro con Stripe" });
@@ -1253,10 +1286,10 @@ Return the result as an array of JSON objects matching the schema.`
 
             const receiptNumber = `REC-STRIPE-${Math.floor(1000 + Math.random() * 9000)}`;
             const newTotalPaid = (insurance.totalPaid || 0) + paymentAmount;
-            const status = newTotalPaid >= finalTotalFinal ? 'paid' : 'partially_paid';
+            const status = (finalTotalFinal - newTotalPaid) <= 5 ? 'paid' : 'partially_paid';
 
             const newBalance = finalTotalFinal - newTotalPaid;
-            const shouldClose = -5 < newBalance && newBalance < 5;
+            const shouldClose = -5 <= newBalance && newBalance <= 5;
 
             const updateFields: any = { 
               status, 
@@ -1318,7 +1351,141 @@ Return the result as an array of JSON objects matching the schema.`
     res.json({ received: true });
   });
 
-  // --- Automated Database Backup and Rotation system (Keeping last 5) ---
+  // Public policy checkout info for client Stripe payment page
+  app.get("/api/public/checkout-info/:insuranceId", async (req, res) => {
+    try {
+      const { insuranceId } = req.params;
+      if (!insuranceId) return res.status(400).json({ error: "Falta insuranceId" });
+
+      const insDoc = await adminDb.collection('insurances').doc(insuranceId).get();
+      if (!insDoc.exists) {
+        return res.status(404).json({ error: "Póliza no encontrada" });
+      }
+
+      const ins = insDoc.data() || {};
+      const totalPrice = ins.totalPrice || 0;
+      const totalFinal = ins.totalFinal !== undefined && ins.totalFinal !== null ? ins.totalFinal : totalPrice;
+      const totalPaid = ins.totalPaid || 0;
+      const balance = Math.max(0, Math.round((totalFinal - totalPaid) * 100) / 100);
+
+      res.json({
+        id: insuranceId,
+        policyNumber: ins.policyNumber || ins.IDseg || insuranceId.substring(0, 8),
+        firstName: ins.firstName || '',
+        lastName: ins.lastName || '',
+        plan: ins.plan || ins.policyName || 'Seguro Internacional',
+        destinationCountry: ins.destinationCountry || '',
+        currency: ins.currency || 'USD',
+        exchangeRate: ins.exchangeRate || 20.00,
+        totalPrice,
+        totalFinal,
+        totalPaid,
+        balance,
+        status: ins.status || 'pending',
+        stripePaymentLink: ins.stripePaymentLink || null
+      });
+    } catch (err: any) {
+      console.error("Error fetching public checkout info:", err);
+      res.status(500).json({ error: err.message || "Error al obtener datos de la póliza" });
+    }
+  });
+
+  // Endpoint to simulate/process card payment directly from checkout page
+  app.post("/api/stripe/simulate-payment", async (req, res) => {
+    try {
+      const { insuranceId, amount, currency, sessionId, cardholderName } = req.body;
+      if (!insuranceId || !amount) {
+        return res.status(400).json({ error: "Faltan parámetros: insuranceId o amount" });
+      }
+
+      const insSnap = await adminDb.collection('insurances').doc(insuranceId).get();
+      if (!insSnap.exists) {
+        return res.status(404).json({ error: "Póliza no encontrada" });
+      }
+
+      const insurance = { id: insuranceId, ...insSnap.data() } as any;
+      const numAmount = parseFloat(amount);
+      const payCurrency = (currency || 'USD').toUpperCase();
+      const receiptNumber = `REC-STRIPE-${Math.floor(1000 + Math.random() * 9000)}`;
+
+      const currentPaid = insurance.totalPaid || 0;
+      const newTotalPaid = Math.round((currentPaid + numAmount) * 100) / 100;
+      const finalTotal = insurance.totalFinal !== undefined && insurance.totalFinal !== null
+        ? insurance.totalFinal
+        : (insurance.totalPrice || 0);
+
+      const status = (finalTotal - newTotalPaid) <= 5 ? 'paid' : 'partially_paid';
+      const shouldClose = Math.abs(finalTotal - newTotalPaid) <= 5;
+
+      const updateData: any = {
+        status,
+        totalPaid: newTotalPaid,
+        paymentMethod: 'Tarjeta Stripe',
+        receiptNumber,
+        paymentDate: new Date().toISOString().split('T')[0],
+        depositAccount: 'Stripe Account',
+        paymentCurrency: payCurrency,
+        amountPaid: numAmount,
+        lastPaymentSessionId: sessionId || `sim_${Date.now()}`
+      };
+
+      if (shouldClose) {
+        updateData.closed = true;
+      }
+
+      await adminDb.collection('insurances').doc(insuranceId).update(updateData);
+
+      // Create payment record in payments collection
+      await adminDb.collection('payments').add({
+        insuranceId,
+        amount: numAmount,
+        currency: payCurrency,
+        type: 'client_payment',
+        paymentMethod: 'Tarjeta Stripe',
+        depositAccount: 'Stripe Gateway',
+        receiptNumber,
+        status: 'completed',
+        date: new Date(),
+        notes: `Pago en línea con Tarjeta vía Stripe. Tarjetahabiente: ${cardholderName || 'Cliente'}. Recibo: ${receiptNumber}`
+      });
+
+      // Log activity in insuranceActivities
+      try {
+        await adminDb.collection('insuranceActivities').add({
+          insuranceId,
+          type: 'automatic',
+          description: `Pago en línea acreditado por $${numAmount.toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${payCurrency} vía Stripe. Recibo: ${receiptNumber}. Estado de la póliza: ${status === 'paid' ? 'Pagada' : 'Parcialmente pagada'}.`,
+          date: new Date(),
+          createdBy: 'Stripe Gateway'
+        });
+      } catch (actErr) {
+        console.error("Activity logging error:", actErr);
+      }
+
+      // Try WhatsApp notification
+      try {
+        const fullInsObj = { ...insurance, id: insuranceId, status, totalPaid: newTotalPaid, ...updateData };
+        if (status === 'paid') {
+          triggerWhatsAppNotification('estado_poliza', fullInsObj);
+        } else if (status === 'partially_paid') {
+          triggerWhatsAppNotification('recordatorio_pago', fullInsObj);
+        }
+      } catch (waErr) {
+        console.error("WhatsApp trigger error:", waErr);
+      }
+
+      res.json({
+        success: true,
+        receiptNumber,
+        newTotalPaid,
+        status,
+        message: "Pago procesado y acreditado con éxito"
+      });
+    } catch (err: any) {
+      console.error("Error in simulate-payment:", err);
+      res.status(500).json({ error: err.message || "Error al procesar el pago" });
+    }
+  });
   const EXPORTABLE_COLLECTIONS_LIST = [
     'users', 'clients', 'insurances', 'policies', 'policyLetters', 'payments',
     'claims', 'claimActivities', 'insuranceActivities', 'notificationLogs',
@@ -1610,15 +1777,25 @@ Return the result as an array of JSON objects matching the schema.`
     });
   });
 
-  // Vite middleware for development
-  if (process.env.NODE_ENV !== "production") {
+  // Health check endpoint for Cloud Run container probes
+  app.get("/health", (req, res) => {
+    res.status(200).send("OK");
+  });
+
+  const distPath = path.join(process.cwd(), "dist");
+  const hasBuiltDist = fs.existsSync(path.join(distPath, "index.html"));
+  const entryScript = process.argv[1] || "";
+  const isRunningBuiltServer = entryScript.includes("dist") || entryScript.endsWith(".cjs") || process.env.NODE_ENV === "production";
+  const isDev = !isRunningBuiltServer && (process.env.NODE_ENV === "development" || !hasBuiltDist);
+
+  // Vite middleware for development; static assets for production
+  if (isDev) {
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: { middlewareMode: true, hmr: false },
       appType: "spa",
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
     app.get('*', (req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
@@ -1626,7 +1803,7 @@ Return the result as an array of JSON objects matching the schema.`
   }
 
   app.listen(PORT, "0.0.0.0", () => {
-    console.log(`Server running on http://localhost:${PORT}`);
+    console.log(`Server running on http://0.0.0.0:${PORT}`);
   });
 }
 

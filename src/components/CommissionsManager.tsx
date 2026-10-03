@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { collection, query, onSnapshot, where, doc, updateDoc, orderBy, getDocs, writeBatch } from 'firebase/firestore';
+import { collection, query, onSnapshot, where, doc, updateDoc, orderBy, getDocs, writeBatch, deleteField, serverTimestamp, limit } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { db, storage, handleFirestoreError, OperationType, auth } from '../firebase';
 import { InsuranceRequest, UserProfile, Client, CustomRole } from '../types';
@@ -29,7 +29,9 @@ import {
   Percent,
   CheckSquare,
   Square,
-  Printer
+  Printer,
+  Trash2,
+  RotateCcw
 } from 'lucide-react';
 import TransactionModal from './TransactionModal';
 import InsuranceDetailModal from './InsuranceDetailModal';
@@ -37,6 +39,7 @@ import { usePermissions } from '../hooks/usePermissions';
 
 export default function CommissionsManager({ profile, rolePermissions }: { profile: UserProfile | null, rolePermissions: CustomRole | null }) {
   const { hasPermission } = usePermissions(profile, rolePermissions);
+  const canDeleteCommissions = profile?.role !== 'agent' || hasPermission('commissions');
   const { settings: companySettings } = useCompany();
   const [searchParams] = useSearchParams();
   const [commissions, setCommissions] = useState<InsuranceRequest[]>([]);
@@ -50,7 +53,7 @@ export default function CommissionsManager({ profile, rolePermissions }: { profi
   const [paymentMethod, setPaymentMethod] = useState('Transferencia');
   const [paymentCurrency, setPaymentCurrency] = useState<'USD' | 'MXP'>('USD');
   const [paymentAmount, setPaymentAmount] = useState<number>(0);
-  const [paymentExchangeRate, setPaymentExchangeRate] = useState<number>(1);
+  const [paymentExchangeRate, setPaymentExchangeRate] = useState<number>(20.00);
   const [receiptUrl, setReceiptUrl] = useState('');
   const [selectedInsuranceForTransactions, setSelectedInsuranceForTransactions] = useState<string | null>(null);
   const [selectedInsuranceForDetail, setSelectedInsuranceForDetail] = useState<InsuranceRequest | null>(null);
@@ -69,13 +72,44 @@ export default function CommissionsManager({ profile, rolePermissions }: { profi
   const [bulkPaymentDate, setBulkPaymentDate] = useState(new Date().toISOString().split('T')[0]);
   const [bulkPaymentMethod, setBulkPaymentMethod] = useState('Transferencia');
   const [bulkPaymentCurrency, setBulkPaymentCurrency] = useState<'USD' | 'MXP'>('USD');
-  const [bulkPaymentExchangeRate, setBulkPaymentExchangeRate] = useState<number>(1);
+  const [bulkPaymentExchangeRate, setBulkPaymentExchangeRate] = useState<number>(20.00);
   const [bulkReceiptUrl, setBulkReceiptUrl] = useState('');
   const [uploadingBulkReceipt, setUploadingBulkReceipt] = useState(false);
   const [isPayingBulk, setIsPayingBulk] = useState(false);
 
+  // Delete / Revert paid commissions state
+  const [commissionToDelete, setCommissionToDelete] = useState<InsuranceRequest | null>(null);
+  const [isBulkDelete, setIsBulkDelete] = useState(false);
+  const [showDeleteModal, setShowDeleteModal] = useState(false);
+  const [isDeleting, setIsDeleting] = useState(false);
+
   useEffect(() => {
     if (!profile || !hasPermission('commissions')) return;
+
+    // Fetch latest exchange rate
+    const fetchLatestRate = async () => {
+      try {
+        const todayStr = format(new Date(), 'yyyy-MM-dd');
+        const qRate = query(collection(db, 'exchangeRates'), where('date', '==', todayStr), limit(1));
+        const rateSnap = await getDocs(qRate);
+        if (!rateSnap.empty && rateSnap.docs[0].data()?.rate) {
+          const r = Number(rateSnap.docs[0].data().rate);
+          setPaymentExchangeRate(r);
+          setBulkPaymentExchangeRate(r);
+        } else {
+          const qRecent = query(collection(db, 'exchangeRates'), orderBy('date', 'desc'), limit(1));
+          const recentSnap = await getDocs(qRecent);
+          if (!recentSnap.empty && recentSnap.docs[0].data()?.rate) {
+            const r = Number(recentSnap.docs[0].data().rate);
+            setPaymentExchangeRate(r);
+            setBulkPaymentExchangeRate(r);
+          }
+        }
+      } catch (err) {
+        console.warn("Could not load exchange rate in commissions:", err);
+      }
+    };
+    fetchLatestRate();
 
     // Fetch clients for lookup
     const fetchClients = async () => {
@@ -155,23 +189,97 @@ export default function CommissionsManager({ profile, rolePermissions }: { profi
   };
 
   const handleMarkAsPaid = async () => {
-    if (!selectedCommission) return;
+    if (!selectedCommission || !selectedCommission.id) return;
     
     setSaving(true);
     try {
-      await updateDoc(doc(db, 'insurances', selectedCommission.id!), {
+      const todayDate = new Date();
+      const todayStr = format(todayDate, 'yyyy-MM-dd');
+      const amountUSD = Number(selectedCommission.agentCommission || paymentAmount || 0);
+      const isMXP = paymentCurrency === 'MXP';
+      const rate = isMXP ? (Number(paymentExchangeRate) || 1) : 1;
+      const amountMXP = isMXP ? Number((amountUSD * rate).toFixed(2)) : undefined;
+
+      const batch = writeBatch(db);
+
+      // 1. Update insurance document
+      const insRef = doc(db, 'insurances', selectedCommission.id);
+      batch.update(insRef, {
         commissionStatus: 'paid',
-        commissionPaymentDate: paymentDate,
+        commissionPaymentDate: paymentDate || todayStr,
         commissionPaymentMethod: paymentMethod,
-        commissionPaymentReceipt: receiptUrl,
+        commissionPaymentReceipt: receiptUrl || '',
         commissionPaymentCurrency: paymentCurrency,
-        commissionPaymentAmount: paymentAmount,
-        commissionPaymentExchangeRate: paymentCurrency === 'MXP' ? paymentExchangeRate : 1
+        commissionPaymentAmount: isMXP ? amountMXP : amountUSD,
+        commissionPaymentExchangeRate: rate
       });
+
+      // 2. Generate or update payment document in payments collection with today's date
+      const paymentsSnap = await getDocs(
+        query(
+          collection(db, 'payments'),
+          where('insuranceId', '==', selectedCommission.id),
+          where('type', '==', 'agent_commission')
+        )
+      );
+
+      const paymentData: any = {
+        insuranceId: selectedCommission.id,
+        type: 'agent_commission',
+        status: 'completed',
+        date: todayDate,
+        amount: amountUSD,
+        currency: paymentCurrency,
+        paymentMethod: paymentMethod,
+        receiptUrl: receiptUrl || '',
+        exchangeRate: rate,
+        notes: isMXP 
+          ? `Pago de comisión de agente liquidado en MXP: $${amountUSD.toFixed(2)} USD = $${amountMXP?.toFixed(2)} MXP (T.C. ${rate.toFixed(2)})`
+          : `Pago de comisión de agente liquidado en USD: $${amountUSD.toFixed(2)} USD`,
+        createdBy: auth.currentUser?.email || profile?.email || 'Sistema'
+      };
+      if (isMXP && amountMXP !== undefined) {
+        paymentData.amountMXP = amountMXP;
+      }
+
+      if (!paymentsSnap.empty) {
+        const existingDoc = paymentsSnap.docs[0];
+        batch.update(existingDoc.ref, {
+          ...paymentData,
+          updatedAt: serverTimestamp()
+        });
+      } else {
+        const newPayRef = doc(collection(db, 'payments'));
+        batch.set(newPayRef, {
+          ...paymentData,
+          createdAt: serverTimestamp()
+        });
+      }
+
+      // 3. Activity log
+      const logRef = doc(collection(db, 'insuranceActivities'));
+      batch.set(logRef, {
+        insuranceId: selectedCommission.id,
+        type: 'automatic',
+        description: isMXP
+          ? `Se pagó comisión de agente por $${amountUSD.toFixed(2)} USD (desglosado en $${amountMXP?.toFixed(2)} MXP al T.C. ${rate.toFixed(2)}) mediante ${paymentMethod}.`
+          : `Se pagó comisión de agente por $${amountUSD.toFixed(2)} USD mediante ${paymentMethod}.`,
+        date: todayDate,
+        createdBy: auth.currentUser?.email || profile?.email || 'Sistema'
+      });
+
+      await batch.commit();
+
+      alert(isMXP
+        ? `Pago de comisión registrado exitosamente con la fecha de hoy (${todayStr}).\n• Comisión USD: $${amountUSD.toFixed(2)} USD\n• Desglose MXP: $${amountMXP?.toFixed(2)} MXP\n• Tipo de Cambio: ${rate.toFixed(2)}`
+        : `Pago de comisión registrado exitosamente con la fecha de hoy (${todayStr}) por $${amountUSD.toFixed(2)} USD.`
+      );
+
       setSelectedCommission(null);
       setReceiptUrl('');
     } catch (error) {
-      handleFirestoreError(error, OperationType.UPDATE, `insurances/${selectedCommission.id}`);
+      console.error('Error pagando comisión:', error);
+      handleFirestoreError(error, OperationType.UPDATE, `insurances/${selectedCommission?.id}`);
     } finally {
       setSaving(false);
     }
@@ -191,6 +299,105 @@ export default function CommissionsManager({ profile, rolePermissions }: { profi
       setSelectedCommissionIds(allIds);
     } else {
       setSelectedCommissionIds([]);
+    }
+  };
+
+  const handleExecuteDeleteCommission = async (mode: 'revert_to_pending' | 'remove_commission') => {
+    setIsDeleting(true);
+    try {
+      const targets: InsuranceRequest[] = isBulkDelete
+        ? commissions.filter(c => c.id && selectedCommissionIds.includes(c.id) && c.commissionStatus === 'paid')
+        : (commissionToDelete ? [commissionToDelete] : []);
+
+      if (targets.length === 0) return;
+
+      const batch = writeBatch(db);
+
+      for (const ins of targets) {
+        if (!ins.id) continue;
+        const insRef = doc(db, 'insurances', ins.id);
+
+        if (mode === 'revert_to_pending') {
+          // Revert to 'confirmed' (Por Pagar) and clear payment details
+          batch.update(insRef, {
+            commissionStatus: 'confirmed',
+            commissionPaymentDate: deleteField(),
+            commissionPaymentMethod: deleteField(),
+            commissionPaymentReceipt: deleteField(),
+            commissionPaymentCurrency: deleteField(),
+            commissionPaymentAmount: deleteField(),
+            commissionPaymentExchangeRate: deleteField(),
+          });
+        } else {
+          // Completely remove / unconfirm commission from module
+          batch.update(insRef, {
+            commissionStatus: 'pending',
+            commissionPaymentDate: deleteField(),
+            commissionPaymentMethod: deleteField(),
+            commissionPaymentReceipt: deleteField(),
+            commissionPaymentCurrency: deleteField(),
+            commissionPaymentAmount: deleteField(),
+            commissionPaymentExchangeRate: deleteField(),
+          });
+        }
+
+        // Query and remove any matching agent_commission records from payments collection
+        try {
+          const paymentsSnap = await getDocs(
+            query(
+              collection(db, 'payments'),
+              where('insuranceId', '==', ins.id),
+              where('type', '==', 'agent_commission')
+            )
+          );
+          paymentsSnap.forEach(pDoc => {
+            batch.delete(pDoc.ref);
+          });
+        } catch (pErr) {
+          console.error("Error querying payments for commission deletion:", pErr);
+        }
+
+        // Log the activity
+        try {
+          const logRef = doc(collection(db, 'insuranceActivities'));
+          batch.set(logRef, {
+            insuranceId: ins.id,
+            type: 'manual',
+            description: mode === 'revert_to_pending'
+              ? `Se borró el pago de la comisión de $${(ins.agentCommission || 0).toFixed(2)} USD. La comisión fue revertida a estado 'Por Pagar'.`
+              : `Se borró la comisión pagada de $${(ins.agentCommission || 0).toFixed(2)} USD y se desvinculó del módulo de comisiones.`,
+            date: new Date(),
+            createdBy: auth.currentUser?.email || profile?.email || 'Sistema'
+          });
+        } catch (lErr) {
+          console.error("Error creating activity log:", lErr);
+        }
+      }
+
+      await batch.commit();
+
+      if (isBulkDelete) {
+        const deletedIds = targets.map(t => t.id!);
+        setSelectedCommissionIds(prev => prev.filter(id => !deletedIds.includes(id)));
+        alert(`Se han procesado ${targets.length} comisión(es) pagada(s) exitosamente.`);
+      } else {
+        alert(mode === 'revert_to_pending' 
+          ? "El pago de la comisión ha sido revertido exitosamente a 'Por Pagar'."
+          : "La comisión ha sido eliminada exitosamente del módulo."
+        );
+        if (selectedCommission?.id === commissionToDelete?.id) {
+          setSelectedCommission(null);
+        }
+      }
+
+      setShowDeleteModal(false);
+      setCommissionToDelete(null);
+      setIsBulkDelete(false);
+    } catch (error) {
+      console.error("Error al borrar comisión pagada:", error);
+      alert("Hubo un error al borrar la comisión pagada.");
+    } finally {
+      setIsDeleting(false);
     }
   };
 
@@ -272,7 +479,7 @@ export default function CommissionsManager({ profile, rolePermissions }: { profi
       const fechaRegreso = formatDateStr(c.endDate);
       const dias = c.days || 0;
 
-      const precioUSD = Number(c.totalPaid || c.totalPrice || 0);
+      const precioUSD = Number(c.totalPrice !== undefined && c.totalPrice !== null ? c.totalPrice : (c.totalFinal || 0));
       const comisionUSD = Number(c.agentCommission || c.comision || 0);
       const tc = Number(c.exchangeRate || 17.55);
 
@@ -330,10 +537,10 @@ export default function CommissionsManager({ profile, rolePermissions }: { profi
         'Fecha Salida',
         'Fecha Regreso',
         'Días',
-        'Precio',
+        'Precio del Seguro',
         'Comisión',
         'TC',
-        'Precio MXP',
+        'Precio del Seguro MXP',
         'Comisión MXP'
       ]],
       body: tableRows,
@@ -359,10 +566,10 @@ export default function CommissionsManager({ profile, rolePermissions }: { profi
         5: { halign: 'center' }, // Fecha Salida
         6: { halign: 'center' }, // Fecha Regreso
         7: { halign: 'center' }, // Dias
-        8: { halign: 'right' },  // Precio
+        8: { halign: 'right' },  // Precio del Seguro
         9: { halign: 'right' },  // Comision
         10: { halign: 'center' }, // TC
-        11: { halign: 'right' }, // Precio MXP
+        11: { halign: 'right' }, // Precio del Seguro MXP
         12: { halign: 'right' }  // Comision MXP
       },
       didParseCell: (data) => {
@@ -402,40 +609,85 @@ export default function CommissionsManager({ profile, rolePermissions }: { profi
     setIsPayingBulk(true);
     try {
       const batch = writeBatch(db);
+      const todayDate = new Date();
+      const todayStr = format(todayDate, 'yyyy-MM-dd');
+      const isMXP = bulkPaymentCurrency === 'MXP';
+      const rate = isMXP ? (Number(bulkPaymentExchangeRate) || 1) : 1;
       
       for (const id of selectedCommissionIds) {
         const commissionObj = commissions.find(c => c.id === id);
         if (!commissionObj) continue;
         
         const commRef = doc(db, 'insurances', id);
-        const paymentAmt = commissionObj.agentCommission || 0;
+        const amountUSD = Number(commissionObj.agentCommission || 0);
+        const amountMXP = isMXP ? Number((amountUSD * rate).toFixed(2)) : undefined;
         
         batch.update(commRef, {
           commissionStatus: 'paid',
-          commissionPaymentDate: bulkPaymentDate,
+          commissionPaymentDate: bulkPaymentDate || todayStr,
           commissionPaymentMethod: bulkPaymentMethod,
-          commissionPaymentReceipt: bulkReceiptUrl,
+          commissionPaymentReceipt: bulkReceiptUrl || '',
           commissionPaymentCurrency: bulkPaymentCurrency,
-          commissionPaymentAmount: paymentAmt,
-          commissionPaymentExchangeRate: bulkPaymentCurrency === 'MXP' ? bulkPaymentExchangeRate : 1
+          commissionPaymentAmount: isMXP ? amountMXP : amountUSD,
+          commissionPaymentExchangeRate: rate
         });
 
-        try {
-          const logRef = doc(collection(db, 'insuranceActivities'));
-          batch.set(logRef, {
-            insuranceId: id,
-            type: 'automatic',
-            description: `Se pagó comisión por $${paymentAmt.toLocaleString('es-MX', { minimumFractionDigits: 2 })} USD de forma masiva en lote (${bulkPaymentMethod}).`,
-            date: new Date(),
-            createdBy: auth.currentUser?.email || profile?.email || 'Sistema'
-          });
-        } catch (logErr) {
-          console.error("Error creating activity log in batch:", logErr);
+        // Query existing agent commission payments for this policy
+        const paymentsSnap = await getDocs(
+          query(
+            collection(db, 'payments'),
+            where('insuranceId', '==', id),
+            where('type', '==', 'agent_commission')
+          )
+        );
+
+        const paymentData: any = {
+          insuranceId: id,
+          type: 'agent_commission',
+          status: 'completed',
+          date: todayDate,
+          amount: amountUSD,
+          currency: bulkPaymentCurrency,
+          paymentMethod: bulkPaymentMethod,
+          receiptUrl: bulkReceiptUrl || '',
+          exchangeRate: rate,
+          notes: isMXP 
+            ? `Pago de comisión de agente en lote: $${amountUSD.toFixed(2)} USD equivalente a $${amountMXP?.toFixed(2)} MXP (T.C. ${rate.toFixed(2)})`
+            : `Pago de comisión de agente en lote liquidado en USD: $${amountUSD.toFixed(2)} USD`,
+          createdBy: auth.currentUser?.email || profile?.email || 'Sistema'
+        };
+        if (isMXP && amountMXP !== undefined) {
+          paymentData.amountMXP = amountMXP;
         }
+
+        if (!paymentsSnap.empty) {
+          const existingDoc = paymentsSnap.docs[0];
+          batch.update(existingDoc.ref, {
+            ...paymentData,
+            updatedAt: serverTimestamp()
+          });
+        } else {
+          const newPayRef = doc(collection(db, 'payments'));
+          batch.set(newPayRef, {
+            ...paymentData,
+            createdAt: serverTimestamp()
+          });
+        }
+
+        const logRef = doc(collection(db, 'insuranceActivities'));
+        batch.set(logRef, {
+          insuranceId: id,
+          type: 'automatic',
+          description: isMXP
+            ? `Se pagó comisión por $${amountUSD.toFixed(2)} USD (desglosado en $${amountMXP?.toFixed(2)} MXP al T.C. ${rate.toFixed(2)}) en lote (${bulkPaymentMethod}).`
+            : `Se pagó comisión por $${amountUSD.toFixed(2)} USD de forma masiva en lote (${bulkPaymentMethod}).`,
+          date: todayDate,
+          createdBy: auth.currentUser?.email || profile?.email || 'Sistema'
+        });
       }
       
       await batch.commit();
-      alert(`Se han marcado ${selectedCommissionIds.length} comisiones como pagadas con éxito.`);
+      alert(`Se han liquidado y generado pagos para ${selectedCommissionIds.length} póliza(s) con la fecha de hoy (${todayStr}).`);
       setSelectedCommissionIds([]);
       setShowBulkPaymentModal(false);
       setBulkReceiptUrl('');
@@ -776,6 +1028,19 @@ export default function CommissionsManager({ profile, rolePermissions }: { profi
                 <ArrowUpRight className="w-4.5 h-4.5" />
               </button>
             )}
+            {selectedCommissionIds.some(id => commissions.find(c => c.id === id)?.commissionStatus === 'paid') && canDeleteCommissions && (
+              <button
+                type="button"
+                onClick={() => {
+                  setIsBulkDelete(true);
+                  setShowDeleteModal(true);
+                }}
+                className="px-5 py-3 bg-red-600 hover:bg-red-700 text-white text-xs font-black rounded-xl transition-all shadow-lg shadow-red-600/20 uppercase tracking-widest flex items-center gap-2 cursor-pointer"
+              >
+                <Trash2 className="w-4.5 h-4.5" />
+                Borrar Pagadas ({selectedCommissionIds.filter(id => commissions.find(c => c.id === id)?.commissionStatus === 'paid').length})
+              </button>
+            )}
             <button
               type="button"
               onClick={() => setSelectedCommissionIds([])}
@@ -855,8 +1120,8 @@ export default function CommissionsManager({ profile, rolePermissions }: { profi
                 {/* Amount & Status */}
                 <div className="flex flex-col justify-center">
                   <div className="mb-3">
-                    <p className="text-[10px] text-gray-400 font-bold uppercase mb-0.5">Monto Cobrado</p>
-                    <p className="text-sm font-bold text-gray-900">${(c.totalPaid || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD</p>
+                    <p className="text-[10px] text-gray-400 font-bold uppercase mb-0.5">Precio del Seguro</p>
+                    <p className="text-sm font-bold text-gray-900">${Number(c.totalPrice !== undefined && c.totalPrice !== null ? c.totalPrice : (c.totalFinal || 0)).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD</p>
                   </div>
                   <div>
                     <p className="text-[10px] text-gray-400 font-bold uppercase mb-0.5">Monto Comisión</p>
@@ -890,6 +1155,20 @@ export default function CommissionsManager({ profile, rolePermissions }: { profi
                           </a>
                         )}
                       </div>
+                      {c.commissionPaymentCurrency === 'MXP' ? (
+                        <div className="mt-1 pt-1 border-t border-gray-100">
+                          <p className="text-[10px] text-amber-700 font-bold">
+                            ${Number(c.commissionPaymentAmount || ((c.agentCommission || 0) * (c.commissionPaymentExchangeRate || 1))).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MXP
+                          </p>
+                          <p className="text-[9px] text-gray-400">
+                            Equivalente de ${(c.agentCommission || 0).toFixed(2)} USD (T.C. {Number(c.commissionPaymentExchangeRate || 1).toFixed(2)})
+                          </p>
+                        </div>
+                      ) : (
+                        <p className="text-[10px] text-blue-700 font-bold">
+                          ${(c.commissionPaymentAmount || c.agentCommission || 0).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD
+                        </p>
+                      )}
                     </div>
                   ) : (
                     <div className="flex items-center gap-2 text-amber-600">
@@ -920,19 +1199,35 @@ export default function CommissionsManager({ profile, rolePermissions }: { profi
                 {c.commissionStatus === 'confirmed' ? (
                   <button 
                     onClick={() => setSelectedCommission(c)}
-                    className="px-4 py-2 bg-green-600 text-white rounded-xl text-xs font-bold hover:bg-green-700 transition-all flex items-center gap-2 shadow-sm shadow-green-100"
+                    className="px-4 py-2 bg-green-600 text-white rounded-xl text-xs font-bold hover:bg-green-700 transition-all flex items-center gap-2 shadow-sm shadow-green-100 cursor-pointer"
                   >
                     Pagar comisión
                     <ArrowUpRight className="w-4 h-4" />
                   </button>
                 ) : (
-                  <button 
-                    onClick={() => setSelectedCommission(c)}
-                    className="px-4 py-2 bg-gray-100 text-gray-600 rounded-xl text-xs font-bold hover:bg-gray-200 transition-all flex items-center gap-2"
-                  >
-                    Ver Detalle
-                    <Eye className="w-4 h-4" />
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button 
+                      onClick={() => setSelectedCommission(c)}
+                      className="px-4 py-2 bg-gray-100 text-gray-600 rounded-xl text-xs font-bold hover:bg-gray-200 transition-all flex items-center gap-2 cursor-pointer"
+                    >
+                      Ver Detalle
+                      <Eye className="w-4 h-4" />
+                    </button>
+                    {canDeleteCommissions && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCommissionToDelete(c);
+                          setIsBulkDelete(false);
+                          setShowDeleteModal(true);
+                        }}
+                        className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-all cursor-pointer"
+                        title="Borrar comisión pagada"
+                      >
+                        <Trash2 className="w-4.5 h-4.5" />
+                      </button>
+                    )}
+                  </div>
                 )}
               </div>
             </div>
@@ -984,6 +1279,10 @@ export default function CommissionsManager({ profile, rolePermissions }: { profi
                   <span className="text-[10px] font-bold text-blue-600 uppercase tracking-tighter opacity-70">Agente</span>
                   <span className="text-sm font-bold text-blue-900">{getAgentName(selectedCommission)}</span>
                 </div>
+                <div className="flex flex-col items-center">
+                  <span className="text-[10px] font-bold text-blue-600 uppercase tracking-tighter opacity-70">Precio del Seguro</span>
+                  <span className="text-sm font-bold text-blue-900">${Number(selectedCommission.totalPrice !== undefined && selectedCommission.totalPrice !== null ? selectedCommission.totalPrice : (selectedCommission.totalFinal || 0)).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD</span>
+                </div>
                 <div className="flex flex-col items-end">
                   <span className="text-[10px] font-bold text-blue-600 uppercase tracking-tighter opacity-70">Monto Comisión (Base)</span>
                   <span className="text-xl font-black text-blue-700">${(selectedCommission.agentCommission || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD</span>
@@ -1009,6 +1308,11 @@ export default function CommissionsManager({ profile, rolePermissions }: { profi
                       <p className="text-sm font-bold text-gray-900">
                         {selectedCommission.commissionPaymentAmount?.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} {selectedCommission.commissionPaymentCurrency}
                       </p>
+                      {selectedCommission.commissionPaymentCurrency === 'MXP' && (
+                        <p className="text-[10px] text-gray-500 font-medium mt-0.5">
+                          Equiv. ${(selectedCommission.agentCommission || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD
+                        </p>
+                      )}
                     </div>
                     {selectedCommission.commissionPaymentCurrency === 'MXP' && (
                       <div className="bg-gray-50 p-3 rounded-xl border border-gray-100">
@@ -1022,9 +1326,9 @@ export default function CommissionsManager({ profile, rolePermissions }: { profi
                     <div className="bg-gray-50 p-4 rounded-xl border border-gray-100">
                       <p className="text-[10px] text-gray-400 font-bold uppercase mb-3">Comprobante de Pago</p>
                       <a 
-                        href={selectedCommission.commissionPaymentReceipt}
-                        target="_blank"
-                        rel="noopener noreferrer"
+                        href={selectedCommission.commissionPaymentReceipt} 
+                        target="_blank" 
+                        rel="noopener noreferrer" 
                         className="flex items-center gap-3 p-3 bg-white rounded-xl border border-gray-200 hover:border-blue-300 hover:bg-blue-50 transition-all group"
                       >
                         <div className="p-2 bg-blue-50 group-hover:bg-blue-100 rounded-lg transition-colors">
@@ -1075,7 +1379,7 @@ export default function CommissionsManager({ profile, rolePermissions }: { profi
 
                   <div className="grid grid-cols-2 gap-4">
                     <div>
-                      <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1 ml-1">Monto a Pagar</label>
+                      <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1 ml-1">Monto a Pagar (USD)</label>
                       <div className="relative">
                         <DollarSign className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
                         <input 
@@ -1100,6 +1404,25 @@ export default function CommissionsManager({ profile, rolePermissions }: { profi
                       </div>
                     )}
                   </div>
+
+                  {paymentCurrency === 'MXP' && (
+                    <div className="bg-amber-50/90 p-4 rounded-2xl border border-amber-200/80 space-y-2 animate-in fade-in duration-200">
+                      <div className="flex items-center justify-between text-xs text-amber-900 font-medium">
+                        <span>Comisión Base (USD):</span>
+                        <span className="font-bold">${(selectedCommission.agentCommission || paymentAmount).toFixed(2)} USD</span>
+                      </div>
+                      <div className="flex items-center justify-between text-xs text-amber-900 font-medium">
+                        <span>Tipo de Cambio:</span>
+                        <span className="font-bold">{paymentExchangeRate.toFixed(2)}</span>
+                      </div>
+                      <div className="flex items-center justify-between text-sm font-black text-amber-950 pt-2 border-t border-amber-200/70">
+                        <span>Total Desglosado en MXP:</span>
+                        <span className="text-base text-amber-700 font-extrabold">
+                          ${((selectedCommission.agentCommission || paymentAmount) * paymentExchangeRate).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MXP
+                        </span>
+                      </div>
+                    </div>
+                  )}
 
                   <div>
                     <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1 ml-1">Forma de Pago</label>
@@ -1163,15 +1486,29 @@ export default function CommissionsManager({ profile, rolePermissions }: { profi
             <div className="p-6 bg-gray-50 border-t border-gray-100 flex gap-3">
               <button 
                 onClick={() => setSelectedCommission(null)}
-                className="flex-1 py-3 px-4 rounded-xl text-sm font-bold text-gray-500 hover:bg-gray-200 transition-all"
+                className="flex-1 py-3 px-4 rounded-xl text-sm font-bold text-gray-500 hover:bg-gray-200 transition-all cursor-pointer"
               >
                 {selectedCommission.commissionStatus === 'paid' ? 'Cerrar' : 'Cancelar'}
               </button>
-              {selectedCommission.commissionStatus !== 'paid' && profile?.role !== 'agent' && (
+              {selectedCommission.commissionStatus === 'paid' && canDeleteCommissions && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setCommissionToDelete(selectedCommission);
+                    setIsBulkDelete(false);
+                    setShowDeleteModal(true);
+                  }}
+                  className="flex-1 py-3 px-4 bg-red-50 text-red-600 hover:bg-red-100 border border-red-200 rounded-xl text-sm font-bold transition-all flex items-center justify-center gap-2 cursor-pointer"
+                >
+                  <Trash2 className="w-4 h-4" />
+                  Borrar Comisión Pagada
+                </button>
+              )}
+              {selectedCommission.commissionStatus !== 'paid' && canDeleteCommissions && (
                 <button 
                   onClick={handleMarkAsPaid}
                   disabled={saving || uploadingReceipt}
-                  className="flex-1 py-3 px-4 bg-blue-600 text-white rounded-xl text-sm font-bold hover:bg-blue-700 transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+                  className="flex-1 py-3 px-4 bg-blue-600 text-white rounded-xl text-sm font-bold hover:bg-blue-700 transition-all disabled:opacity-50 flex items-center justify-center gap-2 cursor-pointer"
                 >
                   {saving && <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />}
                   Confirmar Pago
@@ -1259,6 +1596,27 @@ export default function CommissionsManager({ profile, rolePermissions }: { profi
                   </div>
                 )}
 
+                {bulkPaymentCurrency === 'MXP' && (
+                  <div className="bg-amber-50/90 p-4 rounded-2xl border border-amber-200/80 space-y-2 animate-in fade-in duration-200">
+                    <div className="flex items-center justify-between text-xs text-amber-900 font-medium">
+                      <span>Total Comisiones (USD):</span>
+                      <span className="font-bold">
+                        ${selectedCommissionIds.reduce((sum, id) => sum + (commissions.find(c => c.id === id)?.agentCommission || 0), 0).toFixed(2)} USD
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between text-xs text-amber-900 font-medium">
+                      <span>Tipo de Cambio:</span>
+                      <span className="font-bold">{bulkPaymentExchangeRate.toFixed(2)}</span>
+                    </div>
+                    <div className="flex items-center justify-between text-sm font-black text-amber-950 pt-2 border-t border-amber-200/70">
+                      <span>Total Desglosado en MXP:</span>
+                      <span className="text-base text-amber-700 font-extrabold">
+                        ${(selectedCommissionIds.reduce((sum, id) => sum + (commissions.find(c => c.id === id)?.agentCommission || 0), 0) * bulkPaymentExchangeRate).toLocaleString('es-MX', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} MXP
+                      </span>
+                    </div>
+                  </div>
+                )}
+
                 <div>
                   <label className="block text-[10px] font-bold text-gray-400 uppercase mb-1 ml-1">Forma de Pago</label>
                   <div className="relative">
@@ -1334,6 +1692,151 @@ export default function CommissionsManager({ profile, rolePermissions }: { profi
               >
                 {isPayingBulk && <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />}
                 Confirmar Pago Masivo
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal de Confirmación para Borrar Comisiones Pagadas */}
+      {showDeleteModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
+          <div className="bg-white w-full max-w-lg rounded-3xl shadow-2xl border border-gray-100 overflow-hidden flex flex-col animate-in zoom-in-95 duration-200">
+            {/* Header */}
+            <div className="p-6 border-b border-gray-100 flex justify-between items-center bg-red-50/50">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 bg-red-100 text-red-600 rounded-xl">
+                  <Trash2 className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-base font-bold text-gray-900">
+                    {isBulkDelete ? 'Borrar Comisiones Pagadas' : 'Borrar Comisión Pagada'}
+                  </h3>
+                  <p className="text-xs text-gray-500">
+                    {isBulkDelete
+                      ? `${selectedCommissionIds.filter(id => commissions.find(c => c.id === id)?.commissionStatus === 'paid').length} comisión(es) pagada(s) seleccionada(s)`
+                      : `Asegurado: ${commissionToDelete?.firstName} ${commissionToDelete?.lastName}`
+                    }
+                  </p>
+                </div>
+              </div>
+              <button 
+                onClick={() => {
+                  setShowDeleteModal(false);
+                  setCommissionToDelete(null);
+                  setIsBulkDelete(false);
+                }}
+                disabled={isDeleting}
+                className="p-2 hover:bg-gray-100 rounded-full transition-colors cursor-pointer text-gray-400"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Body */}
+            <div className="p-6 space-y-5">
+              {!isBulkDelete && commissionToDelete && (
+                <div className="bg-gray-50 p-4 rounded-2xl border border-gray-100 space-y-2 text-xs">
+                  <div className="flex justify-between">
+                    <span className="text-gray-400 font-medium">Agente:</span>
+                    <span className="font-bold text-gray-800">{getAgentName(commissionToDelete)}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-400 font-medium">Póliza / Plan:</span>
+                    <span className="font-bold text-gray-800">{commissionToDelete.policyName || commissionToDelete.policyId || 'S/N'}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-gray-400 font-medium">Monto Comisión:</span>
+                    <span className="font-black text-blue-600">${(commissionToDelete.agentCommission || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD</span>
+                  </div>
+                  <div className="flex justify-between border-t border-gray-200/60 pt-2 mt-2">
+                    <span className="text-gray-400 font-medium">Pago registrado:</span>
+                    <span className="font-bold text-emerald-700">
+                      {commissionToDelete.commissionPaymentDate} ({commissionToDelete.commissionPaymentMethod})
+                    </span>
+                  </div>
+                  {commissionToDelete.commissionPaymentReceipt && (
+                    <div className="flex justify-between items-center pt-1">
+                      <span className="text-gray-400 font-medium">Comprobante:</span>
+                      <a 
+                        href={commissionToDelete.commissionPaymentReceipt} 
+                        target="_blank" 
+                        rel="noopener noreferrer" 
+                        className="text-blue-600 hover:underline flex items-center gap-1 font-semibold"
+                      >
+                        <Eye className="w-3.5 h-3.5" /> Ver comprobante
+                      </a>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <p className="text-xs text-gray-600 leading-relaxed">
+                Selecciona la acción que deseas realizar con {isBulkDelete ? 'las comisiones pagadas seleccionadas' : 'esta comisión pagada'}:
+              </p>
+
+              {/* Action Option 1: Revert payment */}
+              <div className="p-4 rounded-2xl border-2 border-amber-100 bg-amber-50/40 hover:bg-amber-50/80 transition-all space-y-1">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <RotateCcw className="w-4 h-4 text-amber-600" />
+                    <span className="text-xs font-black text-amber-900 uppercase">Opción 1: Revertir Pago a 'Por Pagar'</span>
+                  </div>
+                </div>
+                <p className="text-[11px] text-amber-800/80 leading-normal">
+                  Elimina el registro de pago, comprobante y datos de liquidación. La comisión volverá al estado <strong>"Por Pagar"</strong> para que pueda liquidarse nuevamente.
+                </p>
+                <div className="pt-2">
+                  <button
+                    type="button"
+                    onClick={() => handleExecuteDeleteCommission('revert_to_pending')}
+                    disabled={isDeleting}
+                    className="w-full py-2.5 px-4 bg-amber-500 hover:bg-amber-600 text-white rounded-xl text-xs font-black transition-all shadow-sm flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                  >
+                    {isDeleting ? <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : <RotateCcw className="w-4 h-4" />}
+                    Revertir a 'Por Pagar'
+                  </button>
+                </div>
+              </div>
+
+              {/* Action Option 2: Completely remove */}
+              <div className="p-4 rounded-2xl border-2 border-red-100 bg-red-50/40 hover:bg-red-50/80 transition-all space-y-1">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Trash2 className="w-4 h-4 text-red-600" />
+                    <span className="text-xs font-black text-red-900 uppercase">Opción 2: Eliminar Comisión por Completo</span>
+                  </div>
+                </div>
+                <p className="text-[11px] text-red-800/80 leading-normal">
+                  Elimina el pago y desvincula la comisión de este módulo (establece el estado en no confirmado).
+                </p>
+                <div className="pt-2">
+                  <button
+                    type="button"
+                    onClick={() => handleExecuteDeleteCommission('remove_commission')}
+                    disabled={isDeleting}
+                    className="w-full py-2.5 px-4 bg-red-600 hover:bg-red-700 text-white rounded-xl text-xs font-black transition-all shadow-sm flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+                  >
+                    {isDeleting ? <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                    Eliminar Comisión Definitivamente
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Footer */}
+            <div className="p-4 bg-gray-50 border-t border-gray-100 flex justify-end">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowDeleteModal(false);
+                  setCommissionToDelete(null);
+                  setIsBulkDelete(false);
+                }}
+                disabled={isDeleting}
+                className="py-2 px-5 rounded-xl text-xs font-bold text-gray-500 hover:bg-gray-200 transition-all cursor-pointer"
+              >
+                Cancelar
               </button>
             </div>
           </div>

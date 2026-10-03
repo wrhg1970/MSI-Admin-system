@@ -60,6 +60,7 @@ const NotificationsManager = lazyWithRetry(() => import('./components/Notificati
 const HistoricoManager = lazyWithRetry(() => import('./components/HistoricoManager'));
 const QuoteForm = lazyWithRetry(() => import('./components/QuoteForm'));
 const Auth = lazyWithRetry(() => import('./components/Auth'));
+const PublicPaymentCheckout = lazyWithRetry(() => import('./components/PublicPaymentCheckout'));
 
 function LoadingScreen() {
   return (
@@ -118,7 +119,7 @@ export default function App() {
         const isSuperAdmin = verifiedEmail && superAdmins.includes(verifiedEmail);
 
         // Heavy startup correction and seed tasks - optimized to run exactly once per database for super admin
-        const sysInitKey = `sys_init_done_v5_${firebaseConfig.projectId}_${firebaseConfig.firestoreDatabaseId || 'default'}`;
+        const sysInitKey = `sys_init_done_v7_debtor_sync_${firebaseConfig.projectId}_${firebaseConfig.firestoreDatabaseId || 'default'}`;
         const sysInitDone = typeof window !== 'undefined' && window.localStorage && window.localStorage.getItem(sysInitKey) === 'true';
         if (!sysInitDone && isSuperAdmin) {
           Promise.all([
@@ -186,6 +187,68 @@ export default function App() {
                       await updateDoc(docSnap.ref, correct);
                       console.log(`Successfully auto-corrected ${data.firstName} ${data.lastName} (Invoice 872229) in Firestore.`);
                     }
+                  }
+                }
+              });
+            }),
+            // 3. Auto-reconcile liquidated insurances and ensure Ruth Rodríguez Ruiz, Ricardo Cruz Rosales, Eric Andrew Helin, and any policy with balance <= $5 USD are properly marked as 'paid'
+            getDocs(collection(db, 'insurances')).then((snap) => {
+              snap.forEach(async (docSnap) => {
+                const data = docSnap.data();
+                const docId = docSnap.id;
+                const action = String(data.actionType || '').toUpperCase();
+                if (action === 'CAN' || data.status === 'cancelled') return;
+
+                const fullName = `${data.firstName || ''} ${data.lastName || ''}`.trim().toLowerCase();
+                const totalFinal = data.totalFinal !== undefined && data.totalFinal !== null && data.totalFinal !== ''
+                  ? Number(data.totalFinal)
+                  : Number(data.totalPrice || 0);
+                const currentPaid = Number(data.totalPaid || 0);
+                const balance = Number((totalFinal - currentPaid).toFixed(2));
+
+                let needsUpdate = false;
+                const updateFields: any = {};
+
+                // 1. Specific cases mentioned by the user
+                if (docId === '8CxhFeH7ypIQUfcqXc04' || (fullName.includes('ruth') && fullName.includes('rodriguez') && fullName.includes('ruiz'))) {
+                  if (data.status !== 'paid' || data.totalPaid !== 161.5) {
+                    needsUpdate = true;
+                    updateFields.status = 'paid';
+                    updateFields.totalPaid = 161.5;
+                    updateFields.totalFinal = 161.5;
+                  }
+                } else if (docId === 'AaMwYK9GLToEHhYCapdz' || (fullName.includes('ricardo cruz') && fullName.includes('rosales'))) {
+                  if (data.status !== 'paid' || data.totalPaid !== 222.06) {
+                    needsUpdate = true;
+                    updateFields.status = 'paid';
+                    updateFields.totalPaid = 222.06;
+                    updateFields.totalFinal = 222.06;
+                  }
+                } else if (docId === 'alC7NBvwVSFJR2XcnX1M' || (fullName.includes('eric andrew') && fullName.includes('helin') && (data.requestDate === '2026-08-10' || data.startDate === '2026-08-12'))) {
+                  if (data.status !== 'paid' || data.totalPaid !== 68) {
+                    needsUpdate = true;
+                    updateFields.status = 'paid';
+                    updateFields.totalPaid = 68;
+                    updateFields.totalFinal = 68;
+                  }
+                } else {
+                  // 2. General rule: if pending debtor balance is <= $5 USD and there is an existing payment, or already marked as paid
+                  if (data.status === 'paid' && balance > 0 && balance <= 5) {
+                    needsUpdate = true;
+                    updateFields.totalPaid = totalFinal;
+                  } else if (balance <= 5 && currentPaid > 0 && data.status !== 'paid') {
+                    needsUpdate = true;
+                    updateFields.status = 'paid';
+                    updateFields.totalPaid = totalFinal;
+                  }
+                }
+
+                if (needsUpdate && Object.keys(updateFields).length > 0) {
+                  try {
+                    await updateDoc(docSnap.ref, updateFields);
+                    console.log(`Auto-reconciled policy ${docId} (${data.firstName} ${data.lastName}) to paid status.`);
+                  } catch (e) {
+                    console.warn(`Could not auto-reconcile policy ${docId}:`, e);
                   }
                 }
               });
@@ -423,6 +486,19 @@ export default function App() {
     );
   }
 
+  const isPublicCheckout = 
+    typeof window !== 'undefined' && 
+    (window.location.search.includes('stripe_status=') || 
+     window.location.pathname.startsWith('/pay'));
+
+  if (isPublicCheckout) {
+    return (
+      <Suspense fallback={<LoadingScreen />}>
+        <PublicPaymentCheckout />
+      </Suspense>
+    );
+  }
+
   if (!user) {
     return <Auth />;
   }
@@ -473,6 +549,7 @@ export default function App() {
                   <Route path="/claims" element={hasPermission('claims') ? <ClaimsManager profile={profile} rolePermissions={rolePermissions} /> : <Navigate to="/" />} />
                   <Route path="/notifications" element={hasPermission('notifications') ? <NotificationsManager profile={profile} rolePermissions={rolePermissions} /> : <Navigate to="/" />} />
                   <Route path="/config" element={hasPermission('config') ? <ConfigPanel profile={profile} rolePermissions={rolePermissions} /> : <Navigate to="/" />} />
+                  <Route path="/pay/:insuranceId" element={<PublicPaymentCheckout />} />
                   <Route path="*" element={<Navigate to="/" />} />
                 </Routes>
               </Suspense>
