@@ -10,6 +10,7 @@ import Layout from './components/Layout';
 import AppSafeFallback from './components/AppSafeFallback';
 import { createContext, useContext } from 'react';
 import { FirestoreDataProvider } from './context/FirestoreDataContext';
+import { ImpersonationProvider, ImpersonatedAgent } from './context/ImpersonationContext';
 
 // Create a context for company settings
 export const CompanyContext = createContext<{ settings: any }>({ settings: null });
@@ -49,6 +50,7 @@ const InsuranceForm = lazyWithRetry(() => import('./components/InsuranceForm'));
 const AdminPanel = lazyWithRetry(() => import('./components/AdminPanel'));
 const PoliciesManager = lazyWithRetry(() => import('./components/PoliciesManager'));
 const ClientsManager = lazyWithRetry(() => import('./components/ClientsManager'));
+const ClientAccessManager = lazyWithRetry(() => import('./components/ClientAccessManager'));
 const CatalogsManager = lazyWithRetry(() => import('./components/CatalogsManager'));
 const CommissionsManager = lazyWithRetry(() => import('./components/CommissionsManager'));
 const InsurancePlansManager = lazyWithRetry(() => import('./components/InsurancePlansManager'));
@@ -76,6 +78,15 @@ export default function App() {
   const [rolePermissions, setRolePermissions] = useState<CustomRole | null>(null);
   const [companySettings, setCompanySettings] = useState<any>(null);
   const [loading, setLoading] = useState(true);
+  const [impersonatedAgent, setImpersonatedAgent] = useState<ImpersonatedAgent | null>(() => {
+    try {
+      if (typeof window === 'undefined') return null;
+      const stored = sessionStorage.getItem('impersonated_agent');
+      return stored ? JSON.parse(stored) : null;
+    } catch {
+      return null;
+    }
+  });
 
   useEffect(() => {
     let unsubCompany: (() => void) | null = null;
@@ -381,7 +392,32 @@ export default function App() {
                   console.warn("Error deleting pre-registered doc:", e);
                 }
               }
-            } else if (!isSuperAdmin) {
+            }
+
+            // Also check if the email exists in the 'clients' collection (as Agent or Corporate)
+            if (!preRegisteredData && verifiedEmail) {
+              try {
+                const clientsRef = collection(db, 'clients');
+                const clientQ = query(clientsRef, where('email', '==', verifiedEmail));
+                const clientSnap = await getDocs(clientQ);
+                if (!clientSnap.empty) {
+                  const cDoc = clientSnap.docs[0];
+                  const cData = cDoc.data();
+                  preRegisteredData = {
+                    displayName: cData.commercialName || cData.legalName || `${cData.firstName || ''} ${cData.lastName || ''}`.trim() || verifiedEmail,
+                    role: 'agent',
+                    commission: cData.commission || 0,
+                    canCreatePolicies: true,
+                    clientId: cDoc.id,
+                    linkedAgents: cData.linkedAgents || []
+                  };
+                }
+              } catch (clientErr) {
+                console.warn("Error checking clients collection for pre-registration:", clientErr);
+              }
+            }
+
+            if (!preRegisteredData && !isSuperAdmin) {
               // User is NOT pre-registered AND NOT a super admin! Block them!
               console.warn(`Blocking login for unregistered user: ${verifiedEmail}`);
               localStorage.setItem('auth_error', 'Acceso denegado. Su cuenta no está dada de alta en el sistema. Por favor, contacte a un administrador.');
@@ -405,7 +441,9 @@ export default function App() {
               displayName: firebaseUser.displayName || preRegisteredData?.displayName || '',
               role: isSuperAdmin ? 'super_admin' : (preRegisteredData?.role || 'client'),
               commission: preRegisteredData?.commission || 0,
+              canCreatePolicies: preRegisteredData?.canCreatePolicies !== undefined ? preRegisteredData.canCreatePolicies : (preRegisteredData?.role === 'agent' ? true : false),
               createdAt: preRegisteredData?.createdAt || serverTimestamp(),
+              ...(preRegisteredData?.clientId ? { clientId: preRegisteredData.clientId } : {})
             };
             try {
               await setDoc(docRef, userProfile);
@@ -503,7 +541,31 @@ export default function App() {
     return <Auth />;
   }
 
+  const superAdminEmails = ['ventas@misegurointernacional.com', 'wrhg1970@gmail.com'];
+  const userEmail = profile?.email || (user?.email || (user?.isAnonymous ? localStorage.getItem('verified_email') : '')) || '';
+  const isRealSuperAdmin = profile?.role === 'super_admin' || (userEmail && superAdminEmails.includes(userEmail.toLowerCase()));
+  const activeImpersonation = isRealSuperAdmin ? impersonatedAgent : null;
+
+  const effectiveProfile: UserProfile | null = activeImpersonation
+    ? {
+        uid: activeImpersonation.uid || activeImpersonation.clientId || 'agent-preview-uid',
+        email: activeImpersonation.email,
+        displayName: activeImpersonation.displayName,
+        role: 'agent',
+        commission: activeImpersonation.commission ?? 15,
+        canCreatePolicies: activeImpersonation.canCreatePolicies !== false,
+        clientId: activeImpersonation.clientId,
+        linkedAgents: activeImpersonation.linkedAgents || [],
+        createdAt: profile?.createdAt || new Date().toISOString(),
+      }
+    : profile;
+
   const hasPermission = (menuId: string, action: 'view' | 'create' | 'edit' | 'delete' = 'view') => {
+    // If agent or simulating an agent, strictly allow only client-access
+    if (effectiveProfile?.role === 'agent') {
+      return menuId === 'clients' || menuId === 'client-access';
+    }
+
     if (profile?.role === 'super_admin') return true;
     
     // Default system roles permissions if no custom role found
@@ -511,10 +573,6 @@ export default function App() {
       if (profile?.role === 'admin' || profile?.role === 'director') return true;
       if (profile?.role === 'seguros') return ['dashboard', 'request', 'clients', 'policies', 'catalogs', 'insurance-plans', 'providers', 'claims', 'historico'].includes(menuId);
       if (profile?.role === 'administracion') return ['dashboard', 'reports', 'commissions', 'providers', 'historico'].includes(menuId);
-      if (profile?.role === 'agent') {
-        if (['dashboard', 'request', 'clients', 'policies', 'commissions', 'historico'].includes(menuId)) return action === 'view' || action === 'create' || action === 'edit';
-        return false;
-      }
       if (profile?.role === 'client') {
         if (['dashboard', 'request', 'policies', 'historico'].includes(menuId)) return action === 'view';
         return false;
@@ -529,32 +587,36 @@ export default function App() {
     <AppSafeFallback>
       <CompanyContext.Provider value={{ settings: companySettings }}>
         <FirestoreDataProvider userId={user?.uid}>
-          <Router>
-            <Layout profile={profile} rolePermissions={rolePermissions} companySettings={companySettings}>
-              <Suspense fallback={<LoadingScreen />}>
-                <Routes>
-                  <Route path="/" element={<Home profile={profile} rolePermissions={rolePermissions} />} />
-                  <Route path="/dashboard" element={hasPermission('dashboard') ? <Dashboard profile={profile} /> : <Navigate to="/" />} />
-                  <Route path="/request" element={hasPermission('request') ? <InsuranceForm profile={profile} /> : <Navigate to="/" />} />
-                  <Route path="/quote" element={hasPermission('request') ? <QuoteForm profile={profile} /> : <Navigate to="/" />} />
-                  <Route path="/clients" element={hasPermission('clients') ? <ClientsManager profile={profile} rolePermissions={rolePermissions} /> : <Navigate to="/" />} />
-                  <Route path="/providers" element={hasPermission('providers') ? <ProvidersManager profile={profile} rolePermissions={rolePermissions} /> : <Navigate to="/" />} />
-                  <Route path="/policies" element={hasPermission('policies') ? <PoliciesManager profile={profile} rolePermissions={rolePermissions} /> : <Navigate to="/" />} />
-                  <Route path="/historico" element={hasPermission('historico') ? <HistoricoManager profile={profile} /> : <Navigate to="/" />} />
-                  <Route path="/catalogs" element={hasPermission('catalogs') ? <CatalogsManager profile={profile} rolePermissions={rolePermissions} /> : <Navigate to="/" />} />
-                  <Route path="/admin" element={hasPermission('admin') ? <AdminPanel profile={profile} rolePermissions={rolePermissions} /> : <Navigate to="/" />} />
-                  <Route path="/commissions" element={hasPermission('commissions') ? <CommissionsManager profile={profile} rolePermissions={rolePermissions} /> : <Navigate to="/" />} />
-                  <Route path="/reports" element={hasPermission('reports') ? <ReportsManager profile={profile} rolePermissions={rolePermissions} /> : <Navigate to="/" />} />
-                  <Route path="/insurance-plans" element={hasPermission('insurance-plans') ? <InsurancePlansManager profile={profile} rolePermissions={rolePermissions} /> : <Navigate to="/" />} />
-                  <Route path="/claims" element={hasPermission('claims') ? <ClaimsManager profile={profile} rolePermissions={rolePermissions} /> : <Navigate to="/" />} />
-                  <Route path="/notifications" element={hasPermission('notifications') ? <NotificationsManager profile={profile} rolePermissions={rolePermissions} /> : <Navigate to="/" />} />
-                  <Route path="/config" element={hasPermission('config') ? <ConfigPanel profile={profile} rolePermissions={rolePermissions} /> : <Navigate to="/" />} />
-                  <Route path="/pay/:insuranceId" element={<PublicPaymentCheckout />} />
-                  <Route path="*" element={<Navigate to="/" />} />
-                </Routes>
-              </Suspense>
-            </Layout>
-          </Router>
+          <ImpersonationProvider realProfile={profile} onImpersonationChange={setImpersonatedAgent}>
+            <Router>
+              <Layout profile={effectiveProfile} rolePermissions={activeImpersonation ? null : rolePermissions} companySettings={companySettings}>
+                <Suspense fallback={<LoadingScreen />}>
+                  <Routes>
+                    <Route path="/" element={effectiveProfile?.role === 'agent' ? <Navigate to="/client-access" replace /> : <Home profile={effectiveProfile} rolePermissions={activeImpersonation ? null : rolePermissions} />} />
+                    <Route path="/dashboard" element={hasPermission('dashboard') ? <Dashboard profile={effectiveProfile} /> : <Navigate to="/" />} />
+                    <Route path="/request" element={hasPermission('request') ? <InsuranceForm profile={effectiveProfile} /> : <Navigate to="/" />} />
+                    <Route path="/quote" element={hasPermission('request') ? <QuoteForm profile={effectiveProfile} /> : <Navigate to="/" />} />
+                    <Route path="/clients" element={effectiveProfile?.role === 'agent' ? <Navigate to="/client-access" replace /> : (hasPermission('clients') ? <ClientsManager profile={effectiveProfile} rolePermissions={activeImpersonation ? null : rolePermissions} /> : <Navigate to="/" />)} />
+                    <Route path="/client-access" element={hasPermission('clients') ? <ClientAccessManager profile={effectiveProfile} rolePermissions={activeImpersonation ? null : rolePermissions} /> : <Navigate to="/" />} />
+                    <Route path="/acceso-clientes" element={<Navigate to="/client-access" replace />} />
+                    <Route path="/providers" element={hasPermission('providers') ? <ProvidersManager profile={effectiveProfile} rolePermissions={activeImpersonation ? null : rolePermissions} /> : <Navigate to="/" />} />
+                    <Route path="/policies" element={hasPermission('policies') ? <PoliciesManager profile={effectiveProfile} rolePermissions={activeImpersonation ? null : rolePermissions} /> : <Navigate to="/" />} />
+                    <Route path="/historico" element={hasPermission('historico') ? <HistoricoManager profile={effectiveProfile} /> : <Navigate to="/" />} />
+                    <Route path="/catalogs" element={hasPermission('catalogs') ? <CatalogsManager profile={effectiveProfile} rolePermissions={activeImpersonation ? null : rolePermissions} /> : <Navigate to="/" />} />
+                    <Route path="/admin" element={hasPermission('admin') ? <AdminPanel profile={effectiveProfile} rolePermissions={activeImpersonation ? null : rolePermissions} /> : <Navigate to="/" />} />
+                    <Route path="/commissions" element={hasPermission('commissions') ? <CommissionsManager profile={effectiveProfile} rolePermissions={activeImpersonation ? null : rolePermissions} /> : <Navigate to="/" />} />
+                    <Route path="/reports" element={hasPermission('reports') ? <ReportsManager profile={effectiveProfile} rolePermissions={activeImpersonation ? null : rolePermissions} /> : <Navigate to="/" />} />
+                    <Route path="/insurance-plans" element={hasPermission('insurance-plans') ? <InsurancePlansManager profile={effectiveProfile} rolePermissions={activeImpersonation ? null : rolePermissions} /> : <Navigate to="/" />} />
+                    <Route path="/claims" element={hasPermission('claims') ? <ClaimsManager profile={effectiveProfile} rolePermissions={activeImpersonation ? null : rolePermissions} /> : <Navigate to="/" />} />
+                    <Route path="/notifications" element={hasPermission('notifications') ? <NotificationsManager profile={effectiveProfile} rolePermissions={activeImpersonation ? null : rolePermissions} /> : <Navigate to="/" />} />
+                    <Route path="/config" element={hasPermission('config') ? <ConfigPanel profile={effectiveProfile} rolePermissions={activeImpersonation ? null : rolePermissions} /> : <Navigate to="/" />} />
+                    <Route path="/pay/:insuranceId" element={<PublicPaymentCheckout />} />
+                    <Route path="*" element={<Navigate to="/" />} />
+                  </Routes>
+                </Suspense>
+              </Layout>
+            </Router>
+          </ImpersonationProvider>
         </FirestoreDataProvider>
       </CompanyContext.Provider>
     </AppSafeFallback>

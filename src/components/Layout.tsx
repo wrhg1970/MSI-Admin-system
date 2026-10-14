@@ -15,6 +15,7 @@ import {
   X,
   Users,
   Building2,
+  User,
   ShieldAlert,
   ShieldCheck,
   BookOpen,
@@ -31,11 +32,14 @@ import {
   AlertCircle,
   Bell,
   Compass,
-  FileSpreadsheet
+  FileSpreadsheet,
+  Eye
 } from 'lucide-react';
 import { useState } from 'react';
 import { APP_LOGO, LOGO_LINK } from '../constants';
 import HeaderSearch from './HeaderSearch';
+import { useImpersonation } from '../context/ImpersonationContext';
+import ImpersonationModal from './ImpersonationModal';
 
 interface LayoutProps {
   children: ReactNode;
@@ -53,27 +57,48 @@ export default function Layout({ children, profile, rolePermissions, companySett
     : (companySettings?.logoUrl || APP_LOGO);
   const location = useLocation();
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
+  const [isClientsOpen, setIsClientsOpen] = useState(location.pathname.includes('clients') || location.pathname.includes('client-access'));
   const [isCatalogsOpen, setIsCatalogsOpen] = useState(location.pathname.includes('insurance-plans') || location.pathname.includes('sales-channels') || location.pathname.includes('catalogs'));
   const [isAdminOpen, setIsAdminOpen] = useState(location.pathname.includes('admin'));
   const [isPoliciesOpen, setIsPoliciesOpen] = useState(location.pathname.includes('policies'));
   const [isRequestOpen, setIsRequestOpen] = useState(location.pathname.includes('request') || location.pathname.includes('quote'));
 
+  const { 
+    impersonatedAgent, 
+    setImpersonatedAgent, 
+    isModalOpen, 
+    openModal, 
+    closeModal, 
+    exitImpersonation, 
+    isRealSuperAdmin 
+  } = useImpersonation();
+
   const isPathActive = (p: string) => {
+    if (p === '/policies') {
+      return location.pathname === '/policies' && (location.search === '' || location.search.includes('tab=list'));
+    }
+    if (p === '/clients?tab=dashboard') {
+      return location.pathname === '/clients' && (location.search.includes('tab=dashboard') || location.search === '');
+    }
     if (p.includes('?')) {
       const parts = p.split('?');
       const pathPart = parts[0];
       const queryPart = parts[1];
       return location.pathname === pathPart && location.search.includes(queryPart);
     }
-    if (p === '/policies') {
-      return location.pathname === '/policies' && (location.search === '' || location.search.includes('tab=list'));
-    }
     return location.pathname === p;
   };
 
   const isSuperAdmin = profile?.role === 'super_admin';
 
+  const isAgent = profile?.role === 'agent';
+
   const hasPermission = (menuId: string, action: 'view' | 'create' | 'edit' | 'delete' = 'view') => {
+    // In agent role, only Acceso Clientes is accessible
+    if (isAgent) {
+      return menuId === 'client-access' || menuId === 'clients';
+    }
+
     if (isSuperAdmin) return true;
     
     // Default system roles permissions if no custom role found
@@ -81,10 +106,6 @@ export default function Layout({ children, profile, rolePermissions, companySett
       if (profile?.role === 'admin' || profile?.role === 'director') return true;
       if (profile?.role === 'seguros') return ['dashboard', 'request', 'clients', 'policies', 'catalogs', 'insurance-plans', 'providers', 'claims', 'historico'].includes(menuId);
       if (profile?.role === 'administracion') return ['dashboard', 'reports', 'commissions', 'providers', 'historico'].includes(menuId);
-      if (profile?.role === 'agent') {
-        if (['dashboard', 'request', 'clients', 'policies', 'historico'].includes(menuId)) return action === 'view' || action === 'create' || action === 'edit';
-        return false;
-      }
       if (profile?.role === 'client') {
         if (['dashboard', 'request', 'policies', 'historico'].includes(menuId)) return action === 'view';
         return false;
@@ -95,7 +116,19 @@ export default function Layout({ children, profile, rolePermissions, companySett
     return rolePermissions.menuPermissions?.[menuId]?.[action] || false;
   };
 
-  const navItems = [
+  // When viewing as agent, ONLY show "Acceso Clientes" and no other menu
+  const navItems = isAgent ? [
+    { 
+      name: 'Acceso Clientes', 
+      path: '/client-access', 
+      icon: ShieldCheck, 
+      color: 'text-violet-600', 
+      bg: 'bg-violet-50', 
+      activeBg: 'bg-violet-600', 
+      activeText: 'text-white', 
+      show: true 
+    }
+  ] : [
     { name: 'Inicio', path: '/', icon: HomeIcon, color: 'text-cyan-600', bg: 'bg-cyan-50', activeBg: 'bg-cyan-600', activeText: 'text-white', show: true },
     { name: 'Dashboard', path: '/dashboard', icon: LayoutDashboard, color: 'text-blue-600', bg: 'bg-blue-50', activeBg: 'bg-blue-600', activeText: 'text-white', show: hasPermission('dashboard') },
     { 
@@ -114,8 +147,24 @@ export default function Layout({ children, profile, rolePermissions, companySett
         { name: 'Cotizar Seguro', path: '/quote', icon: FileText, show: true },
       ]
     },
-    { name: 'Clientes', path: '/clients', icon: Users, color: 'text-violet-600', bg: 'bg-violet-50', activeBg: 'bg-violet-600', activeText: 'text-white', show: hasPermission('clients') },
-    { name: 'Proveedores', path: '/providers', icon: Building2, color: 'text-cyan-600', bg: 'bg-cyan-50', activeBg: 'bg-cyan-600', activeText: 'text-white', show: hasPermission('providers') },
+    { 
+      name: 'Clientes', 
+      icon: Users, 
+      color: 'text-violet-600', 
+      bg: 'bg-violet-50', 
+      activeBg: 'bg-violet-600', 
+      activeText: 'text-white',
+      isCollapsible: true,
+      isOpen: isClientsOpen,
+      setOpen: setIsClientsOpen,
+      show: hasPermission('clients'),
+      children: [
+        { name: 'Dashboard', path: '/clients?tab=dashboard', icon: LayoutDashboard, show: true },
+        { name: 'Acceso Clientes', path: '/client-access', icon: ShieldCheck, show: true },
+        { name: 'Agentes & Corporativos', path: '/clients?tab=agents', icon: Building2, show: true },
+        { name: 'Individuales', path: '/clients?tab=individuals', icon: User, show: true },
+      ]
+    },
     { 
       name: 'Polizas', 
       icon: ShieldCheck, 
@@ -180,6 +229,7 @@ export default function Layout({ children, profile, rolePermissions, companySett
   const handleLogout = async () => {
     try {
       console.log("Logging out...");
+      sessionStorage.removeItem('impersonated_agent');
       localStorage.removeItem('verified_email');
       await signOut(auth);
       console.log("Logged out successfully");
@@ -316,9 +366,32 @@ export default function Layout({ children, profile, rolePermissions, companySett
                 <p className="text-[10px] font-bold text-blue-600 uppercase tracking-tighter opacity-70 truncate">{profile?.role}</p>
               </div>
             </div>
+
+            {isRealSuperAdmin && !impersonatedAgent && (
+              <button
+                type="button"
+                onClick={openModal}
+                className="w-full mb-2.5 flex items-center justify-center gap-2 px-3 py-2.5 text-violet-700 bg-violet-50 hover:bg-violet-100 rounded-2xl transition-all duration-300 font-bold text-xs group border border-violet-200/70 cursor-pointer"
+              >
+                <Eye className="w-4 h-4 text-violet-600 group-hover:scale-110 transition-transform" />
+                <span>Vista como Agente</span>
+              </button>
+            )}
+
+            {impersonatedAgent && (
+              <button
+                type="button"
+                onClick={exitImpersonation}
+                className="w-full mb-2.5 flex items-center justify-center gap-2 px-3 py-2 text-amber-800 bg-amber-50 hover:bg-amber-100 rounded-2xl transition-all duration-300 font-bold text-xs group border border-amber-200 cursor-pointer"
+              >
+                <X className="w-4 h-4 text-amber-600" />
+                <span>Salir de Vista Agente</span>
+              </button>
+            )}
+
             <button
               onClick={handleLogout}
-              className="w-full flex items-center justify-center gap-2 px-4 py-3 text-red-600 bg-red-50 hover:bg-red-100 rounded-2xl transition-all duration-300 font-bold text-xs group"
+              className="w-full flex items-center justify-center gap-2 px-4 py-3 text-red-600 bg-red-50 hover:bg-red-100 rounded-2xl transition-all duration-300 font-bold text-xs group cursor-pointer"
             >
               <LogOut className="w-4 h-4 group-hover:-translate-x-1 transition-transform" />
               <span>Cerrar Sesión</span>
@@ -410,7 +483,35 @@ export default function Layout({ children, profile, rolePermissions, companySett
                 </Link>
               );
             })}
-            <div className="pt-4 mt-4 border-t border-gray-100">
+            <div className="pt-4 mt-4 border-t border-gray-100 space-y-2">
+              {isRealSuperAdmin && !impersonatedAgent && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsMobileMenuOpen(false);
+                    openModal();
+                  }}
+                  className="w-full flex items-center justify-center gap-2 px-4 py-3 text-violet-700 bg-violet-50 hover:bg-violet-100 rounded-2xl font-bold text-sm border border-violet-200 cursor-pointer"
+                >
+                  <Eye className="w-4 h-4 text-violet-600" />
+                  <span>Vista como Agente</span>
+                </button>
+              )}
+
+              {impersonatedAgent && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsMobileMenuOpen(false);
+                    exitImpersonation();
+                  }}
+                  className="w-full flex items-center justify-center gap-2 px-4 py-3 text-amber-800 bg-amber-50 hover:bg-amber-100 rounded-2xl font-bold text-sm border border-amber-200 cursor-pointer"
+                >
+                  <X className="w-4 h-4 text-amber-600" />
+                  <span>Salir de Vista Agente</span>
+                </button>
+              )}
+
               <button
                 onClick={handleLogout}
                 className="w-full flex items-center justify-center gap-2 px-4 py-4 text-red-600 bg-red-50 rounded-2xl font-bold text-sm"
@@ -425,16 +526,87 @@ export default function Layout({ children, profile, rolePermissions, companySett
 
       {/* Main Content */}
       <main className="flex-1 pt-16 md:pt-0 overflow-auto flex flex-col">
+        {/* Impersonation Notice Banner */}
+        {impersonatedAgent && (
+          <div className="bg-gradient-to-r from-amber-600 via-violet-700 to-indigo-800 text-white px-4 py-2.5 shadow-md flex items-center justify-between gap-3 text-xs z-40 sticky top-0 border-b border-white/20 animate-in slide-in-from-top-2">
+            <div className="flex items-center gap-3 flex-wrap">
+              <div className="flex items-center gap-1.5 bg-black/25 backdrop-blur-xs px-2.5 py-1 rounded-xl font-black uppercase text-[10px] tracking-wider border border-white/20">
+                <Eye className="w-3.5 h-3.5 text-amber-300" />
+                <span>Modo Vista como Agente</span>
+              </div>
+              <span className="font-semibold">
+                Viendo como: <strong className="font-black text-white underline">{impersonatedAgent.displayName}</strong>{' '}
+                <span className="text-white/80 font-normal">({impersonatedAgent.email})</span>
+              </span>
+              {impersonatedAgent.commission !== undefined && (
+                <span className="bg-white/20 px-2 py-0.5 rounded-lg font-bold text-[11px] text-white">
+                  Comisión: {impersonatedAgent.commission}%
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <Link
+                to="/client-access"
+                className="px-3 py-1.5 bg-white/20 hover:bg-white/30 text-white rounded-xl font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-xs"
+              >
+                <ShieldCheck className="w-3.5 h-3.5" />
+                <span>Acceso Clientes</span>
+              </Link>
+              <button
+                type="button"
+                onClick={openModal}
+                className="px-3 py-1.5 bg-white/20 hover:bg-white/30 text-white rounded-xl font-bold transition-all flex items-center gap-1.5 cursor-pointer shadow-xs"
+              >
+                <Users className="w-3.5 h-3.5" />
+                <span>Cambiar Agente</span>
+              </button>
+              <button
+                type="button"
+                onClick={exitImpersonation}
+                className="px-3.5 py-1.5 bg-white text-gray-900 hover:bg-red-50 hover:text-red-700 rounded-xl font-black transition-all flex items-center gap-1.5 cursor-pointer shadow-sm active:scale-95"
+              >
+                <X className="w-3.5 h-3.5 text-red-600" />
+                <span>Salir de Vista Agente</span>
+              </button>
+            </div>
+          </div>
+        )}
+
         {/* Top Layout Header with Search */}
         <header className="bg-white/95 backdrop-blur-md border-b border-gray-100 px-4 sm:px-8 py-3 sticky top-0 z-30 shadow-xs flex items-center justify-between gap-4">
-          <div className="flex-1 max-w-xl">
-            <HeaderSearch />
-          </div>
-          <div className="hidden sm:flex items-center gap-3 text-xs text-gray-500 font-medium">
-            <div className="flex items-center gap-2 px-3 py-1.5 bg-gray-50 border border-gray-100 rounded-xl">
-              <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
-              <span className="font-bold text-gray-700">{profile?.displayName || 'Usuario'}</span>
-              <span className="text-[10px] bg-blue-100 text-blue-700 font-bold px-1.5 py-0.5 rounded uppercase">{profile?.role || 'Agente'}</span>
+          {isAgent ? (
+            <div className="flex items-center gap-2.5">
+              <div className="p-2 bg-violet-100 text-violet-700 rounded-xl">
+                <ShieldCheck className="w-5 h-5" />
+              </div>
+              <div>
+                <h1 className="text-sm font-black text-gray-900 tracking-tight">Acceso Clientes</h1>
+                <p className="text-[11px] text-gray-500 font-medium">Portal Comercial y Cartera de Agentes</p>
+              </div>
+            </div>
+          ) : (
+            <div className="flex-1 max-w-xl">
+              <HeaderSearch />
+            </div>
+          )}
+          <div className="flex items-center gap-2.5">
+            {isRealSuperAdmin && !impersonatedAgent && (
+              <button
+                type="button"
+                onClick={openModal}
+                className="flex items-center gap-2 px-3.5 py-1.5 bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-700 hover:to-indigo-700 text-white rounded-xl text-xs font-bold shadow-xs hover:shadow-md transition-all cursor-pointer hover:scale-105 active:scale-95"
+                title="Simular experiencia y ver el sistema como cualquier agente"
+              >
+                <Eye className="w-3.5 h-3.5 text-violet-200" />
+                <span>Vista como Agente</span>
+              </button>
+            )}
+            <div className="hidden sm:flex items-center gap-3 text-xs text-gray-500 font-medium">
+              <div className="flex items-center gap-2 px-3 py-1.5 bg-gray-50 border border-gray-100 rounded-xl">
+                <div className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+                <span className="font-bold text-gray-700">{profile?.displayName || 'Usuario'}</span>
+                <span className="text-[10px] bg-blue-100 text-blue-700 font-bold px-1.5 py-0.5 rounded uppercase">{profile?.role || 'Agente'}</span>
+              </div>
             </div>
           </div>
         </header>
@@ -451,6 +623,17 @@ export default function Layout({ children, profile, rolePermissions, companySett
           {children}
         </div>
       </main>
+
+      {/* Impersonation Modal */}
+      <ImpersonationModal
+        isOpen={isModalOpen}
+        onClose={closeModal}
+        currentImpersonation={impersonatedAgent}
+        onSelectAgent={(ag) => {
+          setImpersonatedAgent(ag);
+          closeModal();
+        }}
+      />
     </div>
   );
 }

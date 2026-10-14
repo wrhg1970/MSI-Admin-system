@@ -213,6 +213,10 @@
         "isProviderExpense": { "type": "boolean" },
         "reconciled": { "type": "boolean" },
         "reconciledAt": { "type": "string", "format": "date-time" },
+        "receiptNumber": { "type": "string" },
+        "matchedPaymentId": { "type": "string" },
+        "matchedInsuranceId": { "type": "string" },
+        "reconciledType": { "type": "string", "enum": ["auto_matched", "manual"] },
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["uploadId", "date", "description", "amount", "type", "reconciled"]
@@ -455,6 +459,7 @@
     "/notificationLogs/{logId}": { "schema": "notificationLog", "description": "Audit trail of sent notification messages and reports" },
     "/historicalRecords/{recordId}": { "schema": "historicalRecord", "description": "Historical records database" },
     "/caremedInvoices/{invoiceId}": { "schema": "caremedInvoice", "description": "Invoices attached to CareMed export sessions" },
-    "/quotes/{quoteId}": { "schema": "quote", "description": "Stored and sent insurance quotes history" }
+    "/quotes/{quoteId}": { "schema": "quote", "description": "Stored and sent insurance quotes history" },
+    "/commissionInvoices/{invoiceId}": { "schema": "object", "description": "Agent commission settlement invoices and payment requests" }
   }
 }

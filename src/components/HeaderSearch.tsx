@@ -269,13 +269,13 @@ export default function HeaderSearch() {
                       </span>
                     </div>
                     <div className="space-y-1">
-                      {clientResults.map((client) => {
+                      {clientResults.map((client, cIdx) => {
                         const displayName = client.firstName 
                           ? `${client.firstName} ${client.lastName || ''}`
                           : (client.legalName || client.commercialName || client.email || 'Cliente sin nombre');
                         return (
                           <div
-                            key={client.id || client.email}
+                            key={client.id ? `hs-c-${client.id}` : `hs-c-${client.email || ''}-${cIdx}`}
                             onClick={() => handleSelectClient(client)}
                             className="p-2.5 hover:bg-violet-50/60 rounded-xl cursor-pointer transition-colors flex items-center justify-between group border border-transparent hover:border-violet-100"
                           >

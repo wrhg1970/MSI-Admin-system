@@ -483,6 +483,18 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
   }, [tab, filteredCaremedInvoices, selectedInvoiceNumber]);
 
   useEffect(() => {
+    const searchVal = searchParams.get('search') || searchParams.get('policyNumber') || searchParams.get('policyId');
+    if (searchVal) {
+      setSearchTerm(searchVal);
+      setRequestDateRange({ start: '', end: '' });
+      if (searchParams.get('openDetail') === 'true' && insurances.length > 0) {
+        const found = insurances.find(i => i.id === searchVal || i.policyNumber === searchVal);
+        if (found) {
+          setSelectedInsuranceForDetail(found);
+        }
+      }
+    }
+
     const filterType = searchParams.get('filter');
     if (filterType === 'unexported') {
       setCaremedExportedFilter('not_exported');
@@ -500,7 +512,7 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
       setStatusFilter('pending');
       setRequestDateRange({ start: '', end: '' });
     }
-  }, [searchParams]);
+  }, [searchParams, insurances]);
 
   const findMatchingPolicy = (ins: any, policies: Policy[]): Policy | undefined => {
     // 1. Resolve Plan Type
@@ -3000,6 +3012,31 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                 : 'Listado completo de seguros solicitados y emitidos'}
           </p>
         </div>
+        
+        {/* Botón Nueva Póliza */}
+        {(isSuperAdminOrDirector || canManageClosedState || (profile?.role === 'agent' && profile?.canCreatePolicies === true)) && (
+          <button
+            onClick={() => navigate('/request')}
+            className="flex items-center gap-2 px-4 py-2.5 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-bold shadow-md shadow-blue-200 transition-all text-sm cursor-pointer shrink-0 self-start md:self-auto"
+            title="Emitir o solicitar nueva póliza de seguro"
+          >
+            <Plus className="w-4 h-4" />
+            Nueva Póliza
+          </button>
+        )}
+
+        {/* Botón Cobrar Comisiones para Agentes */}
+        {profile?.role === 'agent' && (
+          <button
+            onClick={() => navigate('/commissions')}
+            className="flex items-center gap-2 px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-bold shadow-md shadow-emerald-200 transition-all text-sm cursor-pointer shrink-0 self-start md:self-auto"
+            title="Ver mis comisiones y generar invoice de cobro"
+          >
+            <DollarSign className="w-4 h-4" />
+            Cobrar Comisiones
+          </button>
+        )}
+
         {tab !== 'caremed' && tab !== 'invoices' && (
           <div className="flex flex-col items-start lg:items-end gap-2.5">
             {/* Fila Superior: Controles de Selección, Limpieza y Edición Masiva */}
@@ -6200,9 +6237,9 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
               >
                 <option value="all">Todos los Integrantes</option>
                 {[...(selectedClient.linkedAgents || [])]
-                  .sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase(), 'es', { sensitivity: 'base' }))
-                  .map((la: any) => (
-                    <option key={la.id} value={la.email}>{la.name} ({la.email})</option>
+                  .sort((a, b) => (a.name || '').toLowerCase().localeCompare((b.name || '').toLowerCase(), 'es', { sensitivity: 'base' }))
+                  .map((la: any, idx: number) => (
+                    <option key={la.id ? `la-f-${la.id}` : `la-f-${la.email || ''}-${idx}`} value={la.email}>{la.name} ({la.email})</option>
                   ))}
               </select>
             </div>
@@ -7590,8 +7627,8 @@ export default function PoliciesManager({ profile, rolePermissions }: { profile:
                           if (selectedClientObj && selectedClientObj.linkedAgents) {
                             return [...selectedClientObj.linkedAgents]
                               .sort((a, b) => (a.name || '').localeCompare(b.name || '', 'es', { sensitivity: 'base' }))
-                              .map((la: any) => (
-                                <option key={la.id || la.email} value={la.email}>
+                              .map((la: any, idx: number) => (
+                                <option key={la.id ? `la-be-${la.id}` : `la-be-${la.email || ''}-${idx}`} value={la.email}>
                                   {la.name} ({la.email})
                                 </option>
                               ));

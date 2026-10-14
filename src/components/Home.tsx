@@ -99,6 +99,13 @@ export default function Home({ profile, rolePermissions }: HomeProps) {
   const [filterStartDate, setFilterStartDate] = useState('');
   const [filterEndDate, setFilterEndDate] = useState('');
 
+  // Auto-redirect agents to Acceso Clientes upon entering the system
+  useEffect(() => {
+    if (profile?.role === 'agent') {
+      navigate('/client-access', { replace: true });
+    }
+  }, [profile?.role, navigate]);
+
   // Exchange Rate States for Header
   const [isRateModalOpen, setIsRateModalOpen] = useState(false);
   const [rateInput, setRateInput] = useState('');

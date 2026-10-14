@@ -17,11 +17,12 @@ import {
   AreaChart,
   Area
 } from 'recharts';
-import { TrendingUp, Users, DollarSign, Briefcase, Receipt, Calendar, Filter, ShieldCheck, PieChart as PieIcon, ArrowUpRight, ArrowDownRight, Scale } from 'lucide-react';
+import { TrendingUp, Users, DollarSign, Briefcase, Receipt, Calendar, Filter, ShieldCheck, PieChart as PieIcon, ArrowUpRight, ArrowDownRight, Scale, Eye } from 'lucide-react';
 import TransactionModal from './TransactionModal';
+import InsuranceDetailModal from './InsuranceDetailModal';
 import { format, startOfMonth, endOfMonth } from 'date-fns';
 import { useFirestoreData } from '../context/FirestoreDataContext';
-import { getNormalizedYYYYMMDD } from '../lib/policyUtils';
+import { getNormalizedYYYYMMDD, resolvePolicyFolioAndType } from '../lib/policyUtils';
 import PoliciesStatusSummarySection from './PoliciesStatusSummarySection';
 import AgentPayablesConcentrate from './AgentPayablesConcentrate';
 
@@ -43,6 +44,7 @@ export default function Dashboard({ profile }: DashboardProps) {
   } = useFirestoreData();
 
   const [selectedInsuranceForTransactions, setSelectedInsuranceForTransactions] = useState<string | null>(null);
+  const [selectedInsuranceForDetail, setSelectedInsuranceForDetail] = useState<InsuranceRequest | null>(null);
   
   // Filters
   const [dateRange, setDateRange] = useState({
@@ -59,7 +61,12 @@ export default function Dashboard({ profile }: DashboardProps) {
     if (isAdmin) {
       return contextInsurances;
     } else if (profile.role === 'agent') {
-      return contextInsurances.filter(i => i.agentId === profile.uid);
+      return contextInsurances.filter(i => {
+        const isOwnerByUid = i.agentId === profile.uid;
+        const isOwnerByEmail = !!(profile.email && i.linkedAgentId?.toLowerCase() === profile.email.toLowerCase());
+        const isOwnerByEmailInAgentId = !!(profile.email && i.agentId?.toLowerCase() === profile.email.toLowerCase());
+        return isOwnerByUid || isOwnerByEmail || isOwnerByEmailInAgentId;
+      });
     } else {
       return contextInsurances.filter(i => i.email === profile.email);
     }
@@ -484,19 +491,145 @@ export default function Dashboard({ profile }: DashboardProps) {
         </div>
       </div>
 
-      {/* Concentrado de Agentes con Cuentas por Pagar */}
-      <AgentPayablesConcentrate
-        insurances={insurances}
-        clients={clients}
-        users={users}
-        onViewTransactions={(id) => setSelectedInsuranceForTransactions(id)}
-      />
+      {/* Concentrado de Agentes con Cuentas por Pagar (Solo para administradores) */}
+      {isAdmin && (
+        <AgentPayablesConcentrate
+          insurances={insurances}
+          clients={clients}
+          users={users}
+          onViewTransactions={(id) => setSelectedInsuranceForTransactions(id)}
+        />
+      )}
+
+      {/* Sección de Pólizas Gestionadas por el Agente para Revisión Directa */}
+      {profile?.role === 'agent' && (
+        <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <h3 className="text-base font-black text-gray-900 flex items-center gap-2">
+                <ShieldCheck className="w-5 h-5 text-blue-600" />
+                Mis Pólizas Gestionadas ({filteredInsurances.length})
+              </h3>
+              <p className="text-xs text-gray-500">
+                Consulta y revisa el expediente, montos, coberturas y comisiones de cada una de tus pólizas.
+              </p>
+            </div>
+            <span className="text-xs font-bold text-gray-500 bg-gray-50 px-3 py-1.5 rounded-full border border-gray-200 self-start sm:self-auto">
+              {filteredInsurances.filter(i => i.commissionStatus === 'paid').length} Pagadas • {filteredInsurances.filter(i => i.commissionStatus !== 'paid').length} Por liquidar
+            </span>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="bg-gray-50 text-gray-500 font-bold uppercase text-[10px]">
+                <tr>
+                  <th className="p-3">Póliza / Folio</th>
+                  <th className="p-3">Asegurado</th>
+                  <th className="p-3">Plan</th>
+                  <th className="p-3">Tipo de Póliza</th>
+                  <th className="p-3">Vigencia</th>
+                  <th className="p-3 text-right">Prima USD</th>
+                  <th className="p-3 text-right">Comisión USD</th>
+                  <th className="p-3 text-center">Estado Pago</th>
+                  <th className="p-3 text-right">Acción</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {filteredInsurances.map(ins => {
+                  const sale = ins.totalFinal !== undefined && ins.totalFinal !== null ? Number(ins.totalFinal) : Number(ins.totalPrice || 0);
+                  const comm = Number(ins.agentCommission || 0);
+                  const polInfo = resolvePolicyFolioAndType(ins, policies);
+
+                  return (
+                    <tr key={ins.id} className="hover:bg-gray-50/80 transition-colors">
+                      <td className="p-3 font-mono font-bold text-gray-900">
+                        <span className="bg-gray-100 border border-gray-200/90 px-2 py-0.5 rounded text-[11px] tracking-tight">
+                          {polInfo.folio}
+                        </span>
+                      </td>
+                      <td className="p-3">
+                        <span className="font-bold text-gray-800 block">{ins.firstName} {ins.lastName}</span>
+                        <span className="text-[10px] text-gray-400 block">{ins.email}</span>
+                      </td>
+                      <td className="p-3 font-semibold text-gray-700">
+                        <span className="inline-block px-2 py-0.5 rounded bg-slate-100 font-bold text-slate-800 text-[11px]">
+                          {polInfo.plan}
+                        </span>
+                      </td>
+                      <td className="p-3">
+                        <span className={`inline-flex items-center gap-1 px-2.5 py-0.5 rounded text-[11px] font-bold ${
+                          polInfo.tipoPoliza.toLowerCase().includes('oro') 
+                            ? 'bg-amber-50 text-amber-800 border border-amber-200/80'
+                            : polInfo.tipoPoliza.toLowerCase().includes('plata')
+                            ? 'bg-slate-100 text-slate-700 border border-slate-300/80'
+                            : polInfo.tipoPoliza.toLowerCase().includes('platino') || polInfo.tipoPoliza.toLowerCase().includes('platinum')
+                            ? 'bg-purple-50 text-purple-800 border border-purple-200/80'
+                            : 'bg-orange-50 text-orange-800 border border-orange-200/80'
+                        }`}>
+                          <ShieldCheck className="w-3 h-3 shrink-0" />
+                          <span>{polInfo.tipoPoliza}</span>
+                        </span>
+                      </td>
+                      <td className="p-3 text-gray-600">
+                        {ins.startDate} → {ins.endDate}
+                      </td>
+                      <td className="p-3 text-right font-black text-gray-900">
+                        ${sale.toFixed(2)} USD
+                      </td>
+                      <td className="p-3 text-right font-black text-purple-700">
+                        ${comm.toFixed(2)} USD
+                      </td>
+                      <td className="p-3 text-center">
+                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                          ins.status === 'paid' ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' :
+                          ins.status === 'partially_paid' ? 'bg-blue-50 text-blue-700 border border-blue-200' :
+                          ins.status === 'cancelled' ? 'bg-red-50 text-red-700 border border-red-200' :
+                          'bg-amber-50 text-amber-700 border border-amber-200'
+                        }`}>
+                          {ins.status === 'paid' ? 'Pagado' :
+                           ins.status === 'partially_paid' ? 'Parcial' :
+                           ins.status === 'cancelled' ? 'Cancelado' : 'Pendiente'}
+                        </span>
+                      </td>
+                      <td className="p-3 text-right">
+                        <button
+                          type="button"
+                          onClick={() => setSelectedInsuranceForDetail(ins)}
+                          className="px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white font-bold text-xs rounded-xl shadow-xs transition-colors inline-flex items-center gap-1 cursor-pointer"
+                          title="Revisar expediente completo de la póliza"
+                        >
+                          <Eye className="w-3.5 h-3.5" />
+                          <span>Revisar Póliza</span>
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+                {filteredInsurances.length === 0 && (
+                  <tr>
+                    <td colSpan={9} className="text-center py-8 text-gray-400">
+                      No tienes pólizas registradas en este período.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
 
       <TransactionModal 
         isOpen={!!selectedInsuranceForTransactions}
         onClose={() => setSelectedInsuranceForTransactions(null)}
         insuranceId={selectedInsuranceForTransactions || undefined}
         title="Transacciones de la Póliza"
+      />
+
+      {/* Modal para Revisar Póliza */}
+      <InsuranceDetailModal
+        isOpen={!!selectedInsuranceForDetail}
+        onClose={() => setSelectedInsuranceForDetail(null)}
+        insurance={selectedInsuranceForDetail}
       />
     </div>
   );

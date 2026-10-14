@@ -3,7 +3,7 @@ import { collection, addDoc, updateDoc, serverTimestamp, query, getDocs, orderBy
 import { db, handleFirestoreError, OperationType } from '../firebase';
 import { UserProfile, Policy, PlanType, ClientType, InsuranceRequest, Country, Client, ExchangeRate, PolicyLetter, FacturaData } from '../types';
 import { differenceInYears, differenceInDays, parseISO, format, addDays } from 'date-fns';
-import { CheckCircle2, AlertCircle, AlertTriangle, UserPlus, Users, Building2, User, Globe, FileText, Search, Upload, CreditCard, Mail, X, Loader2, Copy, Receipt } from 'lucide-react';
+import { CheckCircle2, AlertCircle, AlertTriangle, UserPlus, Users, Building2, User, Globe, FileText, Search, Upload, CreditCard, Mail, X, Loader2, Copy, Receipt, ShieldAlert, ShieldCheck } from 'lucide-react';
 import BulkImportModal from './BulkImportModal';
 import { useNavigate, useLocation } from 'react-router-dom';
 import TransactionModal from './TransactionModal';
@@ -151,6 +151,32 @@ export default function InsuranceForm({ profile }: InsuranceFormProps) {
       setDuplicateBanner(true);
     }
   }, [duplicateData]);
+
+  // Pre-selected Agent or Corporate automatic assignment
+  const [assignedEntityBanner, setAssignedEntityBanner] = useState<Client | null>(null);
+
+  useEffect(() => {
+    const searchParams = new URLSearchParams(location.search);
+    const paramClientId = searchParams.get('clientId');
+    const paramClientType = searchParams.get('clientType') as ClientType | null;
+    const stateClient = (location.state as any)?.preselectedClient as Client | undefined;
+    const targetClientId = paramClientId || stateClient?.id;
+
+    if (targetClientId && clients.length > 0) {
+      const foundClient = stateClient || clients.find(c => c.id === targetClientId);
+      if (foundClient) {
+        setFormData(prev => ({
+          ...prev,
+          clientType: foundClient.type,
+          clientId: foundClient.id!,
+        }));
+        setAssignedEntityBanner(foundClient);
+        populateBillingFromClient(foundClient);
+      }
+    } else if (paramClientType && (paramClientType === 'Agent' || paramClientType === 'Corporate')) {
+      setFormData(prev => ({ ...prev, clientType: paramClientType }));
+    }
+  }, [location.search, location.state, clients]);
 
   const [submitting, setSubmitting] = useState(false);
   const [success, setSuccess] = useState(false);
@@ -805,9 +831,31 @@ export default function InsuranceForm({ profile }: InsuranceFormProps) {
         }
       });
 
-      if (finalClientId) insurance.clientId = finalClientId;
-      if (formData.linkedAgentId) insurance.linkedAgentId = formData.linkedAgentId;
-      if (profile?.role === 'agent') insurance.agentId = profile.uid;
+      if (finalClientId) {
+        insurance.clientId = finalClientId;
+        const targetEntity = clients.find(c => c.id === finalClientId);
+        if (targetEntity) {
+          insurance.clientType = targetEntity.type;
+          const entityName = targetEntity.commercialName || targetEntity.legalName || `${targetEntity.firstName || ''} ${targetEntity.lastName || ''}`.trim() || targetEntity.email;
+          if (targetEntity.type === 'Agent') {
+            insurance.agentId = targetEntity.email || targetEntity.id;
+            insurance.agente = entityName;
+            if (formData.linkedAgentId) {
+              insurance.linkedAgentId = formData.linkedAgentId;
+            } else if (!insurance.linkedAgentId) {
+              insurance.linkedAgentId = targetEntity.email || '';
+            }
+          } else if (targetEntity.type === 'Corporate') {
+            (insurance as any).corporateId = targetEntity.id;
+            insurance.agente = entityName;
+          }
+        }
+      }
+      if (profile?.role === 'agent') {
+        insurance.agentId = profile.uid;
+        insurance.linkedAgentId = profile.email;
+        insurance.agente = profile.displayName || profile.email;
+      }
 
       console.log('Saving insurance:', insurance);
       const docRef = await addDoc(collection(db, 'insurances'), insurance);
@@ -1015,6 +1063,27 @@ export default function InsuranceForm({ profile }: InsuranceFormProps) {
     }));
   };
 
+  if (profile?.role === 'agent' && profile?.canCreatePolicies === false) {
+    return (
+      <div className="max-w-xl mx-auto bg-white p-8 rounded-3xl shadow-sm border border-gray-100 text-center space-y-4 my-8">
+        <div className="p-4 bg-amber-50 text-amber-600 rounded-2xl w-16 h-16 mx-auto flex items-center justify-center border border-amber-200">
+          <ShieldAlert className="w-8 h-8" />
+        </div>
+        <h2 className="text-xl font-black text-gray-900">Permiso Requerido para Emitir Pólizas</h2>
+        <p className="text-sm text-gray-600 leading-relaxed">
+          Actualmente tu perfil de agente no cuenta con el permiso activo para emitir pólizas directamente.
+          Solicita a la administración o dirección que habilite la opción <strong>"¿Permitir crear / emitir pólizas?"</strong> en tu cuenta dentro del Gestor de Usuarios.
+        </p>
+        <button
+          onClick={() => navigate('/policies')}
+          className="px-5 py-2.5 bg-gray-900 hover:bg-black text-white text-xs font-bold rounded-xl transition-all cursor-pointer"
+        >
+          Volver a Mis Pólizas
+        </button>
+      </div>
+    );
+  }
+
   if (success) {
     const isStripe = formData.paymentMethod?.toLowerCase().includes('stripe');
     return (
@@ -1175,6 +1244,40 @@ export default function InsuranceForm({ profile }: InsuranceFormProps) {
         </div>
       )}
 
+      {assignedEntityBanner && (
+        <div className="mb-6 p-4 bg-gradient-to-r from-violet-50 to-indigo-50 border border-violet-200 rounded-2xl flex items-center justify-between gap-3 text-sm text-violet-950 shadow-xs animate-in fade-in">
+          <div className="flex items-center gap-3">
+            <div className="p-2.5 bg-violet-600 rounded-xl text-white shadow-xs">
+              <ShieldCheck className="w-5 h-5 flex-shrink-0" />
+            </div>
+            <div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <span className="text-[10px] font-black uppercase tracking-wider bg-violet-200 text-violet-900 px-2 py-0.5 rounded-full">
+                  Asignación Automática
+                </span>
+                <p className="font-bold text-violet-950 text-sm">
+                  {assignedEntityBanner.commercialName || assignedEntityBanner.legalName || `${assignedEntityBanner.firstName || ''} ${assignedEntityBanner.lastName || ''}`.trim()}
+                </p>
+                <span className="text-xs text-violet-600 font-semibold">
+                  ({assignedEntityBanner.type === 'Agent' ? 'Agente' : 'Corporativo'})
+                </span>
+              </div>
+              <p className="text-xs text-violet-700 mt-0.5">
+                Esta póliza se vinculará directamente a este {assignedEntityBanner.type === 'Agent' ? 'agente' : 'corporativo'} para comisiones y expediente 360°.
+              </p>
+            </div>
+          </div>
+          <button 
+            type="button" 
+            onClick={() => setAssignedEntityBanner(null)}
+            className="text-violet-400 hover:text-violet-700 p-1.5 rounded-lg hover:bg-violet-100 transition-colors cursor-pointer"
+            title="Ocultar aviso"
+          >
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+      )}
+
       <form onSubmit={handleOpenConfirm} className="space-y-8">
         {/* Client Info */}
         <div className="bg-white p-6 rounded-xl shadow-sm border border-gray-100 space-y-6">
@@ -1235,14 +1338,16 @@ export default function InsuranceForm({ profile }: InsuranceFormProps) {
                     className="w-full p-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-sm font-semibold"
                   >
                     {actionTypes.length > 0 ? (
-                      actionTypes.map(at => (
-                        <option key={at.action} value={at.action}>{at.action} - {at.name}</option>
+                      actionTypes.map((at, idx) => (
+                        <option key={at.id || (at.action ? `${at.action}-${idx}` : `action-${idx}`)} value={at.action}>
+                          {at.action} - {at.name}
+                        </option>
                       ))
                     ) : (
                       <>
-                        <option value="NEW">NEW - Nuevo</option>
-                        <option value="COR">COR - Corrección</option>
-                        <option value="CAN">CAN - Cancelación</option>
+                        <option key="NEW" value="NEW">NEW - Nuevo</option>
+                        <option key="COR" value="COR">COR - Corrección</option>
+                        <option key="CAN" value="CAN">CAN - Cancelación</option>
                       </>
                     )}
                   </select>
@@ -1274,8 +1379,8 @@ export default function InsuranceForm({ profile }: InsuranceFormProps) {
                     className="w-full p-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
                   >
                     <option value="">Seleccione {formData.clientType === 'Agent' ? 'el agente' : 'la empresa'}...</option>
-                    {filteredClients.map(c => (
-                      <option key={c.id} value={c.id}>
+                    {filteredClients.map((c, idx) => (
+                      <option key={c.id || `client-${c.email || idx}`} value={c.id}>
                         {c.commercialName || c.legalName} ({c.email})
                       </option>
                     ))}
@@ -1298,7 +1403,7 @@ export default function InsuranceForm({ profile }: InsuranceFormProps) {
                       {[...(selectedClient.linkedAgents || [])]
                         .sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase(), 'es', { sensitivity: 'base' }))
                         .map((la, index) => (
-                          <option key={index} value={la.email}>
+                          <option key={la.id || (la.email ? `la-${la.email}-${index}` : `la-${index}`)} value={la.email}>
                             {la.name} ({la.email})
                           </option>
                         ))}
@@ -1395,9 +1500,9 @@ export default function InsuranceForm({ profile }: InsuranceFormProps) {
                             </button>
 
                             {searchedClients.length > 0 ? (
-                              searchedClients.map(c => (
+                              searchedClients.map((c, idx) => (
                                 <button
-                                  key={c.id}
+                                  key={c.id || `sc-${c.email || ''}-${idx}`}
                                   type="button"
                                   onClick={() => {
                                     setFormData({
@@ -1735,9 +1840,9 @@ export default function InsuranceForm({ profile }: InsuranceFormProps) {
                           onChange={e => setFacturaData(prev => ({ ...prev, country: e.target.value }))}
                           className="w-full p-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-sm bg-white"
                         >
-                          {Array.from(new Map([...COUNTRIES, ...countries].map(c => [c.code, c])).values())
+                          {Array.from(new Map([...COUNTRIES, ...countries].filter(c => c && c.code).map(c => [c.code, c])).values())
                             .sort((a, b) => (a.name || '').localeCompare(b.name || '', 'es', { sensitivity: 'base' }))
-                            .map(c => <option key={c.code} value={c.code}>{c.name}</option>)}
+                            .map((c, idx) => <option key={`${c.code}-${idx}`} value={c.code}>{c.name}</option>)}
                         </select>
                       </div>
                     </div>
@@ -1804,9 +1909,9 @@ export default function InsuranceForm({ profile }: InsuranceFormProps) {
                 onChange={e => setFormData({ ...formData, originCountry: e.target.value })}
                 className="w-full p-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
               >
-                {Array.from(new Map([...COUNTRIES, ...countries].map(c => [c.code, c])).values())
+                {Array.from(new Map([...COUNTRIES, ...countries].filter(c => c && c.code).map(c => [c.code, c])).values())
                   .sort((a, b) => (a.name || '').localeCompare(b.name || '', 'es', { sensitivity: 'base' }))
-                  .map(c => <option key={c.code} value={c.code}>{c.name}</option>)}
+                  .map((c, idx) => <option key={`${c.code}-${idx}`} value={c.code}>{c.name}</option>)}
               </select>
             </div>
             <div>
@@ -1825,9 +1930,9 @@ export default function InsuranceForm({ profile }: InsuranceFormProps) {
                 }}
                 className="w-full p-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none"
               >
-                {Array.from(new Map([...COUNTRIES, ...countries].map(c => [c.code, c])).values())
+                {Array.from(new Map([...COUNTRIES, ...countries].filter(c => c && c.code).map(c => [c.code, c])).values())
                   .sort((a, b) => (a.name || '').localeCompare(b.name || '', 'es', { sensitivity: 'base' }))
-                  .map(c => <option key={c.code} value={c.code}>{c.name}</option>)}
+                  .map((c, idx) => <option key={`${c.code}-${idx}`} value={c.code}>{c.name}</option>)}
               </select>
               <p className="mt-1 text-xs text-blue-600 font-bold">Región: {destinationRegion}</p>
               {formData.destinationCountry === 'MX' && (
@@ -1912,8 +2017,8 @@ export default function InsuranceForm({ profile }: InsuranceFormProps) {
               className="w-full p-3 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none font-medium text-gray-800"
             >
               <option value="">Seleccione método...</option>
-              {activePaymentMethods.map(m => (
-                <option key={m.id} value={m.name}>{m.name}</option>
+              {activePaymentMethods.map((m, idx) => (
+                <option key={m.id || `pm-${m.name || ''}-${idx}`} value={m.name}>{m.name}</option>
               ))}
             </select>
             <p className="text-[11px] text-gray-400 mt-1">
@@ -1930,9 +2035,9 @@ export default function InsuranceForm({ profile }: InsuranceFormProps) {
           </div>
           <div className="grid grid-cols-1 gap-4">
             {filteredPolicies.length > 0 ? (
-              filteredPolicies.map(p => (
+              filteredPolicies.map((p, idx) => (
                 <label
-                  key={p.id}
+                  key={p.id || `pol-${p.plan}-${p.name}-${idx}`}
                   className={`flex items-center justify-between p-4 border rounded-xl cursor-pointer transition-all ${
                     formData.policyId === p.id ? 'border-blue-500 bg-blue-50 ring-1 ring-blue-500' : 'border-gray-200 hover:bg-gray-50'
                   }`}

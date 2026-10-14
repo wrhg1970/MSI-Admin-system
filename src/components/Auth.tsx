@@ -5,7 +5,7 @@ import { auth, db } from '../firebase';
 import { Shield, Mail, ArrowRight, Loader2, Key, CheckCircle2, AlertCircle, Lock, User } from 'lucide-react';
 
 export default function Auth() {
-  const [method, setMethod] = useState<'google' | 'password' | 'email'>('password');
+  const [method, setMethod] = useState<'google' | 'password' | 'email'>('email');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [otp, setOtp] = useState(['', '', '', '', '', '']);
@@ -76,18 +76,19 @@ export default function Auth() {
   const handleRequestOTP = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!email) return;
+    const normalizedEmail = email.trim().toLowerCase();
     setLoading(true);
     setError(null);
     try {
       const resp = await fetch('/api/auth/send-otp', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: email.toLowerCase() })
+        body: JSON.stringify({ email: normalizedEmail })
       });
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.error || 'Error al enviar código');
       
-      setMessage(data.message || `Código enviado a ${email}`);
+      setMessage(data.message || `Código enviado a ${normalizedEmail}`);
       if (data.devCode) {
         const digits = data.devCode.split('');
         setOtp(digits);
@@ -102,8 +103,9 @@ export default function Auth() {
 
   const handleVerifyOTP = async (e: React.FormEvent) => {
     e.preventDefault();
-    const code = otp.join('');
+    const code = otp.join('').trim();
     if (code.length !== 6) return;
+    const normalizedEmail = email.trim().toLowerCase();
     
     setLoading(true);
     setError(null);
@@ -111,13 +113,13 @@ export default function Auth() {
       const resp = await fetch('/api/auth/verify-otp', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: email.toLowerCase(), code })
+        body: JSON.stringify({ email: normalizedEmail, code })
       });
       const data = await resp.json();
       if (!resp.ok) throw new Error(data.error || 'Código inválido');
       
+      localStorage.setItem('verified_email', normalizedEmail);
       await signInAnonymously(auth);
-      localStorage.setItem('verified_email', email.toLowerCase());
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -135,6 +137,16 @@ export default function Auth() {
     if (value && index < 5) {
       const nextInput = document.getElementById(`otp-${index + 1}`);
       nextInput?.focus();
+    }
+  };
+
+  const handleOtpPaste = (e: React.ClipboardEvent) => {
+    const paste = e.clipboardData.getData('text').trim();
+    if (/^\d{6}$/.test(paste)) {
+      e.preventDefault();
+      setOtp(paste.split(''));
+      const lastInput = document.getElementById('otp-5');
+      lastInput?.focus();
     }
   };
 
@@ -163,17 +175,17 @@ export default function Auth() {
         <div className="bg-gray-100 p-1 rounded-2xl flex text-xs font-bold mb-6">
           <button
             type="button"
+            onClick={() => { setMethod('email'); setStep('request'); setError(null); setMessage(null); }}
+            className={`flex-1 py-2.5 rounded-xl transition-all ${method === 'email' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-900'}`}
+          >
+            Acceso OTP (Agentes)
+          </button>
+          <button
+            type="button"
             onClick={() => { setMethod('password'); setError(null); setMessage(null); }}
             className={`flex-1 py-2.5 rounded-xl transition-all ${method === 'password' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-900'}`}
           >
             Usuario/Clave
-          </button>
-          <button
-            type="button"
-            onClick={() => { setMethod('email'); setStep('request'); setError(null); setMessage(null); }}
-            className={`flex-1 py-2.5 rounded-xl transition-all ${method === 'email' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-900'}`}
-          >
-            Código OTP
           </button>
           <button
             type="button"
@@ -275,7 +287,7 @@ export default function Auth() {
                   <p className="text-xs text-gray-500 font-medium">Ingresa el código de 6 dígitos enviado a <br/><span className="text-blue-600">{email}</span></p>
                 </div>
 
-                <div className="flex justify-between gap-2">
+                <div className="flex justify-between gap-2" onPaste={handleOtpPaste}>
                   {otp.map((digit, idx) => (
                     <input
                       key={idx}
@@ -285,6 +297,7 @@ export default function Auth() {
                       value={digit}
                       onChange={(e) => handleOtpChange(idx, e.target.value)}
                       onKeyDown={(e) => handleKeyDown(idx, e)}
+                      onPaste={handleOtpPaste}
                       className="w-12 h-14 bg-gray-50 border border-gray-100 rounded-xl text-center text-xl font-black text-[#1A2138] focus:ring-2 focus:ring-blue-500 focus:bg-white outline-none transition-all shadow-sm"
                     />
                   ))}

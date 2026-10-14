@@ -15,7 +15,7 @@ import { generatePDF, generateReceiptPDF } from '../lib/pdfGenerator';
 import { createZipFromPdfs, downloadBlob } from '../lib/zipUtils';
 import { useCompany } from '../App';
 import { triggerWhatsAppNotification } from '../services/whatsapp';
-import { getPolicyNumber, getAvailableLettersForInsurance, findPolicyPrioritized, formatDisplayDate } from '../lib/policyUtils';
+import { getPolicyNumber, getAvailableLettersForInsurance, findPolicyPrioritized, formatDisplayDate, resolvePolicyFolioAndType } from '../lib/policyUtils';
 import { isCardPaymentMethod, safeNum, getInsuranceDisplayStatus, getInsuranceFinalPrice } from '../utils/paymentUtils';
 import { logInsuranceActivity } from '../utils/activityLogger';
 import WhatsAppPolicyLettersModal, { getPolicyWhatsAppContacts } from './WhatsAppPolicyLettersModal';
@@ -94,9 +94,17 @@ interface InsuranceDetailModalProps {
   insurance: InsuranceRequest | null;
   initialAction?: 'cancel' | 'correct' | 'extension';
   onUpdateInsurance?: (ins: InsuranceRequest) => void;
+  readOnly?: boolean;
 }
 
-export default function InsuranceDetailModal({ isOpen, onClose, insurance, initialAction, onUpdateInsurance }: InsuranceDetailModalProps) {
+export default function InsuranceDetailModal({ 
+  isOpen, 
+  onClose, 
+  insurance, 
+  initialAction, 
+  onUpdateInsurance,
+  readOnly = false 
+}: InsuranceDetailModalProps) {
   const navigate = useNavigate();
   const { settings } = useCompany();
   const initialActionExecutedRef = useRef<boolean>(false);
@@ -2524,6 +2532,7 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
   };
 
   const policy = policies.find(p => p.id === activeInsurance.policyId);
+  const polInfo = resolvePolicyFolioAndType(activeInsurance, policies);
   const plan = activeInsurance.plan || policy?.plan || activeInsurance.policyId.split('-')[0];
   const policyName = activeInsurance.policyName || policy?.name || getInsuranceTypeLabel(activeInsurance.policyId);
 
@@ -2552,11 +2561,30 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
         {/* Header */}
         <div className="p-6 border-b border-gray-100 flex justify-between items-center bg-gray-50">
           <div>
-            <h3 className="text-xl font-bold text-gray-900">Detalles del Seguro</h3>
-            <p className="text-sm text-gray-500 font-mono">ID: {insurance.id}</p>
+            <div className="flex items-center gap-2.5 flex-wrap">
+              <h3 className="text-xl font-bold text-gray-900">Detalles del Seguro</h3>
+              <span className="font-mono text-xs font-bold px-2.5 py-0.5 rounded-md bg-blue-50 text-blue-800 border border-blue-200">
+                {polInfo.folio}
+              </span>
+              {readOnly && (
+                <span className="px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider bg-slate-100 text-slate-700 border border-slate-300 flex items-center gap-1 shadow-xs">
+                  <Shield className="w-3 h-3 text-slate-500" />
+                  Solo Lectura
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-gray-500 font-mono mt-1 flex items-center gap-2 flex-wrap">
+              <span>Folio: <strong className="text-gray-900">{polInfo.folio}</strong></span>
+              <span>•</span>
+              <span>Plan: <strong className="text-gray-900">{polInfo.plan}</strong></span>
+              <span>•</span>
+              <span>Tipo: <strong className="text-gray-900">{polInfo.tipoPoliza}</strong></span>
+              <span>•</span>
+              <span>ID: {insurance.id}</span>
+            </p>
           </div>
           <div className="flex items-center gap-2.5">
-            {displayPendingBalance > 0 && !isInsuranceClosed(localInsurance || insurance) && (
+            {!readOnly && displayPendingBalance > 0 && !isInsuranceClosed(localInsurance || insurance) && (
               <button 
                 type="button"
                 onClick={() => setShowStripeModal(true)}
@@ -2640,7 +2668,7 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
                     <p className="text-xs text-amber-700">Este registro se ha cerrado automáticamente por saldo $0 o diferencia menor a $5 USD. No se puede modificar ni registrar pagos o comisiones.</p>
                   </div>
                 </div>
-                {canManageClosedState && (
+                {canManageClosedState && !readOnly && (
                   <button
                     type="button"
                     disabled={isUpdatingLock}
@@ -2674,7 +2702,7 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
                     <p className="text-xs text-green-700 font-medium">Este registro fue abierto para modificación y puede ser modificado por administradores.</p>
                   </div>
                 </div>
-                {canManageClosedState && (
+                {canManageClosedState && !readOnly && (
                   <button
                     type="button"
                     disabled={isUpdatingLock}
@@ -3471,7 +3499,7 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
                   </div>
                 ) : (
                   <div>
-                    {canManageClosedState && (
+                    {canManageClosedState && !readOnly && (
                       <div className="flex items-center gap-3 justify-end mb-6">
                         {activeInsurance?.actionType !== 'CAN' && !activeInsurance?.isCorrected && !activeInsurance?.isCancelled && (activeInsurance as any).Caremed && (
                           <>
@@ -3750,16 +3778,18 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
                                   ) : (
                                     <span className="text-gray-400 text-xs italic font-medium">No asignado</span>
                                   )}
-                                  <button
-                                    onClick={() => {
-                                      setTempInvoiceCaremed(activeInsurance.InvoiceCaremed || '');
-                                      setIsEditingInvoiceCaremed(true);
-                                    }}
-                                    className="p-1 text-gray-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-md opacity-0 group-hover:opacity-100 transition-all cursor-pointer"
-                                    title="Editar Invoice CareMed"
-                                  >
-                                    <Pencil className="w-3.5 h-3.5" />
-                                  </button>
+                                  {!readOnly && (
+                                    <button
+                                      onClick={() => {
+                                        setTempInvoiceCaremed(activeInsurance.InvoiceCaremed || '');
+                                        setIsEditingInvoiceCaremed(true);
+                                      }}
+                                      className="p-1 text-gray-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-md opacity-0 group-hover:opacity-100 transition-all cursor-pointer"
+                                      title="Editar Invoice CareMed"
+                                    >
+                                      <Pencil className="w-3.5 h-3.5" />
+                                    </button>
+                                  )}
                                 </div>
                               )}
                             </div>
@@ -3954,14 +3984,16 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
                                         Guardado
                                       </span>
                                     )}
-                                    <button
-                                      type="button"
-                                      onClick={() => handleSaveSolicitudFactura(true)}
-                                      disabled={savingFactura}
-                                      className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl shadow-md shadow-indigo-100 transition-all cursor-pointer disabled:opacity-50"
-                                    >
-                                      {savingFactura ? 'Guardando...' : 'Guardar Datos de Factura'}
-                                    </button>
+                                    {!readOnly && (
+                                      <button
+                                        type="button"
+                                        onClick={() => handleSaveSolicitudFactura(true)}
+                                        disabled={savingFactura}
+                                        className="px-4 py-2 bg-indigo-600 hover:bg-indigo-700 text-white font-bold text-xs rounded-xl shadow-md shadow-indigo-100 transition-all cursor-pointer disabled:opacity-50"
+                                      >
+                                        {savingFactura ? 'Guardando...' : 'Guardar Datos de Factura'}
+                                      </button>
+                                    )}
                                   </div>
                                 </div>
                               </div>
@@ -4050,7 +4082,7 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
                               ) : (
                                 <div className="flex items-center gap-1 group">
                                   <span className="font-bold text-indigo-600 font-mono">{activeInsurance.IDseg || 'No asignado'}</span>
-                                  {!(activeInsurance as any).Caremed && (
+                                  {!readOnly && !(activeInsurance as any).Caremed && (
                                     <button
                                       onClick={() => {
                                         setTempIDseg(activeInsurance.IDseg || '');
@@ -4289,7 +4321,7 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
                 )}
 
                 {/* Acciones de Cobro Re-diseñadas para evitar encimamiento o desbordamiento */}
-                {((insurance.totalPaid || 0) < insuranceTotalPrice) && !isInsuranceClosed(localInsurance || insurance) && (
+                {((insurance.totalPaid || 0) < insuranceTotalPrice) && !isInsuranceClosed(localInsurance || insurance) && !readOnly && (
                   <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 p-4 bg-slate-50 rounded-2xl border border-slate-100 shadow-inner">
                     <div className="space-y-0.5">
                       <p className="text-xs font-bold text-slate-500 uppercase tracking-wider">Acciones de Cobro Disponibles</p>
@@ -4496,16 +4528,18 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
                               ) : (
                                 <div className="flex items-center gap-2 group mb-1">
                                   <p className="text-sm font-bold text-gray-900">${p.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} {p.currency}</p>
-                                  <button 
-                                    onClick={() => {
-                                      setEditingCommissionId(p.id!);
-                                      setEditAmount(p.amount.toString());
-                                    }}
-                                    className="p-1 text-gray-400 hover:text-orange-600 hover:bg-orange-50 rounded-md opacity-0 group-hover:opacity-100 transition-all"
-                                    title="Editar monto"
-                                  >
-                                    <Pencil className="w-3 h-3" />
-                                  </button>
+                                  {!readOnly && (
+                                    <button 
+                                      onClick={() => {
+                                        setEditingCommissionId(p.id!);
+                                        setEditAmount(p.amount.toString());
+                                      }}
+                                      className="p-1 text-gray-400 hover:text-orange-600 hover:bg-orange-50 rounded-md opacity-0 group-hover:opacity-100 transition-all"
+                                      title="Editar monto"
+                                    >
+                                      <Pencil className="w-3 h-3" />
+                                    </button>
+                                  )}
                                 </div>
                               )}
                               <p className="text-[10px] text-gray-400 font-medium">
@@ -4513,13 +4547,15 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
                               </p>
                             </div>
                           </div>
-                          <button 
-                            onClick={() => handleConfirmCommission(p.id!)}
-                            className="px-4 py-2 bg-orange-600 text-white rounded-xl text-xs font-bold hover:bg-orange-700 transition-all shadow-lg shadow-orange-100 flex items-center gap-2"
-                          >
-                            Confirmar Comisión
-                            <CheckCircle className="w-4 h-4" />
-                          </button>
+                          {!readOnly && (
+                            <button 
+                              onClick={() => handleConfirmCommission(p.id!)}
+                              className="px-4 py-2 bg-orange-600 text-white rounded-xl text-xs font-bold hover:bg-orange-700 transition-all shadow-lg shadow-orange-100 flex items-center gap-2"
+                            >
+                              Confirmar Comisión
+                              <CheckCircle className="w-4 h-4" />
+                            </button>
+                          )}
                         </div>
                       ))}
                     </div>
@@ -4948,31 +4984,32 @@ El equipo Mi Seguro Internacional /SETMEX S.A. de C.V.`;
             const clientList = Object.values(clients || {});
             const agentList = Object.values(agents || {});
             const waContacts = getPolicyWhatsAppContacts(insurance, clientList, agentList);
-            if (!waContacts.hasAnyPhone) return null;
             return (
               <button 
                 onClick={() => setShowWhatsAppModal(true)}
-                className="p-2.5 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 transition-all shadow-sm flex items-center justify-center hover:scale-105 active:scale-95"
-                title={`Enviar cartas por WhatsApp (${waContacts.label})`}
-                aria-label={`Enviar cartas por WhatsApp (${waContacts.label})`}
+                className="px-5 py-2 bg-emerald-600 text-white font-bold rounded-lg hover:bg-emerald-700 transition-all shadow-sm flex items-center gap-2 cursor-pointer hover:scale-105 active:scale-95"
+                title={`Enviar cartas por WhatsApp ${waContacts.label ? `(${waContacts.label})` : ''}`}
+                aria-label="Enviar por WhatsApp"
               >
-                <MessageCircle className="w-5 h-5" />
+                <MessageCircle className="w-4 h-4" />
+                <span>WhatsApp</span>
               </button>
             );
           })()}
           <button 
             onClick={() => setShowEmailModal(true)}
-            className="px-6 py-2 bg-blue-600 text-white font-bold rounded-lg hover:bg-blue-700 transition-colors flex items-center gap-2"
+            className="px-5 py-2 bg-blue-600 text-white font-bold rounded-lg hover:bg-blue-700 transition-colors flex items-center gap-2 cursor-pointer"
           >
             <Mail className="w-4 h-4" />
             Enviar por Correo
           </button>
           <button 
             onClick={handleDownloadCertificate}
-            className="px-6 py-2 bg-indigo-600 text-white font-bold rounded-lg hover:bg-indigo-700 transition-colors flex items-center gap-2"
+            className="px-5 py-2 bg-indigo-600 text-white font-bold rounded-lg hover:bg-indigo-700 transition-colors flex items-center gap-2 cursor-pointer"
+            title="Reimprimir o Descargar Certificado de la Póliza"
           >
-            <FileText className="w-4 h-4" />
-            Descargar Certificado
+            <Printer className="w-4 h-4" />
+            Reimprimir Póliza
           </button>
           <button 
             onClick={async () => {

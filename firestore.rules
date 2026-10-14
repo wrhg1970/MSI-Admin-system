@@ -172,6 +172,10 @@ service cloud.firestore {
     match /quotes/{quoteId} {
       allow read, write: if isAuthenticated();
     }
+    match /commissionInvoices/{invoiceId} {
+      allow read, create, update: if isAuthenticated();
+      allow delete: if isAdmin();
+    }
     match /test/connection {
       allow read: if true;
     }

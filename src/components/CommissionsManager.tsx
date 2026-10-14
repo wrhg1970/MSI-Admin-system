@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { collection, query, onSnapshot, where, doc, updateDoc, orderBy, getDocs, writeBatch, deleteField, serverTimestamp, limit } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
 import { db, storage, handleFirestoreError, OperationType, auth } from '../firebase';
-import { InsuranceRequest, UserProfile, Client, CustomRole } from '../types';
+import { InsuranceRequest, UserProfile, Client, CustomRole, CommissionInvoice } from '../types';
 import { useSearchParams } from 'react-router-dom';
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
@@ -31,22 +31,46 @@ import {
   Square,
   Printer,
   Trash2,
-  RotateCcw
+  RotateCcw,
+  Download,
+  ShieldAlert,
+  FileCheck,
+  Check
 } from 'lucide-react';
 import TransactionModal from './TransactionModal';
 import InsuranceDetailModal from './InsuranceDetailModal';
+import CreateCommissionInvoiceModal from './CreateCommissionInvoiceModal';
+import CommissionInvoiceDetailModal from './CommissionInvoiceDetailModal';
+import { generateCommissionInvoicePDF, formatUSD, formatMXP } from '../utils/commissionInvoiceUtils';
 import { usePermissions } from '../hooks/usePermissions';
 
 export default function CommissionsManager({ profile, rolePermissions }: { profile: UserProfile | null, rolePermissions: CustomRole | null }) {
   const { hasPermission } = usePermissions(profile, rolePermissions);
   const canDeleteCommissions = profile?.role !== 'agent' || hasPermission('commissions');
+  const isAdminUser = profile?.role === 'super_admin' || 
+    profile?.role === 'director' || 
+    profile?.role === 'administracion' || 
+    profile?.role === 'admin' || 
+    hasPermission('admin');
   const { settings: companySettings } = useCompany();
   const [searchParams] = useSearchParams();
+
+  // Navigation tab: 'commissions' (Pólizas y Comisiones) | 'invoices' (Invoices y Liquidaciones)
+  const [activeMainTab, setActiveMainTab] = useState<'commissions' | 'invoices'>(
+    searchParams.get('tab') === 'invoices' ? 'invoices' : 'commissions'
+  );
+
   const [commissions, setCommissions] = useState<InsuranceRequest[]>([]);
+  const [invoices, setInvoices] = useState<CommissionInvoice[]>([]);
+  const [selectedInvoiceForDetail, setSelectedInvoiceForDetail] = useState<CommissionInvoice | null>(null);
+  const [showCreateInvoiceModal, setShowCreateInvoiceModal] = useState(false);
+  const [invoiceSearchTerm, setInvoiceSearchTerm] = useState('');
+  const [invoiceStatusFilter, setInvoiceStatusFilter] = useState<'all' | 'requested' | 'approved' | 'paid' | 'rejected'>('all');
+
   const [clients, setClients] = useState<Record<string, Client>>({});
   const [agents, setAgents] = useState<Record<string, UserProfile>>({});
   const [loading, setLoading] = useState(true);
-  const [filter, setFilter] = useState<'all' | 'confirmed' | 'paid'>('all');
+  const [filter, setFilter] = useState<'all' | 'confirmed' | 'invoiced' | 'paid'>('all');
   const [searchTerm, setSearchTerm] = useState(searchParams.get('search') || '');
   const [selectedCommission, setSelectedCommission] = useState<InsuranceRequest | null>(null);
   const [paymentDate, setPaymentDate] = useState(new Date().toISOString().split('T')[0]);
@@ -144,7 +168,7 @@ export default function CommissionsManager({ profile, rolePermissions }: { profi
 
     const q = query(
       collection(db, 'insurances'),
-      where('commissionStatus', 'in', ['confirmed', 'paid']),
+      where('commissionStatus', 'in', ['confirmed', 'invoiced', 'paid']),
       orderBy('createdAt', 'desc')
     );
 
@@ -156,7 +180,22 @@ export default function CommissionsManager({ profile, rolePermissions }: { profi
       setLoading(false);
     });
 
-    return () => unsubscribe();
+    // Subscribe to commissionInvoices collection
+    const qInvoices = query(
+      collection(db, 'commissionInvoices'),
+      orderBy('createdAt', 'desc')
+    );
+
+    const unsubInvoices = onSnapshot(qInvoices, (snap) => {
+      setInvoices(snap.docs.map(d => ({ id: d.id, ...d.data() } as CommissionInvoice)));
+    }, (err) => {
+      console.warn('Error fetching commissionInvoices:', err);
+    });
+
+    return () => {
+      unsubscribe();
+      unsubInvoices();
+    };
   }, []);
 
   useEffect(() => {
@@ -782,15 +821,125 @@ export default function CommissionsManager({ profile, rolePermissions }: { profi
     .filter(c => c.commissionStatus === 'paid' && c.commissionPaymentCurrency === 'MXP')
     .reduce((acc, curr) => acc + (curr.commissionPaymentAmount || 0), 0);
 
+  // Filtered invoices calculation
+  const filteredInvoices = invoices.filter(inv => {
+    if (profile?.role === 'agent') {
+      const isOwnerByUid = inv.agentId === profile.uid;
+      const isOwnerByEmail = inv.agentEmail?.toLowerCase() === profile.email?.toLowerCase();
+      if (!isOwnerByUid && !isOwnerByEmail) return false;
+    }
+
+    const matchesStatus = invoiceStatusFilter === 'all' || inv.status === invoiceStatusFilter;
+    const searchTarget = `${inv.folio || ''} ${inv.agentName || ''} ${inv.agentEmail || ''} ${inv.agentInvoiceFolio || ''}`.toLowerCase();
+    const searchTokens = invoiceSearchTerm.toLowerCase().trim().split(/\s+/);
+    const matchesSearch = !invoiceSearchTerm.trim() || searchTokens.every(token => searchTarget.includes(token));
+
+    return matchesStatus && matchesSearch;
+  });
+
+  const totalInvoicesRequested = filteredInvoices.filter(i => i.status === 'requested').length;
+  const totalInvoicesApproved = filteredInvoices.filter(i => i.status === 'approved').length;
+  const totalInvoicesPaidCount = filteredInvoices.filter(i => i.status === 'paid').length;
+  const totalInvoicesPaidUSD = filteredInvoices
+    .filter(i => i.status === 'paid')
+    .reduce((sum, i) => sum + (i.totalCommissionUSD || 0), 0);
+  const totalInvoicesPaidMXP = filteredInvoices
+    .filter(i => i.status === 'paid')
+    .reduce((sum, i) => sum + (i.totalCommissionMXP || (i.totalCommissionUSD * (i.exchangeRate || 1))), 0);
+
   return (
     <div className="space-y-8">
-      <header>
-        <h1 className="text-2xl font-bold text-gray-900">Gestión de Comisiones</h1>
-        <p className="text-gray-500">Control de pagos a agentes y corporativos</p>
+      {/* Encabezado Principal */}
+      <header className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">Gestión de Comisiones e Invoices</h1>
+          <p className="text-gray-500">Control de liquidaciones, facturas fiscales y pagos a agentes</p>
+        </div>
+        <div className="flex items-center gap-2">
+          {profile?.role === 'agent' && (
+            <button
+              type="button"
+              onClick={() => {
+                const confirmedIds = filteredCommissions.filter(c => c.commissionStatus === 'confirmed').map(c => c.id!);
+                if (confirmedIds.length > 0) {
+                  setSelectedCommissionIds(confirmedIds);
+                  setShowCreateInvoiceModal(true);
+                } else {
+                  alert('No tienes comisiones pendientes por cobrar en este momento.');
+                }
+              }}
+              className="px-4 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl text-xs font-black shadow-md shadow-emerald-600/20 flex items-center gap-2 transition-all cursor-pointer"
+            >
+              <Receipt className="w-4 h-4" />
+              Solicitar Cobro de Comisiones
+            </button>
+          )}
+        </div>
       </header>
 
-      {/* Dynamic KPI summary cards based on filtered results */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+      {/* Banner Especial para Agentes */}
+      {profile?.role === 'agent' && (
+        <div className="bg-gradient-to-r from-[#1A2138] via-[#222c4a] to-[#10b981]/20 text-white p-6 rounded-3xl shadow-xl border border-indigo-950/40">
+          <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+            <div className="space-y-1">
+              <span className="px-3 py-1 bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 rounded-full text-[10px] font-black uppercase tracking-wider inline-flex items-center gap-1.5">
+                <Check className="w-3 h-3 text-emerald-400" />
+                Portal de Liquidación para Agentes
+              </span>
+              <h2 className="text-xl font-black pt-1">Bienvenido, {profile.displayName || profile.email}</h2>
+              <p className="text-xs text-gray-300 max-w-2xl leading-relaxed">
+                Selecciona tus comisiones confirmadas para emitir tu <strong>Liquidación Oficial de Comisiones (PDF)</strong> o adjuntar tu <strong>Factura Fiscal (CFDI PDF y XML)</strong> para recibir tu pago por transferencia bancaria.
+              </p>
+            </div>
+            <div className="flex items-center gap-3 shrink-0">
+              <div className="bg-white/10 backdrop-blur-md px-4 py-3 rounded-2xl border border-white/10 text-right">
+                <span className="text-[10px] text-gray-300 font-bold uppercase block">Por Cobrar</span>
+                <span className="text-lg font-black text-emerald-400">{formatUSD(totalConfirmed)}</span>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Pestañas Principales: Pólizas y Comisiones vs Invoices y Liquidaciones */}
+      <div className="flex border-b border-gray-200 gap-6">
+        <button
+          type="button"
+          onClick={() => setActiveMainTab('commissions')}
+          className={`pb-3 text-sm font-bold flex items-center gap-2 border-b-2 transition-all cursor-pointer ${
+            activeMainTab === 'commissions'
+              ? 'border-indigo-600 text-indigo-600'
+              : 'border-transparent text-gray-400 hover:text-gray-700'
+          }`}
+        >
+          <ShieldAlert className="w-4.5 h-4.5" />
+          <span>Pólizas y Comisiones ({filteredCommissions.length})</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setActiveMainTab('invoices')}
+          className={`pb-3 text-sm font-bold flex items-center gap-2 border-b-2 transition-all cursor-pointer ${
+            activeMainTab === 'invoices'
+              ? 'border-emerald-600 text-emerald-600'
+              : 'border-transparent text-gray-400 hover:text-gray-700'
+          }`}
+        >
+          <FileText className="w-4.5 h-4.5" />
+          <span>Invoices y Liquidaciones de Agentes ({filteredInvoices.length})</span>
+          {totalInvoicesRequested > 0 && (
+            <span className="px-2 py-0.5 text-[10px] bg-amber-500 text-white rounded-full font-black">
+              {totalInvoicesRequested} por revisar
+            </span>
+          )}
+        </button>
+      </div>
+
+      {/* Vista: Pólizas y Comisiones */}
+      {activeMainTab === 'commissions' && (
+        <>
+          {/* Dynamic KPI summary cards based on filtered results */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
         <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 flex flex-col justify-between">
           <div>
             <div className="flex items-center gap-4 mb-2">
@@ -867,7 +1016,7 @@ export default function CommissionsManager({ profile, rolePermissions }: { profi
           </div>
           
           <div className="flex self-start lg:self-auto bg-gray-100 p-1 rounded-xl border border-gray-200">
-            {(['all', 'confirmed', 'paid'] as const).map((f) => (
+            {(['all', 'confirmed', 'invoiced', 'paid'] as const).map((f) => (
               <button
                 key={f}
                 type="button"
@@ -876,7 +1025,7 @@ export default function CommissionsManager({ profile, rolePermissions }: { profi
                   filter === f ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'
                 }`}
               >
-                {f === 'all' ? 'Todas' : f === 'confirmed' ? 'Por Pagar' : 'Pagadas'}
+                {f === 'all' ? 'Todas' : f === 'confirmed' ? 'Por Cobrar' : f === 'invoiced' ? 'En Trámite' : 'Pagadas'}
               </button>
             ))}
           </div>
@@ -1013,20 +1162,31 @@ export default function CommissionsManager({ profile, rolePermissions }: { profi
             <button
               type="button"
               onClick={handleGenerateReport}
-              className="px-5 py-3 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-black rounded-xl transition-all shadow-lg shadow-emerald-600/20 uppercase tracking-widest flex items-center gap-2 cursor-pointer"
+              className="px-5 py-3 bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-black rounded-xl transition-all shadow-lg shadow-emerald-700/20 uppercase tracking-widest flex items-center gap-2 cursor-pointer"
             >
               <FileText className="w-4 h-4" />
               Generar Reporte
             </button>
             {selectedCommissionIds.some(id => commissions.find(c => c.id === id)?.commissionStatus === 'confirmed') && (
-              <button
-                type="button"
-                onClick={() => setShowBulkPaymentModal(true)}
-                className="px-5 py-3 bg-indigo-500 hover:bg-indigo-600 text-white text-xs font-black rounded-xl transition-all shadow-lg shadow-indigo-500/20 uppercase tracking-widest flex items-center gap-2 cursor-pointer"
-              >
-                Pagar Seleccionadas
-                <ArrowUpRight className="w-4.5 h-4.5" />
-              </button>
+              <>
+                <button
+                  type="button"
+                  onClick={() => setShowCreateInvoiceModal(true)}
+                  className="px-5 py-3 bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-black rounded-xl transition-all shadow-lg shadow-emerald-500/20 uppercase tracking-widest flex items-center gap-2 cursor-pointer"
+                  title="Generar Invoice y Liquidación Oficial para Cobro"
+                >
+                  <Receipt className="w-4 h-4" />
+                  Generar Invoice / Cobrar ({selectedCommissionIds.filter(id => commissions.find(c => c.id === id)?.commissionStatus === 'confirmed').length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowBulkPaymentModal(true)}
+                  className="px-5 py-3 bg-indigo-500 hover:bg-indigo-600 text-white text-xs font-black rounded-xl transition-all shadow-lg shadow-indigo-500/20 uppercase tracking-widest flex items-center gap-2 cursor-pointer"
+                >
+                  Pagar Seleccionadas
+                  <ArrowUpRight className="w-4.5 h-4.5" />
+                </button>
+              </>
             )}
             {selectedCommissionIds.some(id => commissions.find(c => c.id === id)?.commissionStatus === 'paid') && canDeleteCommissions && (
               <button
@@ -1129,10 +1289,28 @@ export default function CommissionsManager({ profile, rolePermissions }: { profi
                   </div>
                   <div className="mt-1">
                     <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase border ${
-                      c.commissionStatus === 'paid' ? 'bg-green-50 text-green-700 border-green-100' : 'bg-blue-50 text-blue-700 border-blue-100'
+                      c.commissionStatus === 'paid' ? 'bg-green-50 text-green-700 border-green-100' :
+                      c.commissionStatus === 'invoiced' ? 'bg-amber-50 text-amber-700 border-amber-100' :
+                      'bg-blue-50 text-blue-700 border-blue-100'
                     }`}>
-                      {c.commissionStatus === 'paid' ? 'Pagada' : 'Por Pagar'}
+                      {c.commissionStatus === 'paid' ? 'Pagada' : c.commissionStatus === 'invoiced' ? 'En Trámite' : 'Por Cobrar'}
                     </span>
+                    {c.commissionInvoiceId && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const targetInv = invoices.find(i => i.id === c.commissionInvoiceId);
+                          if (targetInv) {
+                            setSelectedInvoiceForDetail(targetInv);
+                          } else {
+                            setActiveMainTab('invoices');
+                          }
+                        }}
+                        className="block mt-1 text-[10px] font-bold text-emerald-600 hover:text-emerald-800 transition-colors"
+                      >
+                        Ver Invoice →
+                      </button>
+                    )}
                   </div>
                 </div>
 
@@ -1197,12 +1375,43 @@ export default function CommissionsManager({ profile, rolePermissions }: { profi
                 </button>
                 
                 {c.commissionStatus === 'confirmed' ? (
+                  <div className="flex items-center gap-2">
+                    <button 
+                      onClick={() => {
+                        setSelectedCommissionIds([c.id!]);
+                        setShowCreateInvoiceModal(true);
+                      }}
+                      className="px-3.5 py-2 bg-emerald-600 text-white rounded-xl text-xs font-bold hover:bg-emerald-700 transition-all flex items-center gap-1.5 shadow-sm shadow-emerald-200 cursor-pointer"
+                      title="Generar invoice y solicitar pago"
+                    >
+                      <Receipt className="w-3.5 h-3.5" />
+                      Cobrar / Invoice
+                    </button>
+                    {isAdminUser && (
+                      <button 
+                        onClick={() => setSelectedCommission(c)}
+                        className="px-3 py-2 bg-green-700 text-white rounded-xl text-xs font-bold hover:bg-green-800 transition-all flex items-center gap-1.5 shadow-sm shadow-green-100 cursor-pointer"
+                        title="Registrar pago directo"
+                      >
+                        Pagar
+                        <ArrowUpRight className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+                ) : c.commissionStatus === 'invoiced' ? (
                   <button 
-                    onClick={() => setSelectedCommission(c)}
-                    className="px-4 py-2 bg-green-600 text-white rounded-xl text-xs font-bold hover:bg-green-700 transition-all flex items-center gap-2 shadow-sm shadow-green-100 cursor-pointer"
+                    onClick={() => {
+                      const targetInv = invoices.find(i => i.id === c.commissionInvoiceId);
+                      if (targetInv) {
+                        setSelectedInvoiceForDetail(targetInv);
+                      } else {
+                        setActiveMainTab('invoices');
+                      }
+                    }}
+                    className="px-3.5 py-2 bg-amber-500 text-white rounded-xl text-xs font-bold hover:bg-amber-600 transition-all flex items-center gap-1.5 shadow-sm shadow-amber-100 cursor-pointer"
                   >
-                    Pagar comisión
-                    <ArrowUpRight className="w-4 h-4" />
+                    <FileText className="w-3.5 h-3.5" />
+                    Ver Invoice
                   </button>
                 ) : (
                   <div className="flex items-center gap-2">
@@ -1234,6 +1443,264 @@ export default function CommissionsManager({ profile, rolePermissions }: { profi
           ))
         )}
       </div>
+        </>
+      )}
+
+      {/* Vista: Invoices y Liquidaciones de Agentes */}
+      {activeMainTab === 'invoices' && (
+        <div className="space-y-6 animate-in fade-in duration-300">
+          {/* KPI Summary Cards para Invoices */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
+            <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 flex flex-col justify-between">
+              <div>
+                <div className="flex items-center gap-4 mb-2">
+                  <div className="p-2 bg-blue-50 rounded-lg">
+                    <FileText className="w-5 h-5 text-blue-600" />
+                  </div>
+                  <span className="text-xs font-black text-gray-400 uppercase tracking-widest">Invoices Totales</span>
+                </div>
+                <p className="text-2xl font-black text-gray-900">{filteredInvoices.length}</p>
+              </div>
+              <p className="text-[10px] text-gray-400 font-bold mt-2 uppercase tracking-wider">
+                {invoices.length} en el sistema
+              </p>
+            </div>
+
+            <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 flex flex-col justify-between">
+              <div>
+                <div className="flex items-center gap-4 mb-2">
+                  <div className="p-2 bg-amber-50 rounded-lg">
+                    <Clock className="w-5 h-5 text-amber-600" />
+                  </div>
+                  <span className="text-xs font-black text-gray-400 uppercase tracking-widest">Por Revisar</span>
+                </div>
+                <p className="text-2xl font-black text-amber-600">{totalInvoicesRequested}</p>
+              </div>
+              <p className="text-[10px] text-gray-400 font-bold mt-2 uppercase tracking-wider">
+                {totalInvoicesApproved} aprobados para dispersión
+              </p>
+            </div>
+
+            <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 flex flex-col justify-between">
+              <div>
+                <div className="flex items-center gap-4 mb-2">
+                  <div className="p-2 bg-emerald-50 rounded-lg">
+                    <CheckCircle className="w-5 h-5 text-emerald-600" />
+                  </div>
+                  <span className="text-xs font-black text-gray-400 uppercase tracking-widest">Invoices Pagados</span>
+                </div>
+                <p className="text-2xl font-black text-emerald-600">{totalInvoicesPaidCount}</p>
+              </div>
+              <p className="text-[10px] text-gray-400 font-bold mt-2 uppercase tracking-wider">
+                Liquidados con comprobante bancario
+              </p>
+            </div>
+
+            <div className="bg-white p-6 rounded-2xl shadow-sm border border-gray-100 flex flex-col justify-between">
+              <div>
+                <div className="flex items-center gap-4 mb-2">
+                  <div className="p-2 bg-indigo-50 rounded-lg">
+                    <DollarSign className="w-5 h-5 text-indigo-600" />
+                  </div>
+                  <span className="text-xs font-black text-gray-400 uppercase tracking-widest">Total Liquidado USD</span>
+                </div>
+                <p className="text-2xl font-black text-indigo-900">{formatUSD(totalInvoicesPaidUSD)}</p>
+              </div>
+              <p className="text-[10px] text-gray-400 font-bold mt-2 uppercase tracking-wider">
+                ≈ {formatMXP(totalInvoicesPaidMXP)}
+              </p>
+            </div>
+          </div>
+
+          {/* Barra de Filtros y Búsqueda de Invoices */}
+          <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-6 flex flex-col sm:flex-row items-center justify-between gap-4">
+            <div className="relative flex-1 w-full max-w-md">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4.5 h-4.5 text-gray-400" />
+              <input
+                type="text"
+                placeholder="Buscar por folio, agente, email o factura..."
+                value={invoiceSearchTerm}
+                onChange={(e) => setInvoiceSearchTerm(e.target.value)}
+                className="w-full pl-10 pr-4 py-2.5 border border-gray-200 rounded-xl focus:ring-2 focus:ring-emerald-500 outline-none text-sm font-medium"
+              />
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              {(['all', 'requested', 'approved', 'paid', 'rejected'] as const).map((st) => (
+                <button
+                  key={st}
+                  type="button"
+                  onClick={() => setInvoiceStatusFilter(st)}
+                  className={`px-3.5 py-1.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                    invoiceStatusFilter === st
+                      ? 'bg-emerald-600 text-white shadow-sm'
+                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                  }`}
+                >
+                  {st === 'all' ? 'Todos' :
+                   st === 'requested' ? 'Solicitados' :
+                   st === 'approved' ? 'Aprobados' :
+                   st === 'paid' ? 'Pagados' : 'Rechazados'}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Listado de Invoices */}
+          <div className="space-y-4">
+            {filteredInvoices.length === 0 ? (
+              <div className="bg-white p-12 rounded-3xl border border-gray-100 text-center space-y-4">
+                <FileText className="w-12 h-12 text-gray-300 mx-auto" />
+                <div>
+                  <h3 className="text-base font-bold text-gray-800">No se encontraron invoices de comisiones</h3>
+                  <p className="text-xs text-gray-400 max-w-md mx-auto mt-1">
+                    {profile?.role === 'agent'
+                      ? 'Aún no has generado invoices para tus comisiones. Ve a la pestaña "Pólizas y Comisiones", selecciona las comisiones que desees y haz clic en "Generar Invoice / Solicitar Cobro".'
+                      : 'No hay solicitudes de invoice o liquidaciones que coincidan con los filtros seleccionados.'}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setActiveMainTab('commissions')}
+                  className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-black rounded-xl transition-all shadow-md cursor-pointer"
+                >
+                  Ir a Comisiones por Póliza
+                </button>
+              </div>
+            ) : (
+              filteredInvoices.map((inv) => (
+                <div
+                  key={inv.id}
+                  className="bg-white rounded-3xl border border-gray-200/80 p-6 hover:shadow-lg transition-all flex flex-col lg:flex-row lg:items-center justify-between gap-6"
+                >
+                  <div className="flex-1 grid grid-cols-1 md:grid-cols-3 gap-6">
+                    {/* Folio y Agente */}
+                    <div className="space-y-2">
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-xs font-black bg-[#1A2138] text-white px-2.5 py-1 rounded-lg">
+                          {inv.folio}
+                        </span>
+                        <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider ${
+                          inv.status === 'paid' ? 'bg-emerald-100 text-emerald-800 border border-emerald-200' :
+                          inv.status === 'approved' ? 'bg-blue-100 text-blue-800 border border-blue-200' :
+                          inv.status === 'rejected' ? 'bg-red-100 text-red-800 border border-red-200' :
+                          'bg-amber-100 text-amber-800 border border-amber-200'
+                        }`}>
+                          {inv.status === 'paid' ? 'Pagado' :
+                           inv.status === 'approved' ? 'Aprobado para Pago' :
+                           inv.status === 'rejected' ? 'Rechazado' : 'Solicitado'}
+                        </span>
+                      </div>
+
+                      <div>
+                        <h4 className="text-sm font-bold text-gray-900">{inv.agentName}</h4>
+                        <p className="text-xs text-gray-500">{inv.agentEmail}</p>
+                        {inv.agentTaxId && (
+                          <p className="text-[10px] text-gray-400 font-mono mt-0.5">RFC: {inv.agentTaxId}</p>
+                        )}
+                      </div>
+
+                      <p className="text-[10px] text-gray-400">
+                        Fecha: {inv.createdAt?.toDate ? format(inv.createdAt.toDate(), 'dd/MM/yyyy HH:mm') : 'Reciente'}
+                      </p>
+                    </div>
+
+                    {/* Importes y Pólizas */}
+                    <div className="flex flex-col justify-center space-y-1">
+                      <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">
+                        Total Comisión ({inv.policiesSummary?.length || 0} pólizas)
+                      </span>
+                      <p className="text-xl font-black text-indigo-900">
+                        {formatUSD(inv.totalCommissionUSD)}
+                      </p>
+                      <p className="text-xs font-bold text-emerald-600">
+                        ≈ {formatMXP(inv.totalCommissionMXP || (inv.totalCommissionUSD * (inv.exchangeRate || 1)))}
+                        <span className="text-[10px] text-gray-400 ml-1 font-normal">(T.C. ${(inv.exchangeRate || 1).toFixed(2)})</span>
+                      </p>
+                      {inv.bankInfo?.bankName && (
+                        <p className="text-[10px] text-gray-500">
+                          Dispersión: {inv.bankInfo.bankName} {inv.bankInfo.clabe ? `(CLABE: ...${inv.bankInfo.clabe.slice(-4)})` : ''}
+                        </p>
+                      )}
+                    </div>
+
+                    {/* Documentos del Invoice (Soporta Ambos: Liquidación Oficial y Factura Fiscal del Agente) */}
+                    <div className="flex flex-col justify-center space-y-2">
+                      <span className="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Documentos</span>
+                      <div className="flex flex-wrap items-center gap-2">
+                        {/* 1. Liquidación Oficial PDF emitida por la plataforma */}
+                        <button
+                          type="button"
+                          onClick={() => generateCommissionInvoicePDF(inv, companySettings)}
+                          className="px-2.5 py-1.5 bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-xl text-xs font-bold flex items-center gap-1.5 border border-blue-200 transition-colors cursor-pointer"
+                          title="Descargar Liquidación Oficial PDF con membrete institucional"
+                        >
+                          <Download className="w-3.5 h-3.5" />
+                          Liquidación PDF
+                        </button>
+
+                        {/* 2. Factura Fiscal Agente PDF */}
+                        {inv.agentInvoicePdfUrl && (
+                          <a
+                            href={inv.agentInvoicePdfUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="px-2.5 py-1.5 bg-emerald-50 hover:bg-emerald-100 text-emerald-700 rounded-xl text-xs font-bold flex items-center gap-1.5 border border-emerald-200 transition-colors"
+                            title="Ver Factura Fiscal del Agente"
+                          >
+                            <FileCheck className="w-3.5 h-3.5" />
+                            Factura PDF
+                          </a>
+                        )}
+
+                        {/* 3. CFDI XML */}
+                        {inv.agentInvoiceXmlUrl && (
+                          <a
+                            href={inv.agentInvoiceXmlUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="px-2.5 py-1.5 bg-purple-50 hover:bg-purple-100 text-purple-700 rounded-xl text-xs font-bold flex items-center gap-1.5 border border-purple-200 transition-colors"
+                            title="Descargar CFDI XML del Agente"
+                          >
+                            <Download className="w-3.5 h-3.5" />
+                            CFDI XML
+                          </a>
+                        )}
+
+                        {/* 4. Comprobante Bancario de Pago */}
+                        {inv.paymentReceiptUrl && (
+                          <a
+                            href={inv.paymentReceiptUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="px-2.5 py-1.5 bg-gray-100 hover:bg-gray-200 text-gray-700 rounded-xl text-xs font-bold flex items-center gap-1.5 border border-gray-300 transition-colors"
+                            title="Ver Comprobante de Pago Bancario"
+                          >
+                            <Receipt className="w-3.5 h-3.5" />
+                            Comprobante
+                          </a>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Acciones */}
+                  <div className="flex items-center gap-3 pt-3 lg:pt-0 lg:border-l lg:border-gray-100 lg:pl-6 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedInvoiceForDetail(inv)}
+                      className="px-4 py-2.5 bg-gray-900 hover:bg-black text-white rounded-xl text-xs font-bold transition-all flex items-center gap-2 cursor-pointer shadow-sm"
+                    >
+                      <span>Ver Detalle y Gestión</span>
+                      <ArrowUpRight className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
 
       <TransactionModal 
         isOpen={!!selectedInsuranceForTransactions}
@@ -1841,6 +2308,38 @@ export default function CommissionsManager({ profile, rolePermissions }: { profi
             </div>
           </div>
         </div>
+      )}
+
+      {/* Modal: Crear Invoice de Comisiones */}
+      {showCreateInvoiceModal && (
+        <CreateCommissionInvoiceModal
+          selectedCommissions={commissions.filter(c => c.id && selectedCommissionIds.includes(c.id))}
+          currentUserProfile={profile}
+          exchangeRate={paymentExchangeRate || 20}
+          companySettings={companySettings}
+          onClose={() => setShowCreateInvoiceModal(false)}
+          onSuccess={(newInvoice) => {
+            setShowCreateInvoiceModal(false);
+            setSelectedCommissionIds([]);
+            setSelectedInvoiceForDetail(newInvoice);
+            setActiveMainTab('invoices');
+          }}
+        />
+      )}
+
+      {/* Modal: Detalle de Invoice / Liquidación */}
+      {selectedInvoiceForDetail && (
+        <CommissionInvoiceDetailModal
+          invoice={selectedInvoiceForDetail}
+          currentUserProfile={profile}
+          companySettings={companySettings}
+          isAdminUser={isAdminUser}
+          onClose={() => setSelectedInvoiceForDetail(null)}
+          onInvoiceUpdated={(updated) => {
+            setSelectedInvoiceForDetail(updated);
+            setInvoices(prev => prev.map(inv => inv.id === updated.id ? updated : inv));
+          }}
+        />
       )}
     </div>
   );

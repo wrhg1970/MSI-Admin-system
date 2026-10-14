@@ -100,6 +100,8 @@ export function getPolicyNumber(policy: Policy | undefined, age: number): string
       code = '26 CC015654';
     } else if (nameLower.includes('oro') && nameLower.includes('con deducible')) {
       code = '26 CC015655';
+    } else if (nameLower.includes('oro')) {
+      code = '26 CC015655';
     } else if (nameLower.includes('plata') && nameLower.includes('con deducible')) {
       code = '26 CC015656';
     } else if (nameLower.includes('plata') && nameLower.includes('sin deducible')) {
@@ -121,6 +123,115 @@ export function getPolicyNumber(policy: Policy | undefined, age: number): string
 
   const suffix = age < 25 ? '-UNDER25' : '-OVER25';
   return `${code}${suffix}`;
+}
+
+/**
+ * Resolves the standardized policy folio/code (e.g., '26 CC015655-OVER25' or '26 CC015655-UNDER25')
+ * and the human-readable policy type (e.g., 'Oro con deducible', 'Plata con deducible')
+ * for any insurance record.
+ */
+export function resolvePolicyFolioAndType(
+  ins: InsuranceRequest,
+  policies: Policy[] = []
+): { folio: string; plan: string; tipoPoliza: string; policy?: Policy } {
+  const policy = findPolicyPrioritized(ins.policyId, policies)
+    || policies.find(p => p.id === ins.policyId || p.CodigoPoliza === ins.policyId)
+    || policies.find(p => p.name?.toLowerCase() === (ins.policyName || ins.plan || '').toLowerCase());
+
+  // 1. Calculate age accurately
+  let effectiveAge = typeof ins.age === 'number' && !isNaN(ins.age) && ins.age > 0 ? ins.age : 0;
+  if (!effectiveAge && ins.birthDate) {
+    try {
+      const birth = new Date(ins.birthDate);
+      if (!isNaN(birth.getTime())) {
+        const ref = ins.startDate ? new Date(ins.startDate) : new Date();
+        let a = ref.getFullYear() - birth.getFullYear();
+        const m = ref.getMonth() - birth.getMonth();
+        if (m < 0 || (m === 0 && ref.getDate() < birth.getDate())) {
+          a--;
+        }
+        effectiveAge = Math.max(0, a);
+      }
+    } catch {
+      // fallback
+    }
+  }
+
+  // If age is still 0/unknown, default to >= 25 as adult standard
+  const isUnder25 = effectiveAge > 0 && effectiveAge < 25;
+  const suffix = isUnder25 ? '-UNDER25' : '-OVER25';
+
+  // 2. Resolve policy folio / number
+  let folio = '';
+  const rawPolNumber = (ins.policyNumber || '').trim();
+
+  // If already contains a valid custom or CareMed code
+  if (rawPolNumber && !rawPolNumber.includes('undefined') && !/^[0-9a-f-]{20,}$/i.test(rawPolNumber)) {
+    if (rawPolNumber.endsWith('-UNDER25') || rawPolNumber.endsWith('-OVER25')) {
+      folio = rawPolNumber;
+    } else {
+      folio = `${rawPolNumber}${suffix}`;
+    }
+  }
+
+  // Fallback to getPolicyNumber with policy object
+  if (!folio && policy) {
+    const code = getPolicyNumber(policy, effectiveAge || 25);
+    if (code && !/^[0-9a-f-]{20,}$/i.test(code)) {
+      folio = code;
+    }
+  }
+
+  // If still no standard code or was a raw UUID, derive from policyName or plan
+  if (!folio || /^[0-9a-f-]{20,}$/i.test(folio)) {
+    const text = `${ins.policyName || ''} ${ins.plan || ''}`.toLowerCase();
+    if (text.includes('platinum') || text.includes('platino')) {
+      folio = `26 CC015658${suffix}`;
+    } else if (text.includes('bronce') && text.includes('con deducible')) {
+      folio = `26 CC015653${suffix}`;
+    } else if (text.includes('oro') && text.includes('sin deducible')) {
+      folio = `26 CC015654${suffix}`;
+    } else if (text.includes('oro') || text.includes('gold')) {
+      folio = `26 CC015655${suffix}`;
+    } else if (text.includes('plata') && text.includes('sin deducible')) {
+      folio = `26 CC015657${suffix}`;
+    } else if (text.includes('plata') || text.includes('silver')) {
+      folio = `26 CC015656${suffix}`;
+    } else {
+      // Primary standard CareMed code: 26 CC015655-OVER25 or 26 CC015655-UNDER25
+      folio = `26 CC015655${suffix}`;
+    }
+  }
+
+  // Ensure age suffix is consistently present
+  if (!folio.endsWith('-UNDER25') && !folio.endsWith('-OVER25')) {
+    folio = `${folio}${suffix}`;
+  }
+
+  // 3. Resolve Tipo de Póliza
+  let tipoPoliza = policy?.name || policy?.NombrePoliza || ins.policyName || '';
+  if (!tipoPoliza || tipoPoliza === 'Póliza' || tipoPoliza === 'Standard') {
+    if (folio.includes('015655')) {
+      tipoPoliza = 'Oro con deducible';
+    } else if (folio.includes('015654')) {
+      tipoPoliza = 'Oro sin deducible';
+    } else if (folio.includes('015656')) {
+      tipoPoliza = 'Plata con deducible';
+    } else if (folio.includes('015657')) {
+      tipoPoliza = 'Plata sin deducible';
+    } else if (folio.includes('015653')) {
+      tipoPoliza = 'Bronce con deducible';
+    } else if (folio.includes('015658')) {
+      tipoPoliza = 'Platinum con deducible';
+    } else {
+      tipoPoliza = 'Oro con deducible';
+    }
+  }
+
+  // 4. Resolve Plan
+  const plan = ins.plan || policy?.plan || 'CareMed';
+
+  return { folio, plan, tipoPoliza, policy };
 }
 
 function getPolicyTier(nameOrId: string | undefined): string {

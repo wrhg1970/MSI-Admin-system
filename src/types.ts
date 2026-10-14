@@ -30,8 +30,15 @@ export interface UserProfile {
   displayName: string;
   role: UserRole;
   commission?: number;
+  canCreatePolicies?: boolean;
+  taxId?: string;
+  bankName?: string;
+  bankAccount?: string;
+  clabe?: string;
   createdAt: any;
   parentAgentId?: string;
+  clientId?: string;
+  linkedAgents?: any[];
 }
 
 export type PlanType = string;
@@ -127,6 +134,7 @@ export interface InsuranceRequest {
   clientId?: string;
   linkedAgentId?: string;
   agentId?: string;
+  agente?: string;
   firstName: string;
   lastName: string;
   gender?: 'M' | 'F';
@@ -158,7 +166,8 @@ export interface InsuranceRequest {
   totalPaid?: number;
   paymentMethod?: string;
   receiptNumber?: string;
-  commissionStatus?: 'pending' | 'confirmed' | 'paid';
+  commissionInvoiceId?: string;
+  commissionStatus?: 'pending' | 'confirmed' | 'invoiced' | 'paid';
   commissionPaymentDate?: string;
   commissionPaymentMethod?: string;
   commissionPaymentReceipt?: string;
@@ -217,6 +226,9 @@ export interface Payment {
   receiptUrl?: string;
   receiptNumber?: string;
   invoiceNumber?: string;
+  reconciledWithStatement?: boolean;
+  statementUploadId?: string;
+  statementRecordId?: string;
   createdAt?: any;
   updatedAt?: any;
   createdBy?: string;
@@ -277,6 +289,10 @@ export interface StatementRecord {
   providerId?: string;
   reconciled: boolean;
   reconciledAt?: any;
+  receiptNumber?: string;
+  matchedPaymentId?: string;
+  matchedInsuranceId?: string;
+  reconciledType?: 'auto_matched' | 'manual';
   createdAt: any;
 }
 
@@ -440,3 +456,45 @@ export interface HistoricalRecord {
   comisionComentario: string;
   createdAt?: any;
 }
+
+export interface CommissionInvoice {
+  id?: string;
+  folio: string;
+  agentId: string;
+  agentName: string;
+  agentEmail: string;
+  agentTaxId?: string;
+  bankInfo?: {
+    bankName?: string;
+    clabe?: string;
+    account?: string;
+  };
+  policyIds: string[];
+  policiesSummary: {
+    id: string;
+    policyNumber?: string;
+    insuredName: string;
+    startDate: string;
+    totalPrice: number;
+    commissionAmount: number;
+    currency: string;
+  }[];
+  currency: 'USD' | 'MXP';
+  exchangeRate?: number;
+  totalCommissionUSD: number;
+  totalCommissionMXP?: number;
+  status: 'requested' | 'approved' | 'paid' | 'rejected';
+  createdAt: any;
+  requestedAt?: any;
+  paidAt?: any;
+  paymentMethod?: string;
+  paymentReference?: string;
+  paymentReceiptUrl?: string; // Comprobante bancario subido por administración
+  agentInvoicePdfUrl?: string; // Factura / Recibo PDF subido por el agente
+  agentInvoiceXmlUrl?: string; // CFDI XML subido por el agente
+  agentInvoiceFolio?: string;  // Folio de factura del agente
+  agentNotes?: string;
+  adminNotes?: string;
+  invoicePdfUrl?: string;      // PDF oficial emitido por la plataforma
+}
+

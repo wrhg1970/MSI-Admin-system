@@ -2772,10 +2772,12 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
   }, [insurances]);
 
   const uniqueClients = useMemo(() => {
-    const clientsMap = new Map();
+    const clientsMap = new Map<string, string>();
     insurances.forEach(ins => {
-      if (!clientsMap.has(ins.email)) {
-        clientsMap.set(ins.email, `${ins.firstName} ${ins.lastName}`);
+      if (!ins.email) return;
+      const cleanEmail = ins.email.trim().toLowerCase();
+      if (!clientsMap.has(cleanEmail)) {
+        clientsMap.set(cleanEmail, `${ins.firstName || ''} ${ins.lastName || ''}`.trim() || cleanEmail);
       }
     });
     return Array.from(clientsMap.entries()).map(([email, name]) => ({ email, name })).sort((a, b) => a.name.localeCompare(b.name));
@@ -4084,8 +4086,8 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
                   className="w-full p-3 bg-gray-50 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none text-sm"
                 >
                   <option value="all">Todos los Clientes</option>
-                  {uniqueClients.map(client => (
-                    <option key={client.email} value={client.email}>{client.name}</option>
+                  {uniqueClients.map((client, idx) => (
+                    <option key={`uc-${client.email}-${idx}`} value={client.email}>{client.name}</option>
                   ))}
                 </select>
               </div>
@@ -5351,8 +5353,8 @@ export default function AdminPanel({ profile, rolePermissions }: { profile: User
                   <option value="all">
                     {availableArSubAgents.length === 0 ? 'Sin subagentes disponibles' : 'Todos los Subagentes'}
                   </option>
-                  {availableArSubAgents.map((sa) => (
-                    <option key={`${sa.id}-${sa.email}`} value={sa.email || sa.id}>
+                  {availableArSubAgents.map((sa, idx) => (
+                    <option key={`ar-sa-${sa.id || ''}-${sa.email || ''}-${idx}`} value={sa.email || sa.id}>
                       {sa.name} {sa.email ? `(${sa.email})` : ''} {!selectedArClient && sa.parentName ? `— ${sa.parentName}` : ''}
                     </option>
                   ))}

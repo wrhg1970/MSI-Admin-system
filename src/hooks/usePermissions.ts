@@ -11,7 +11,10 @@ export function usePermissions(profile: UserProfile | null, rolePermissions: Cus
       if (profile?.role === 'seguros') return ['dashboard', 'request', 'clients', 'policies', 'catalogs', 'insurance-plans'].includes(menuId);
       if (profile?.role === 'administracion') return ['dashboard', 'reports', 'commissions'].includes(menuId);
       if (profile?.role === 'agent') {
-        if (['dashboard', 'request', 'clients', 'policies', 'commissions', 'historico'].includes(menuId)) return action === 'view' || action === 'create' || action === 'edit';
+        if (menuId === 'request') {
+          return profile?.canCreatePolicies === true;
+        }
+        if (['dashboard', 'clients', 'policies', 'commissions', 'historico'].includes(menuId)) return action === 'view' || action === 'create' || action === 'edit';
         return false;
       }
       if (profile?.role === 'client') {

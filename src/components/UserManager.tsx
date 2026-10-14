@@ -24,8 +24,17 @@ export default function UserManager() {
   const [editingRole, setEditingRole] = useState<CustomRole | null>(null);
   const [activeTab, setActiveTab] = useState<'users' | 'roles'>('users');
   const [isAddingUser, setIsAddingUser] = useState(false);
-  const [newUser, setNewUser] = useState({ email: '', role: 'client' as UserRole | string, commission: 0 });
   const [isAddingRole, setIsAddingRole] = useState(false);
+  const [newUser, setNewUser] = useState({ 
+    email: '', 
+    role: 'agent' as UserRole | string, 
+    commission: 0,
+    canCreatePolicies: true,
+    taxId: '',
+    bankName: '',
+    bankAccount: '',
+    clabe: ''
+  });
   const [confirmModal, setConfirmModal] = useState<{
     isOpen: boolean;
     title: string;
@@ -90,12 +99,26 @@ export default function UserManager() {
         email,
         role: newUser.role,
         commission: newUser.commission || 0,
+        canCreatePolicies: newUser.role === 'agent' ? (newUser.canCreatePolicies ?? true) : false,
+        taxId: newUser.taxId || '',
+        bankName: newUser.bankName || '',
+        bankAccount: newUser.bankAccount || '',
+        clabe: newUser.clabe || '',
         createdAt: serverTimestamp(),
         displayName: email.split('@')[0]
       });
 
       setIsAddingUser(false);
-      setNewUser({ email: '', role: 'client', commission: 0 });
+      setNewUser({ 
+        email: '', 
+        role: 'agent' as UserRole | string, 
+        commission: 0,
+        canCreatePolicies: true,
+        taxId: '',
+        bankName: '',
+        bankAccount: '',
+        clabe: ''
+      });
       alert('Usuario pre-registrado con éxito');
     } catch (error) {
       handleFirestoreError(error, OperationType.WRITE, 'users');
@@ -109,7 +132,12 @@ export default function UserManager() {
     try {
       await updateDoc(doc(db, 'users', editingUser.uid), {
         role: editingUser.role,
-        commission: editingUser.commission || 0
+        commission: editingUser.commission || 0,
+        canCreatePolicies: editingUser.role === 'agent' ? (editingUser.canCreatePolicies || false) : false,
+        taxId: editingUser.taxId || '',
+        bankName: editingUser.bankName || '',
+        bankAccount: editingUser.bankAccount || '',
+        clabe: editingUser.clabe || ''
       });
       setEditingUser(null);
     } catch (error) {
@@ -202,6 +230,7 @@ export default function UserManager() {
                 <th className="px-6 py-4 text-[10px] font-bold text-gray-400 uppercase tracking-wider">Usuario</th>
                 <th className="px-6 py-4 text-[10px] font-bold text-gray-400 uppercase tracking-wider">Rol Actual</th>
                 <th className="px-6 py-4 text-[10px] font-bold text-gray-400 uppercase tracking-wider">Comisión</th>
+                <th className="px-6 py-4 text-[10px] font-bold text-gray-400 uppercase tracking-wider">Emite Pólizas</th>
                 <th className="px-6 py-4 text-[10px] font-bold text-gray-400 uppercase tracking-wider text-right">Acciones</th>
               </tr>
             </thead>
@@ -226,6 +255,21 @@ export default function UserManager() {
                   </td>
                   <td className="px-6 py-4 text-sm text-gray-600">
                     {user.role === 'agent' ? `${user.commission || 0}%` : '-'}
+                  </td>
+                  <td className="px-6 py-4">
+                    {user.role === 'agent' ? (
+                      user.canCreatePolicies ? (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                          <CheckCircle2 className="w-3 h-3 text-emerald-600" /> Habilitado
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[11px] font-medium bg-gray-100 text-gray-500">
+                          Solo cotiza
+                        </span>
+                      )
+                    ) : (
+                      <span className="text-gray-400">-</span>
+                    )}
                   </td>
                   <td className="px-6 py-4 text-right">
                     <div className="flex justify-end gap-2">
@@ -442,17 +486,70 @@ export default function UserManager() {
               </div>
 
               {newUser.role === 'agent' && (
-                <div>
-                  <label className="block text-xs font-bold text-gray-500 uppercase mb-2">Comisión (%)</label>
-                  <input
-                    type="number"
-                    step="0.1"
-                    min="0"
-                    max="100"
-                    value={newUser.commission}
-                    onChange={e => setNewUser({ ...newUser, commission: parseFloat(e.target.value) })}
-                    className="w-full p-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
-                  />
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-bold text-gray-500 uppercase mb-2">Comisión (%)</label>
+                    <input
+                      type="number"
+                      step="0.1"
+                      min="0"
+                      max="100"
+                      value={newUser.commission}
+                      onChange={e => setNewUser({ ...newUser, commission: parseFloat(e.target.value) || 0 })}
+                      className="w-full p-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none text-sm"
+                    />
+                  </div>
+
+                  <label className="flex items-start gap-3 p-3.5 bg-blue-50/70 border border-blue-200 rounded-xl cursor-pointer hover:bg-blue-50 transition-colors">
+                    <input
+                      type="checkbox"
+                      checked={newUser.canCreatePolicies ?? true}
+                      onChange={e => setNewUser({ ...newUser, canCreatePolicies: e.target.checked })}
+                      className="mt-0.5 w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500"
+                    />
+                    <div>
+                      <span className="text-xs font-bold text-gray-900 block">¿Permitir crear / emitir pólizas?</span>
+                      <span className="text-[11px] text-gray-500 block leading-tight mt-0.5">
+                        Si se activa, el agente podrá emitir pólizas directamente desde el sistema.
+                      </span>
+                    </div>
+                  </label>
+
+                  <div className="pt-2 border-t border-gray-100 space-y-3">
+                    <p className="text-[11px] font-bold text-gray-400 uppercase tracking-wider">Datos para Liquidación e Invoices de Comisiones</p>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-[11px] font-semibold text-gray-600 mb-1">RFC / Tax ID</label>
+                        <input
+                          type="text"
+                          placeholder="RFC del agente"
+                          value={newUser.taxId || ''}
+                          onChange={e => setNewUser({ ...newUser, taxId: e.target.value.toUpperCase() })}
+                          className="w-full p-2.5 border border-gray-200 rounded-lg text-xs outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-semibold text-gray-600 mb-1">Banco</label>
+                        <input
+                          type="text"
+                          placeholder="Ej. BBVA"
+                          value={newUser.bankName || ''}
+                          onChange={e => setNewUser({ ...newUser, bankName: e.target.value })}
+                          className="w-full p-2.5 border border-gray-200 rounded-lg text-xs outline-none focus:ring-2 focus:ring-blue-500"
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-semibold text-gray-600 mb-1">CLABE Interbancaria / Cuenta</label>
+                      <input
+                        type="text"
+                        placeholder="CLABE a 18 dígitos"
+                        value={newUser.clabe || ''}
+                        onChange={e => setNewUser({ ...newUser, clabe: e.target.value, bankAccount: e.target.value })}
+                        className="w-full p-2.5 border border-gray-200 rounded-lg text-xs outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+                      />
+                    </div>
+                  </div>
                 </div>
               )}
 
@@ -517,15 +614,68 @@ export default function UserManager() {
               </div>
 
               {editingUser.role === 'agent' && (
-                <div>
-                  <label className="block text-xs font-bold text-gray-500 uppercase mb-2">Comisión (%)</label>
-                  <input
-                    type="number"
-                    step="0.1"
-                    value={editingUser.commission || 0}
-                    onChange={e => setEditingUser({ ...editingUser, commission: parseFloat(e.target.value) })}
-                    className="w-full p-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none"
-                  />
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-bold text-gray-500 uppercase mb-2">Comisión (%)</label>
+                    <input
+                      type="number"
+                      step="0.1"
+                      value={editingUser.commission || 0}
+                      onChange={e => setEditingUser({ ...editingUser, commission: parseFloat(e.target.value) || 0 })}
+                      className="w-full p-3 border border-gray-200 rounded-xl focus:ring-2 focus:ring-blue-500 outline-none text-sm"
+                    />
+                  </div>
+
+                  <label className="flex items-start gap-3 p-3.5 bg-blue-50/70 border border-blue-200 rounded-xl cursor-pointer hover:bg-blue-50 transition-colors">
+                    <input
+                      type="checkbox"
+                      checked={editingUser.canCreatePolicies || false}
+                      onChange={e => setEditingUser({ ...editingUser, canCreatePolicies: e.target.checked })}
+                      className="mt-0.5 w-4 h-4 text-blue-600 rounded border-gray-300 focus:ring-blue-500"
+                    />
+                    <div>
+                      <span className="text-xs font-bold text-gray-900 block">¿Permitir crear / emitir pólizas?</span>
+                      <span className="text-[11px] text-gray-500 block leading-tight mt-0.5">
+                        Si se activa, el agente podrá emitir pólizas directamente desde el sistema con su comisión asignada.
+                      </span>
+                    </div>
+                  </label>
+
+                  <div className="pt-2 border-t border-gray-100 space-y-3">
+                    <p className="text-[11px] font-bold text-gray-400 uppercase tracking-wider">Datos para Liquidación e Invoices de Comisiones</p>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-[11px] font-semibold text-gray-600 mb-1">RFC / Tax ID</label>
+                        <input
+                          type="text"
+                          placeholder="RFC del agente"
+                          value={editingUser.taxId || ''}
+                          onChange={e => setEditingUser({ ...editingUser, taxId: e.target.value.toUpperCase() })}
+                          className="w-full p-2.5 border border-gray-200 rounded-lg text-xs outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[11px] font-semibold text-gray-600 mb-1">Banco</label>
+                        <input
+                          type="text"
+                          placeholder="Ej. BBVA"
+                          value={editingUser.bankName || ''}
+                          onChange={e => setEditingUser({ ...editingUser, bankName: e.target.value })}
+                          className="w-full p-2.5 border border-gray-200 rounded-lg text-xs outline-none focus:ring-2 focus:ring-blue-500"
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-semibold text-gray-600 mb-1">CLABE Interbancaria / Cuenta</label>
+                      <input
+                        type="text"
+                        placeholder="CLABE a 18 dígitos"
+                        value={editingUser.clabe || editingUser.bankAccount || ''}
+                        onChange={e => setEditingUser({ ...editingUser, clabe: e.target.value, bankAccount: e.target.value })}
+                        className="w-full p-2.5 border border-gray-200 rounded-lg text-xs outline-none focus:ring-2 focus:ring-blue-500 font-mono"
+                      />
+                    </div>
+                  </div>
                 </div>
               )}
 

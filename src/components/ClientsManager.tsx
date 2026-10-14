@@ -1,12 +1,14 @@
 import React, { useState, useEffect, useMemo } from 'react';
+import { useSearchParams, useNavigate } from 'react-router-dom';
 import { collection, query, onSnapshot, addDoc, doc, updateDoc, deleteDoc, serverTimestamp, orderBy } from 'firebase/firestore';
 import { db, handleFirestoreError, OperationType } from '../firebase';
 import { Client, ClientType, LinkedAgent, Country, UserProfile, CustomRole } from '../types';
-import { Plus, Trash2, Edit2, Save, X, Users, Building2, User, FileText, Phone, Mail, MapPin, Globe, CreditCard, Receipt, LayoutGrid, List, Eye, ChevronLeft, ChevronRight, Download, AlertTriangle, CheckSquare, Square, Check, RefreshCw } from 'lucide-react';
+import { Plus, Trash2, Edit2, Save, X, Users, Building2, User, FileText, Phone, Mail, MapPin, Globe, CreditCard, Receipt, LayoutGrid, List, Eye, ChevronLeft, ChevronRight, Download, AlertTriangle, CheckSquare, Square, Check, RefreshCw, LayoutDashboard, Layers, ShieldCheck } from 'lucide-react';
 import TransactionModal from './TransactionModal';
 import ClientDetailModal from './ClientDetailModal';
 import ConfirmModal from './ConfirmModal';
 import GoogleContactsImportModal from './GoogleContactsImportModal';
+import ClientsDashboard from './ClientsDashboard';
 import { usePermissions } from '../hooks/usePermissions';
 import Papa from 'papaparse';
 import { useFirestoreData } from '../context/FirestoreDataContext';
@@ -16,6 +18,7 @@ import { format } from 'date-fns';
 import { useCompany } from '../App';
 import { loadLogoData } from '../lib/pdfGenerator';
 import { APP_LOGO } from '../constants';
+import { useImpersonation } from '../context/ImpersonationContext';
 
 interface ClientsManagerProps {
   profile: UserProfile | null;
@@ -24,8 +27,23 @@ interface ClientsManagerProps {
 
 export default function ClientsManager({ profile, rolePermissions }: ClientsManagerProps) {
   const { hasPermission } = usePermissions(profile, rolePermissions);
-  const { clients, countries } = useFirestoreData();
+  const { clients, countries, insurances, payments, users, latestExchangeRate, policies } = useFirestoreData();
   const { settings: companySettings } = useCompany();
+  const navigate = useNavigate();
+  const { setImpersonatedAgent, isRealSuperAdmin } = useImpersonation();
+
+  // URL Tab handling: Dashboard, Agentes & Corporativos, Individuales, etc.
+  const [searchParams, setSearchParams] = useSearchParams();
+  const urlTab = searchParams.get('tab');
+  const activeTab: 'dashboard' | 'agents' | 'individuals' | 'all' | 'subagents' | 'duplicates' = (
+    urlTab === 'dashboard' || 
+    urlTab === 'agents' || 
+    urlTab === 'individuals' || 
+    urlTab === 'all' || 
+    urlTab === 'subagents' || 
+    urlTab === 'duplicates'
+  ) ? urlTab : 'dashboard';
+
   const [editingClient, setEditingClient] = useState<Client | null>(null);
   const [isAddingClient, setIsAddingClient] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
@@ -41,7 +59,6 @@ export default function ClientsManager({ profile, rolePermissions }: ClientsMana
   const [pageSize, setPageSize] = useState(20);
 
   // Duplicates State
-  const [activeView, setActiveView] = useState<'all' | 'duplicates' | 'subagents'>('all');
   const [matchCriterion, setMatchCriterion] = useState<'name' | 'email' | 'phone'>('name');
   const [selectedDuplicateIds, setSelectedDuplicateIds] = useState<string[]>([]);
   const [isDeletingDuplicates, setIsDeletingDuplicates] = useState(false);
@@ -812,30 +829,37 @@ export default function ClientsManager({ profile, rolePermissions }: ClientsMana
 
   const filteredClients = useMemo(() => {
     const list = clients.filter(c => {
+      let matchesTab = true;
+      if (activeTab === 'agents') {
+        matchesTab = c.type === 'Agent' || c.type === 'Corporate';
+      } else if (activeTab === 'individuals') {
+        matchesTab = c.type === 'Individual';
+      }
+
       const matchesType = filterType === 'All' || c.type === filterType;
       const searchLower = searchTerm.toLowerCase();
       const name = c.type === 'Individual' 
-        ? `${c.firstName} ${c.lastName}`.toLowerCase()
-        : `${c.legalName} ${c.commercialName}`.toLowerCase();
-      const matchesSearch = name.includes(searchLower) || c.email.toLowerCase().includes(searchLower) || c.rfc.toLowerCase().includes(searchLower);
-      return matchesType && matchesSearch;
+        ? `${c.firstName || ''} ${c.lastName || ''}`.toLowerCase()
+        : `${c.legalName || ''} ${c.commercialName || ''}`.toLowerCase();
+      const matchesSearch = name.includes(searchLower) || (c.email || '').toLowerCase().includes(searchLower) || (c.rfc || '').toLowerCase().includes(searchLower);
+      return matchesTab && matchesType && matchesSearch;
     });
 
     return list.sort((a, b) => {
       const nameA = a.type === 'Individual' 
-        ? `${a.firstName} ${a.lastName}`.toLowerCase()
+        ? `${a.firstName || ''} ${a.lastName || ''}`.toLowerCase()
         : (a.commercialName || a.legalName || '').toLowerCase();
       const nameB = b.type === 'Individual' 
-        ? `${b.firstName} ${b.lastName}`.toLowerCase()
+        ? `${b.firstName || ''} ${b.lastName || ''}`.toLowerCase()
         : (b.commercialName || b.legalName || '').toLowerCase();
       return nameA.localeCompare(nameB, 'es', { sensitivity: 'base' });
     });
-  }, [clients, filterType, searchTerm]);
+  }, [clients, filterType, searchTerm, activeTab]);
 
-  // Reset page when filters change
+  // Reset page when filters or activeTab change
   useEffect(() => {
     setCurrentPage(1);
-  }, [filterType, searchTerm]);
+  }, [filterType, searchTerm, activeTab]);
 
   const paginatedClients = useMemo(() => {
     const startIndex = (currentPage - 1) * pageSize;
@@ -848,34 +872,52 @@ export default function ClientsManager({ profile, rolePermissions }: ClientsMana
     <div className="space-y-6">
       <header className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Gestión de Clientes</h1>
-          <p className="text-gray-500">Administra agentes, corporativos e individuales</p>
+          <h1 className="text-2xl font-black text-gray-900 tracking-tight">
+            {activeTab === 'dashboard' ? 'Dashboard de Clientes & KPIs' :
+             activeTab === 'agents' ? 'Agentes & Clientes Corporativos' :
+             activeTab === 'individuals' ? 'Clientes Individuales' :
+             activeTab === 'subagents' ? 'Comisiones de Agentes y Subagentes' :
+             activeTab === 'duplicates' ? 'Depurador de Duplicados' :
+             'Gestión de Clientes'}
+          </h1>
+          <p className="text-xs text-gray-500 font-medium">
+            {activeTab === 'dashboard' ? 'Métricas en tiempo real, cartera 360°, compras, pagos y comisiones' :
+             activeTab === 'agents' ? 'Directorio de agentes comerciales, brokers y despachos corporativos' :
+             activeTab === 'individuals' ? 'Directorio de clientes particulares y titulares de póliza' :
+             activeTab === 'subagents' ? 'Estructura comercial, porcentajes de comisión y descuentos' :
+             activeTab === 'duplicates' ? 'Identificación y depuración segura de registros repetidos' :
+             'Administra agentes, corporativos e individuales'}
+          </p>
         </div>
         <div className="flex items-center gap-2">
-          <button
-            onClick={handleDownloadClients}
-            disabled={filteredClients.length === 0}
-            className="bg-green-50 text-green-700 border border-green-100 hover:bg-green-150 px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 shadow-sm disabled:opacity-50"
-            title="Descargar la lista de clientes actual en formato CSV"
-          >
-            <Download className="w-4 h-4" />
-            Descargar Clientes
-          </button>
+          {activeTab !== 'dashboard' && (
+            <button
+              onClick={handleDownloadClients}
+              disabled={filteredClients.length === 0}
+              className="bg-green-50 text-green-700 border border-green-100 hover:bg-green-150 px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 shadow-sm disabled:opacity-50"
+              title="Descargar la lista de clientes actual en formato CSV"
+            >
+              <Download className="w-4 h-4" />
+              Descargar Clientes
+            </button>
+          )}
           {hasPermission('clients', 'create') && (
             <>
-              <button
-                onClick={() => setIsImportingContacts(true)}
-                className="bg-blue-50 text-blue-700 border border-blue-100 hover:bg-blue-100 px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 shadow-sm mr-1"
-                title="Importar clientes desde sus contactos de Google"
-              >
-                <img src="https://www.google.com/favicon.ico" alt="Google" className="w-4 h-4" referrerPolicy="no-referrer" />
-                Importar de Google
-              </button>
+              {activeTab !== 'dashboard' && (
+                <button
+                  onClick={() => setIsImportingContacts(true)}
+                  className="bg-blue-50 text-blue-700 border border-blue-100 hover:bg-blue-100 px-4 py-2 rounded-lg text-sm font-medium transition-colors flex items-center gap-2 shadow-sm mr-1"
+                  title="Importar clientes desde sus contactos de Google"
+                >
+                  <img src="https://www.google.com/favicon.ico" alt="Google" className="w-4 h-4" referrerPolicy="no-referrer" />
+                  Importar de Google
+                </button>
+              )}
               <button
                 onClick={() => {
                   setIsAddingClient(true);
                   setEditingClient({
-                    type: 'Individual',
+                    type: activeTab === 'agents' ? 'Agent' : 'Individual',
                     phone: '',
                     email: '',
                     address: '',
@@ -892,10 +934,10 @@ export default function ClientsManager({ profile, rolePermissions }: ClientsMana
                     createdAt: null
                   });
                 }}
-                className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors flex items-center gap-2 shadow-sm"
+                className="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors flex items-center gap-2 shadow-sm cursor-pointer"
               >
                 <Plus className="w-4 h-4" />
-                Nuevo Cliente
+                {activeTab === 'agents' ? 'Nuevo Agente / Corp' : 'Nuevo Cliente'}
               </button>
             </>
           )}
@@ -905,31 +947,74 @@ export default function ClientsManager({ profile, rolePermissions }: ClientsMana
       {/* View Selector Tabs */}
       <div className="flex border-b border-gray-200 mt-4 overflow-x-auto scrollbar-thin">
         <button
-          onClick={() => setActiveView('all')}
-          className={`py-3 px-6 text-sm font-black border-b-2 transition-all whitespace-nowrap ${
-            activeView === 'all'
-              ? 'border-blue-600 text-blue-600'
-              : 'border-transparent text-gray-500 hover:text-gray-700'
+          onClick={() => setSearchParams({ tab: 'dashboard' })}
+          className={`py-3 px-5 text-sm font-black border-b-2 transition-all flex items-center gap-2 whitespace-nowrap cursor-pointer ${
+            activeTab === 'dashboard'
+              ? 'border-violet-600 text-violet-600 bg-violet-50/50'
+              : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
           }`}
         >
+          <LayoutDashboard className="w-4 h-4 text-violet-600" />
+          Dashboard & KPIs
+        </button>
+        <button
+          onClick={() => navigate('/client-access')}
+          className="py-3 px-5 text-sm font-black border-b-2 transition-all flex items-center gap-2 whitespace-nowrap cursor-pointer border-transparent text-gray-500 hover:text-violet-700 hover:border-violet-300 hover:bg-violet-50/30"
+          title="Ir a Acceso Clientes: Expediente 360° para Agentes y Corporativos"
+        >
+          <ShieldCheck className="w-4 h-4 text-violet-600" />
+          <span>Acceso Clientes 360°</span>
+          <span className="px-1.5 py-0.2 bg-violet-100 text-violet-700 rounded text-[10px] font-bold">Nuevo</span>
+        </button>
+        <button
+          onClick={() => setSearchParams({ tab: 'agents' })}
+          className={`py-3 px-5 text-sm font-black border-b-2 transition-all flex items-center gap-2 whitespace-nowrap cursor-pointer ${
+            activeTab === 'agents'
+              ? 'border-purple-600 text-purple-600 bg-purple-50/50'
+              : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+          }`}
+        >
+          <Building2 className="w-4 h-4 text-purple-600" />
+          Agentes & Corporativos ({clients.filter(c => c.type === 'Agent' || c.type === 'Corporate').length})
+        </button>
+        <button
+          onClick={() => setSearchParams({ tab: 'individuals' })}
+          className={`py-3 px-5 text-sm font-black border-b-2 transition-all flex items-center gap-2 whitespace-nowrap cursor-pointer ${
+            activeTab === 'individuals'
+              ? 'border-blue-600 text-blue-600 bg-blue-50/50'
+              : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+          }`}
+        >
+          <User className="w-4 h-4 text-blue-600" />
+          Individuales ({clients.filter(c => c.type === 'Individual').length})
+        </button>
+        <button
+          onClick={() => setSearchParams({ tab: 'all' })}
+          className={`py-3 px-5 text-sm font-black border-b-2 transition-all flex items-center gap-2 whitespace-nowrap cursor-pointer ${
+            activeTab === 'all'
+              ? 'border-slate-800 text-slate-900 bg-slate-50'
+              : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+          }`}
+        >
+          <Users className="w-4 h-4 text-gray-600" />
           Todos los Clientes ({clients.length})
         </button>
         <button
-          onClick={() => setActiveView('subagents')}
-          className={`py-3 px-6 text-sm font-black border-b-2 transition-all flex items-center gap-2 whitespace-nowrap ${
-            activeView === 'subagents'
-              ? 'border-indigo-600 text-indigo-600'
+          onClick={() => setSearchParams({ tab: 'subagents' })}
+          className={`py-3 px-5 text-sm font-black border-b-2 transition-all flex items-center gap-2 whitespace-nowrap cursor-pointer ${
+            activeTab === 'subagents'
+              ? 'border-indigo-600 text-indigo-600 bg-indigo-50/50'
               : 'border-transparent text-gray-500 hover:text-indigo-600 hover:border-indigo-200'
           }`}
         >
-          <Users className="w-4 h-4 text-indigo-500" />
-          Comisiones de Agentes y Subagentes ({clients.filter(c => c.type === 'Agent' || c.type === 'Corporate').length})
+          <Layers className="w-4 h-4 text-indigo-500" />
+          Comisiones de Subagentes
         </button>
         <button
-          onClick={() => setActiveView('duplicates')}
-          className={`py-3 px-6 text-sm font-black border-b-2 transition-all flex items-center gap-2 whitespace-nowrap ${
-            activeView === 'duplicates'
-              ? 'border-red-650 text-red-650'
+          onClick={() => setSearchParams({ tab: 'duplicates' })}
+          className={`py-3 px-5 text-sm font-black border-b-2 transition-all flex items-center gap-2 whitespace-nowrap cursor-pointer ${
+            activeTab === 'duplicates'
+              ? 'border-red-600 text-red-600 bg-red-50/50'
               : 'border-transparent text-gray-500 hover:text-red-500 hover:border-red-200'
           }`}
         >
@@ -938,32 +1023,70 @@ export default function ClientsManager({ profile, rolePermissions }: ClientsMana
         </button>
       </div>
 
-      {activeView === 'all' && (
+      {/* DASHBOARD VIEW */}
+      {activeTab === 'dashboard' && (
+        <ClientsDashboard
+          clients={clients}
+          insurances={insurances}
+          payments={payments}
+          users={users}
+          policies={policies}
+          latestExchangeRate={latestExchangeRate}
+          onSelectClientForDetail={(client) => setSelectedClientForDetail(client)}
+          onNavigateToTab={(tab) => {
+            setSearchParams({ tab });
+          }}
+        />
+      )}
+
+      {/* CLIENTS LIST VIEW (ALL, AGENTS, OR INDIVIDUALS) */}
+      {(activeTab === 'all' || activeTab === 'agents' || activeTab === 'individuals') && (
         <>
           <div className="bg-white p-4 rounded-xl shadow-sm border border-gray-100 flex flex-wrap gap-4 items-end">
             <div className="flex-1 min-w-[200px]">
               <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Buscar</label>
               <input
                 type="text"
-                placeholder="Nombre, email o RFC..."
+                placeholder={
+                  activeTab === 'agents' 
+                    ? 'Buscar agente, corporativo, RFC, email o teléfono...' 
+                    : activeTab === 'individuals'
+                    ? 'Buscar cliente individual, nombre, RFC, email...'
+                    : 'Nombre, email o RFC...'
+                }
                 value={searchTerm}
                 onChange={e => setSearchTerm(e.target.value)}
                 className="w-full p-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-sm"
               />
             </div>
-            <div>
-              <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Tipo</label>
-              <select
-                value={filterType}
-                onChange={e => setFilterType(e.target.value as any)}
-                className="p-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-sm"
-              >
-                <option value="All">Todos</option>
-                <option value="Agent">Agente</option>
-                <option value="Corporate">Corporativo</option>
-                <option value="Individual">Individual</option>
-              </select>
-            </div>
+            {activeTab === 'agents' ? (
+              <div>
+                <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Subtipo</label>
+                <select
+                  value={filterType}
+                  onChange={e => setFilterType(e.target.value as any)}
+                  className="p-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none text-sm font-semibold"
+                >
+                  <option value="All">Todos (Agentes y Corp)</option>
+                  <option value="Agent">Sólo Agentes</option>
+                  <option value="Corporate">Sólo Corporativos</option>
+                </select>
+              </div>
+            ) : activeTab === 'all' ? (
+              <div>
+                <label className="block text-xs font-bold text-gray-500 uppercase mb-1">Tipo</label>
+                <select
+                  value={filterType}
+                  onChange={e => setFilterType(e.target.value as any)}
+                  className="p-2 border border-gray-200 rounded-lg focus:ring-2 focus:ring-blue-500 outline-none text-sm font-semibold"
+                >
+                  <option value="All">Todos</option>
+                  <option value="Agent">Agente</option>
+                  <option value="Corporate">Corporativo</option>
+                  <option value="Individual">Individual</option>
+                </select>
+              </div>
+            ) : null}
             <div className="flex bg-gray-100 p-1 rounded-lg border border-gray-200">
               <button
                 onClick={() => setViewMode('grid')}
@@ -984,8 +1107,8 @@ export default function ClientsManager({ profile, rolePermissions }: ClientsMana
 
           {viewMode === 'grid' ? (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {paginatedClients.map((c) => (
-                <div key={c.id} className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden hover:shadow-md transition-shadow group relative">
+              {paginatedClients.map((c, cIdx) => (
+                <div key={c.id ? `grid-c-${c.id}-${cIdx}` : `grid-idx-${cIdx}`} className="bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden hover:shadow-md transition-shadow group relative">
                   <div className="p-6">
                     <div className="flex justify-between items-start mb-4">
                       <div className="flex items-center gap-3">
@@ -1006,6 +1129,27 @@ export default function ClientsManager({ profile, rolePermissions }: ClientsMana
                         </div>
                       </div>
                       <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                        {isRealSuperAdmin && (c.type === 'Agent' || c.type === 'Corporate') && (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setImpersonatedAgent({
+                                uid: c.id,
+                                clientId: c.id,
+                                email: c.email || '',
+                                displayName: c.commercialName || c.legalName || `${c.firstName || ''} ${c.lastName || ''}`.trim() || c.email || 'Agente',
+                                commission: Number(c.commission || 0),
+                                canCreatePolicies: true,
+                                linkedAgents: c.linkedAgents || [],
+                              });
+                              navigate('/client-access');
+                            }}
+                            className="p-1.5 text-gray-400 hover:text-purple-600 hover:bg-purple-50 rounded"
+                            title="Ver y experimentar portal como este Agente"
+                          >
+                            <Eye className="w-4 h-4 text-purple-600" />
+                          </button>
+                        )}
                         <button onClick={() => setSelectedClientForDetail(c)} className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded" title="Ver Detalles">
                           <Eye className="w-4 h-4" />
                         </button>
@@ -1080,8 +1224,8 @@ export default function ClientsManager({ profile, rolePermissions }: ClientsMana
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-50">
-                    {paginatedClients.map((c) => (
-                      <tr key={c.id} className="hover:bg-gray-50/50 transition-colors group">
+                    {paginatedClients.map((c, cIdx) => (
+                      <tr key={c.id ? `row-c-${c.id}-${cIdx}` : `row-idx-${cIdx}`} className="hover:bg-gray-50/50 transition-colors group">
                         <td className="px-6 py-4">
                           <div className="flex items-center gap-3">
                             <div className={`p-1.5 rounded-lg ${
@@ -1134,6 +1278,27 @@ export default function ClientsManager({ profile, rolePermissions }: ClientsMana
                         </td>
                         <td className="px-6 py-4 text-right">
                           <div className="flex justify-end gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                            {isRealSuperAdmin && (c.type === 'Agent' || c.type === 'Corporate') && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setImpersonatedAgent({
+                                    uid: c.id,
+                                    clientId: c.id,
+                                    email: c.email || '',
+                                    displayName: c.commercialName || c.legalName || `${c.firstName || ''} ${c.lastName || ''}`.trim() || c.email || 'Agente',
+                                    commission: Number(c.commission || 0),
+                                    canCreatePolicies: true,
+                                    linkedAgents: c.linkedAgents || [],
+                                  });
+                                  navigate('/client-access');
+                                }}
+                                className="p-1.5 text-gray-400 hover:text-purple-600 hover:bg-purple-50 rounded"
+                                title="Ver y experimentar portal como este Agente"
+                              >
+                                <Eye className="w-4 h-4 text-purple-600" />
+                              </button>
+                            )}
                             <button onClick={() => setSelectedClientForDetail(c)} className="p-1.5 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded" title="Ver Detalles">
                               <Eye className="w-4 h-4" />
                             </button>
@@ -1224,7 +1389,7 @@ export default function ClientsManager({ profile, rolePermissions }: ClientsMana
         </>
       )}
 
-      {activeView === 'duplicates' && (
+      {activeTab === 'duplicates' && (
         <div className="space-y-6 animate-in fade-in duration-300">
           {/* Header Info Banner */}
           <div className="bg-amber-50 border border-amber-200 rounded-xl p-6 flex flex-col md:flex-row gap-4 items-start">
@@ -1345,7 +1510,7 @@ export default function ClientsManager({ profile, rolePermissions }: ClientsMana
                 </p>
                 <div className="mt-4">
                   <button
-                    onClick={() => setActiveView('all')}
+                    onClick={() => setSearchParams({ tab: 'all' })}
                     className="text-xs font-bold text-blue-600 hover:text-blue-700"
                   >
                     Volver a todos los clientes
@@ -1388,7 +1553,7 @@ export default function ClientsManager({ profile, rolePermissions }: ClientsMana
 
                         return (
                           <div 
-                            key={client.id} 
+                            key={client.id ? `dup-c-${client.id}-${clientIdx}` : `dup-idx-${clientIdx}`} 
                             className={`p-5 transition-colors flex flex-col md:flex-row md:items-center justify-between gap-4 ${
                               isSelected ? 'bg-red-50/20' : isOldest ? 'bg-blue-50/10' : ''
                             }`}
@@ -1477,7 +1642,7 @@ export default function ClientsManager({ profile, rolePermissions }: ClientsMana
         </div>
       )}
 
-      {activeView === 'subagents' && (
+      {activeTab === 'subagents' && (
         <div className="space-y-6 animate-in fade-in duration-300">
           {/* Header Info Banner */}
           <div className="bg-indigo-50 border border-indigo-150 rounded-xl p-5 flex flex-col md:flex-row gap-4 items-start justify-between">
@@ -1613,7 +1778,7 @@ export default function ClientsManager({ profile, rolePermissions }: ClientsMana
                       </td>
                     </tr>
                   ) : (
-                    filteredSubagentClients.flatMap(c => {
+                    filteredSubagentClients.flatMap((c, cIdx) => {
                       const clientData = getClientData(c);
                       const displayName = c.type === 'Individual' ? `${c.firstName} ${c.lastName}` : c.commercialName || c.legalName;
                       const isCommMod = isParentCommissionModified(c);
@@ -1624,7 +1789,7 @@ export default function ClientsManager({ profile, rolePermissions }: ClientsMana
 
                       // Main agent row
                       rows.push(
-                        <tr key={`parent-${c.id}`} className={`hover:bg-gray-50/50 transition-colors ${parentHasChanges ? 'bg-indigo-50/30' : ''}`}>
+                        <tr key={`parent-${c.id || c.email || cIdx}-${cIdx}`} className={`hover:bg-gray-50/50 transition-colors ${parentHasChanges ? 'bg-indigo-50/30' : ''}`}>
                           <td className="px-6 py-3">
                             <div className="flex items-center gap-2.5">
                               <div className={`p-1.5 rounded-lg shrink-0 ${c.type === 'Agent' ? 'bg-purple-100 text-purple-600' : 'bg-blue-100 text-blue-600'}`}>
@@ -1713,13 +1878,13 @@ export default function ClientsManager({ profile, rolePermissions }: ClientsMana
 
                       // Render subagents
                       if (clientData.linkedAgents && clientData.linkedAgents.length > 0) {
-                        clientData.linkedAgents.forEach(sa => {
+                        clientData.linkedAgents.forEach((sa, saIdx) => {
                           const isSaCommMod = isSubagentCommissionModified(c, sa.id);
                           const isSaDiscMod = isSubagentDiscountModified(c, sa.id);
                           const saHasChanges = isSaCommMod || isSaDiscMod;
 
                           rows.push(
-                            <tr key={`sa-${c.id}-${sa.id}`} className={`hover:bg-gray-50/30 transition-colors bg-gray-50/15 ${saHasChanges ? 'bg-amber-50/30 border-l-2 border-amber-500' : ''}`}>
+                            <tr key={`sa-${c.id || c.email || cIdx}-${sa.id || sa.email || saIdx}-${saIdx}`} className={`hover:bg-gray-50/30 transition-colors bg-gray-50/15 ${saHasChanges ? 'bg-amber-50/30 border-l-2 border-amber-500' : ''}`}>
                               <td className="px-6 py-2 pl-12">
                                 <div className="flex items-center gap-1.5">
                                   <span className="text-gray-300 font-mono select-none">└─</span>
@@ -2147,8 +2312,8 @@ export default function ClientsManager({ profile, rolePermissions }: ClientsMana
                     </div>
                     
                     <div className="space-y-3">
-                      {editingClient.linkedAgents?.map((agent) => (
-                        <div key={agent.id} className="grid grid-cols-1 md:grid-cols-5 gap-3 p-4 bg-gray-50 rounded-xl relative group">
+                      {editingClient.linkedAgents?.map((agent, agentIdx) => (
+                        <div key={agent.id ? `edit-la-${agent.id}-${agentIdx}` : `edit-la-${agent.email || agentIdx}-${agentIdx}`} className="grid grid-cols-1 md:grid-cols-5 gap-3 p-4 bg-gray-50 rounded-xl relative group">
                           <button
                             type="button"
                             onClick={() => removeLinkedAgent(agent.id)}

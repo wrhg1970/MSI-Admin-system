@@ -320,7 +320,7 @@ export function FirestoreDataProvider({ children, userId }: FirestoreDataProvide
     });
 
     const unsubActionTypes = onSnapshot(query(collection(db, 'actionTypes'), orderBy('action')), (snap) => {
-      setActionTypes(snap.docs.map(doc => doc.data() as any));
+      setActionTypes(snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as any)));
       setLoading(prev => ({ ...prev, actionTypes: false }));
     }, (error) => {
       handleSubError(error, 'actionTypes');

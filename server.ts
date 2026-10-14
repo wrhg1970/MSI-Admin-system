@@ -42,7 +42,8 @@ async function startServer() {
       break;
     }
   }
-  const PORT = portArg || parseInt(process.env.PORT || '3000', 10);
+  // Environment constraint: Dev server must run on port 3000 (nginx listens on 8080 and proxies to 3000)
+  const PORT = portArg || 3000;
 
   // Use larger limit for PDF attachments and capture rawBody for webhook signature validation
   app.use(express.json({ 
@@ -77,7 +78,18 @@ async function startServer() {
     }
 
     if (!userExists) {
-      return res.status(403).json({ error: "El correo electrónico no está registrado en el sistema. Solicite registro a un Administrador." });
+      try {
+        const clientSnap = await adminDb.collection('clients').where('email', '==', emailLower).get();
+        if (!clientSnap.empty) {
+          userExists = true;
+        }
+      } catch (dbErr) {
+        console.error("Error querying clients collection for OTP request:", dbErr);
+      }
+    }
+
+    if (!userExists) {
+      return res.status(403).json({ error: "El correo electrónico no está registrado como agente o usuario en el sistema. Solicite registro a un Administrador." });
     }
 
     const code = Math.floor(100000 + Math.random() * 900000).toString();
@@ -149,6 +161,17 @@ async function startServer() {
         }
       } catch (dbErr) {
         console.error("Error querying users collection for OTP verification:", dbErr);
+      }
+    }
+
+    if (!userExists) {
+      try {
+        const clientSnap = await adminDb.collection('clients').where('email', '==', emailLower).get();
+        if (!clientSnap.empty) {
+          userExists = true;
+        }
+      } catch (dbErr) {
+        console.error("Error querying clients collection for OTP verification:", dbErr);
       }
     }
 
@@ -899,8 +922,10 @@ EXTRACTION INSTRUCTIONS:
    - For Latin American bank statements with DD/MM/YYYY or DD/MM, convert accurately to YYYY-MM-DD.
    - Infer the year from the statement header or statement date period if missing on individual lines.
 4. The 'description' field:
-   - Clean, concise text with the merchant name, beneficiary, or movement description.
-5. EXCLUSION:
+   - Clean, concise text with the merchant name, beneficiary, or movement description. Include any visible reference number, folio, check number, receipt number (No. de Recibo), or authorization code.
+5. The 'receiptNumber' field (optional):
+   - If a specific receipt number, check number, folio, or reference number is clearly visible on the movement line (e.g. REC-1234, #9482, FOLIO-102), extract it here. Otherwise leave empty string.
+6. EXCLUSION:
    - DO NOT include summary rows or balances (e.g. "Beginning balance", "Ending balance", "Total deposits", "Total withdrawals", "Saldo anterior", "Saldo actual", "Total abonos", "Total cargos"). Only extract individual line item transactions.
 
 Return the result as an array of JSON objects matching the schema.`
@@ -918,7 +943,8 @@ Return the result as an array of JSON objects matching the schema.`
                 date: { type: Type.STRING },
                 description: { type: Type.STRING },
                 amount: { type: Type.NUMBER },
-                type: { type: Type.STRING, enum: ["income", "expense"] }
+                type: { type: Type.STRING, enum: ["income", "expense"] },
+                receiptNumber: { type: Type.STRING }
               },
               required: ["date", "description", "amount", "type"]
             }
