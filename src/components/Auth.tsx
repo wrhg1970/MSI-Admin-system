@@ -73,6 +73,15 @@ export default function Auth() {
     }
   };
 
+  const readJson = async (resp: Response) => {
+    const text = await resp.text();
+    try {
+      return text ? JSON.parse(text) : {};
+    } catch {
+      throw new Error('El servidor no respondió. Espere unos segundos e intente de nuevo.');
+    }
+  };
+
   const handleRequestOTP = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!email) return;
@@ -85,7 +94,7 @@ export default function Auth() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: normalizedEmail })
       });
-      const data = await resp.json();
+      const data = await readJson(resp);
       if (!resp.ok) throw new Error(data.error || 'Error al enviar código');
       
       setMessage(data.message || `Código enviado a ${normalizedEmail}`);
@@ -115,13 +124,19 @@ export default function Auth() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: normalizedEmail, code })
       });
-      const data = await resp.json();
+      const data = await readJson(resp);
       if (!resp.ok) throw new Error(data.error || 'Código inválido');
       
       localStorage.setItem('verified_email', normalizedEmail);
       await signInAnonymously(auth);
     } catch (err: any) {
-      setError(err.message);
+      const code = String(err?.code || '');
+      if (code.includes('operation-not-allowed') || code.includes('admin-restricted')) {
+        localStorage.removeItem('verified_email');
+        setError('El acceso anónimo de Firebase está desactivado. Pida habilitarlo en Authentication para entrar con OTP.');
+      } else {
+        setError(err.message);
+      }
     } finally {
       setLoading(false);
     }

@@ -13,6 +13,12 @@ import { initializeApp, getApps } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
 import firebaseConfig from "./firebase-applet-config.json";
 
+// Firebase Admin has no service account on this host. Credential lookup rejects
+// outside the request promise and would exit the process (HTML 502 from the proxy).
+process.on("unhandledRejection", (reason) => {
+  console.error("Unhandled rejection:", reason);
+});
+
 const defaultApp = getApps().length === 0
   ? initializeApp({
       projectId: firebaseConfig.projectId
@@ -55,41 +61,33 @@ async function startServer() {
 
   // In-memory OTP storage (Email -> {code, expires})
   const otpStore = new Map<string, { code: string, expires: number }>();
+  const otpRequestLog = new Map<string, number[]>();
 
+  const tooManyOtpRequests = (emailLower: string) => {
+    const now = Date.now();
+    const recent = (otpRequestLog.get(emailLower) || []).filter((ts) => now - ts < 10 * 60 * 1000);
+    if (recent.length >= 5) {
+      otpRequestLog.set(emailLower, recent);
+      return true;
+    }
+    recent.push(now);
+    otpRequestLog.set(emailLower, recent);
+    return false;
+  };
+
+  // Registration is enforced after sign-in (App.tsx). Do not query Firebase Admin here:
+  // missing server credentials crash the process and the proxy returns an HTML 502.
   // API Route: Request OTP
   app.post("/api/auth/send-otp", async (req, res) => {
     const { email } = req.body;
-    if (!email) return res.status(400).json({ error: "Email requerido" });
+    if (!email || typeof email !== "string") return res.status(400).json({ error: "Email requerido" });
 
     const emailLower = email.trim().toLowerCase();
-    const superAdmins = ['ventas@misegurointernacional.com', 'wrhg1970@gmail.com'];
-    const isSuperAdmin = superAdmins.includes(emailLower);
-
-    let userExists = isSuperAdmin;
-    if (!userExists) {
-      try {
-        const userSnap = await adminDb.collection('users').where('email', '==', emailLower).get();
-        if (!userSnap.empty) {
-          userExists = true;
-        }
-      } catch (dbErr) {
-        console.error("Error querying users collection for OTP request:", dbErr);
-      }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailLower)) {
+      return res.status(400).json({ error: "Email requerido" });
     }
-
-    if (!userExists) {
-      try {
-        const clientSnap = await adminDb.collection('clients').where('email', '==', emailLower).get();
-        if (!clientSnap.empty) {
-          userExists = true;
-        }
-      } catch (dbErr) {
-        console.error("Error querying clients collection for OTP request:", dbErr);
-      }
-    }
-
-    if (!userExists) {
-      return res.status(403).json({ error: "El correo electrónico no está registrado como agente o usuario en el sistema. Solicite registro a un Administrador." });
+    if (tooManyOtpRequests(emailLower)) {
+      return res.status(429).json({ error: "Demasiados intentos. Espere unos minutos e intente de nuevo." });
     }
 
     const code = Math.floor(100000 + Math.random() * 900000).toString();
@@ -146,39 +144,9 @@ async function startServer() {
   // API Route: Verify OTP
   app.post("/api/auth/verify-otp", async (req, res) => {
     const { email, code } = req.body;
-    if (!email || !code) return res.status(400).json({ error: "Email y código requeridos" });
+    if (!email || typeof email !== "string" || !code) return res.status(400).json({ error: "Email y código requeridos" });
 
     const emailLower = email.trim().toLowerCase();
-    const superAdmins = ['ventas@misegurointernacional.com', 'wrhg1970@gmail.com'];
-    const isSuperAdmin = superAdmins.includes(emailLower);
-
-    let userExists = isSuperAdmin;
-    if (!userExists) {
-      try {
-        const userSnap = await adminDb.collection('users').where('email', '==', emailLower).get();
-        if (!userSnap.empty) {
-          userExists = true;
-        }
-      } catch (dbErr) {
-        console.error("Error querying users collection for OTP verification:", dbErr);
-      }
-    }
-
-    if (!userExists) {
-      try {
-        const clientSnap = await adminDb.collection('clients').where('email', '==', emailLower).get();
-        if (!clientSnap.empty) {
-          userExists = true;
-        }
-      } catch (dbErr) {
-        console.error("Error querying clients collection for OTP verification:", dbErr);
-      }
-    }
-
-    if (!userExists) {
-      return res.status(403).json({ error: "El correo electrónico no está registrado en el sistema." });
-    }
-
     const stored = otpStore.get(emailLower);
     if (!stored) return res.status(400).json({ error: "No se encontró un código para este email" });
 
